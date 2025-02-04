@@ -72,6 +72,7 @@ class TodoApp:
         
         ttk.Button(control_frame, text="Add Task", command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Remove Task", command=self.remove_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Edit Task", command=self.edit_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Character Info", command=self.show_character).pack(side=tk.LEFT, padx=5)
 
     def sort_column(self, column, reverse):
@@ -189,6 +190,58 @@ class TodoApp:
             self.update_character_labels()
             self.save_tasks(tasks)
             self.refresh_task_list()
+        
+    def edit_task(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a task to edit")
+            return
+        
+        index = self.tree.index(selected[0])
+        tasks = self.load_tasks()
+        if 0 <= index < len(tasks):
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Edit Task")
+            
+            ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=5)
+            task_entry = ttk.Entry(dialog, width=40)
+            task_entry.grid(row=0, column=1, padx=5, pady=5)
+            task_entry.insert(0, tasks[index][0])
+            
+            ttk.Label(dialog, text="Due Date:").grid(row=1, column=0, padx=5, pady=5)
+            date_entry = DateEntry(dialog,
+                                 date_pattern="mm-dd-yyyy",
+                                 background="darkblue", 
+                                 foreground="white",
+                                 borderwidth=2)
+            date_entry.grid(row=1, column=1, padx=5, pady=5)
+            date_entry.set_date(datetime.strptime(tasks[index][1], "%m-%d-%Y"))
+            
+            ttk.Label(dialog, text="Priority (1-5):").grid(row=2, column=0, padx=5, pady=5)
+            priority_entry = ttk.Spinbox(dialog, from_=1, to=5)
+            priority_entry.grid(row=2, column=1, padx=5, pady=5)
+            priority_entry.insert(0, tasks[index][2])
+            
+            def validate_and_edit():
+                date = self.parse_date(date_entry.get())
+                if not date:
+                    messagebox.showerror("Error", "Invalid date format")
+                    return
+                
+                try:
+                    priority = int(priority_entry.get())
+                    if not 1 <= priority <= 5:
+                        raise ValueError
+                except ValueError:
+                    messagebox.showerror("Error", "Priority must be 1-5")
+                    return
+                
+                tasks[index] = (task_entry.get(), date, priority)
+                self.save_tasks(tasks)
+                self.refresh_task_list()
+                dialog.destroy()
+                
+            ttk.Button(dialog, text="Save", command=validate_and_edit).grid(row=3, columnspan=2, pady=10)
 
     def refresh_task_list(self):
         self.tree.delete(*self.tree.get_children())
