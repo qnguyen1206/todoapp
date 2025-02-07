@@ -9,6 +9,7 @@ from tkinter.font import Font
 
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
+VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"
 
 class TodoApp:
     def __init__(self, root):
@@ -29,6 +30,16 @@ class TodoApp:
         self.create_widgets()
         self.load_character()
         self.refresh_task_list()
+
+        # Version
+        self.version = "0.0.0"
+
+    def load_app_version(self):
+        try:
+            with open(VERSION_FILE, "r") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return "0.0.0 (dev)"
 
     def create_widgets(self):
         # Character stats frame
@@ -71,9 +82,22 @@ class TodoApp:
         control_frame.pack(pady=10, fill=tk.X)
         
         ttk.Button(control_frame, text="Add Task", command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Remove Task", command=self.remove_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Finish Task", command=self.remove_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Delete Task", command=self.delete_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Edit Task", command=self.edit_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Character Info", command=self.show_character).pack(side=tk.LEFT, padx=5)
+
+        # Version label at bottom right
+        version_frame = ttk.Frame(self.root)
+        version_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
+        
+        ttk.Label(
+            version_frame,
+            text=f"v {self.load_app_version()}",
+            font=('Helvetica', 8),
+            foreground="gray50",
+            anchor="e"  # Right-align text
+        ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
     def sort_column(self, column, reverse):
         # Get current tasks
@@ -242,6 +266,21 @@ class TodoApp:
                 dialog.destroy()
                 
             ttk.Button(dialog, text="Save", command=validate_and_edit).grid(row=3, columnspan=2, pady=10)
+
+    def delete_task(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a task to delete")
+            return
+        
+        index = self.tree.index(selected[0])
+        tasks = self.load_tasks()
+        if 0 <= index < len(tasks):
+            del tasks[index]
+            self.save_tasks(tasks)
+            self.refresh_task_list()        
+        else:
+            messagebox.showerror("Error", "Invalid task index")
 
     def refresh_task_list(self):
         self.tree.delete(*self.tree.get_children())
