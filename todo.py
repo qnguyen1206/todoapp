@@ -87,6 +87,12 @@ class TodoApp:
         ttk.Button(control_frame, text="Edit Task", command=self.edit_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Character Info", command=self.show_character).pack(side=tk.LEFT, padx=5)
 
+        # Add time display aligned to the right
+        self.time_label = ttk.Label(control_frame, font=('Helvetica', 12, 'bold'))
+        self.time_label.pack(side=tk.RIGHT, padx=10)
+        self.update_time()
+
+
         # Version label at bottom right
         version_frame = ttk.Frame(self.root)
         version_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
@@ -98,6 +104,12 @@ class TodoApp:
             foreground="gray50",
             anchor="e"  # Right-align text
         ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
+
+    def update_time(self):
+        current_time = datetime.now().strftime("%m-%d-%Y %H:%M:%S")
+        self.time_label.config(text=current_time)
+        self.root.after(1000, self.update_time)  # Update every second
+
 
     def sort_column(self, column, reverse):
         # Get current tasks
@@ -283,10 +295,44 @@ class TodoApp:
             messagebox.showerror("Error", "Invalid task index")
 
     def refresh_task_list(self):
-        self.tree.delete(*self.tree.get_children())
-        tasks = self.load_tasks()
+        self.tree.delete(*self.tree.get_children())  # Clear existing tasks
+        tasks = self.load_tasks()  # Load tasks from file
+        today = datetime.today().date()
+        
+        # Categorize tasks
+        overdue_tasks = []
+        today_tasks = []
+        upcoming_tasks = []
+
         for task in tasks:
+            task_name, due_date_str, priority = task
+            due_date = datetime.strptime(due_date_str, "%m-%d-%Y").date()
+
+            if due_date < today:
+                overdue_tasks.append(task)  # Overdue tasks
+            elif due_date == today:
+                today_tasks.append(task)  # Due today
+            else:
+                upcoming_tasks.append(task)  # Future tasks
+
+        # Sort each category
+        overdue_tasks.sort(key=lambda x: ((datetime.strptime(x[1], "%m-%d-%Y")), (int(x[2]))))  # Earliest first
+        today_tasks.sort(key=lambda x: int(x[2]))  # Sort by priority (higher first)
+        upcoming_tasks.sort(key=lambda x: ((datetime.strptime(x[1], "%m-%d-%Y")), (int(x[2]))))  # Earliest first
+
+        # Insert into Treeview with colors
+        for task in overdue_tasks:
+            self.tree.insert("", tk.END, values=task, tags=("overdue",))
+        for task in today_tasks:
+            self.tree.insert("", tk.END, values=task, tags=("today",))
+        for task in upcoming_tasks:
             self.tree.insert("", tk.END, values=task)
+
+        # Configure row colors
+        self.tree.tag_configure("overdue", foreground="red")
+        self.tree.tag_configure("today", foreground="orange")
+
+        # Update the remaining tasks count
         self.remaining_label.config(text=str(len(self.tree.get_children())))
 
     def load_tasks(self):

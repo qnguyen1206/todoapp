@@ -30,7 +30,6 @@ class Updater:
         try:
             response = urllib.request.urlopen(REPO_URL)
             data = json.load(response)
-            print(data)
             return data["tag_name"]
         except Exception as e:
             messagebox.showerror("Update Error", f"Failed to check updates: {str(e)}")

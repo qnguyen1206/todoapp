@@ -3,9 +3,12 @@ JAPN 1002 Plain negative verb test | 02-11-2025 | 1
 JAPN 1002 GH8-2 | 02-11-2025 | 1
 CS 3630 Project 2 | 02-12-2025 | 1
 JAPN 1002 GH9-1 | 02-20-2025 | 1
+CS 3600 Assignment 2 A-B | 02-21-2025 | 1
 JAPN 1002 KH9 | 02-25-2025 | 1
+CS 3600 Wrapper 2 | 02-25-2025 | 1
 CS 3001 Test 1 | 02-26-2025 | 1
 JAPN 1002 Te-form test | 02-27-2025 | 1
 JAPN 1002 GH9-2 | 02-27-2025 | 1
 InQnity Project Map Creation | 02-28-2025 | 5
 InQnity Project AI implementation | 02-28-2025 | 3
+CS 3600 Midterm Exam | 02-28-2025 | 1
