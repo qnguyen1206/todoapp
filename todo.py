@@ -1,11 +1,16 @@
+import json
 import os
 import re
-from datetime import datetime
-from pathlib import Path
 import tkinter as tk
+import requests
+import threading
+import markdown2
+from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk, messagebox, simpledialog
 from tkcalendar import DateEntry
 from tkinter.font import Font
+from datetime import datetime
+from pathlib import Path
 
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
@@ -33,6 +38,9 @@ class TodoApp:
 
         # Version
         self.version = "0.0.0"
+
+        # Check if the AI have a response
+        self.has_ai_response = False
 
     def load_app_version(self):
         try:
@@ -86,6 +94,9 @@ class TodoApp:
         ttk.Button(control_frame, text="Delete Task", command=self.delete_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Edit Task", command=self.edit_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Character Info", command=self.show_character).pack(side=tk.LEFT, padx=5)
+
+        # Add this with other buttons in control_frame
+        ttk.Button(control_frame, text="AI Assistant", command=self.open_ai_dialog).pack(side=tk.LEFT, padx=5)
 
         # Add time display aligned to the right
         self.time_label = ttk.Label(control_frame, font=('Helvetica', 12, 'bold'))
@@ -354,6 +365,108 @@ class TodoApp:
     def show_character(self):
         message = f"Character Level: {self.level}\nTasks Completed: {self.tasks_completed}"
         messagebox.showinfo("Character Info", message)
+
+    def open_ai_dialog(self):
+        self.ai_dialog = tk.Toplevel(self.root)
+        self.ai_dialog.title("AI Assistant")
+        self.ai_dialog.geometry("1000x500")
+        
+        self.chat_history = ScrolledText(self.ai_dialog, wrap=tk.WORD, state='disabled')
+        self.chat_history.pack(padx=10, pady=10, fill=tk.BOTH, expand=False)
+        
+        input_frame = ttk.Frame(self.ai_dialog)
+        input_frame.pack(padx=10, pady=10, fill=tk.X)
+        
+        self.user_input = ttk.Entry(input_frame)
+        self.user_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.user_input.bind("<Return>", lambda e: self.send_to_ai())
+        
+        ttk.Button(input_frame, text="Send", command=self.send_to_ai).pack(side=tk.RIGHT)
+        
+        # Add initial greeting
+        self.update_chat_history("Assistant: Hi! I am your personal AI assistant. How can I help you today?")
+
+    def update_chat_history(self, message):
+        self.chat_history.config(state='normal')
+        self.chat_history.insert(tk.END, message + "\n\n")
+        self.chat_history.config(state='disabled')
+        self.chat_history.see(tk.END)
+
+    def send_to_ai(self):
+        user_text = self.user_input.get()
+        if not user_text:
+            return
+        
+        self.update_chat_history(f"You: {user_text}")
+        self.user_input.delete(0, tk.END)
+        
+        # Disable input while processing
+        self.user_input.config(state='disabled')
+        self.ai_dialog.config(cursor="watch")
+        
+        # Start processing in a separate thread
+        threading.Thread(target=self.get_ai_response, args=(user_text,)).start()
+
+    # Update the get_ai_response method with streaming support
+    def get_ai_response(self, prompt):
+        try:
+            response = requests.post(
+                'http://localhost:11434/api/generate',
+                json={
+                    'model': 'deepseek-r1:14b',
+                    'prompt': f"""
+                    User: {prompt}""",
+                    'stream': True  # Enable streaming
+                },
+                stream=True
+            )
+
+            # Initialize response tracking
+            self.root.after(0, self.prepare_ai_response)
+            accumulated_response = ""
+
+            for line in response.iter_lines():
+                if line:
+                    chunk = json.loads(line)
+                    if 'response' in chunk:
+                        accumulated_response += chunk['response']
+                        # Update GUI with partial response
+                        self.root.after(0, self.update_ai_response, accumulated_response)
+
+            # Add final newlines after completion
+            self.root.after(0, self.finalize_ai_response)
+
+        except requests.exceptions.ConnectionError:
+            self.root.after(0, self.update_chat_history, "Assistant: Could not connect to Ollama. Make sure it's running!")
+        except Exception as e:
+            self.root.after(0, self.update_chat_history, f"Assistant: Error - {str(e)}")
+        finally:
+            self.root.after(0, lambda: self.user_input.config(state='normal'))
+            self.root.after(0, lambda: self.ai_dialog.config(cursor=""))
+
+    def prepare_ai_response(self):
+        self.chat_history.config(state='normal')
+        # Insert AI prefix and set start position
+        self.chat_history.insert(tk.END, "Assistant:")
+        self.ai_response_start = self.chat_history.index("end-1c")
+        self.chat_history.config(state='disabled')
+        self.chat_history.see(tk.END)
+
+    def update_ai_response(self, text):
+        self.chat_history.config(state='normal')
+        # Clear previous partial response
+        self.chat_history.delete(self.ai_response_start, tk.END)
+        # Insert updated response
+        self.chat_history.insert(self.ai_response_start, text)
+        self.chat_history.config(state='disabled')
+        self.chat_history.see(tk.END)
+
+    def finalize_ai_response(self):
+        self.chat_history.config(state='normal')
+        # Add spacing after completion
+        self.chat_history.insert(tk.END, "\n\n")
+        self.chat_history.config(state='disabled')
+        self.chat_history.see(tk.END)
 
 if __name__ == "__main__":
     root = tk.Tk()
