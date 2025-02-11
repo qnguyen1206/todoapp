@@ -4,6 +4,7 @@ import re
 import tkinter as tk
 import requests
 import threading
+import markdown
 import markdown2
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk, messagebox, simpledialog
@@ -11,6 +12,7 @@ from tkcalendar import DateEntry
 from tkinter.font import Font
 from datetime import datetime
 from pathlib import Path
+from tkinterweb import HtmlFrame
 
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
@@ -382,6 +384,13 @@ class TodoApp:
         self.user_input.bind("<Return>", lambda e: self.send_to_ai())
         
         ttk.Button(input_frame, text="Send", command=self.send_to_ai).pack(side=tk.RIGHT)
+
+        # Configure Markdown tags
+        self.chat_history.tag_config("bold", font=('Helvetica', 10, 'bold'))
+        self.chat_history.tag_config("italic", font=('Helvetica', 10, 'italic'))
+        self.chat_history.tag_config("header", font=('Helvetica', 12, 'bold'))
+        self.chat_history.tag_config("list", lmargin2=20, spacing3=3)
+        self.chat_history.tag_config("code", background="#f0f0f0", relief='groove')
         
         # Add initial greeting
         self.update_chat_history("Assistant: Hi! I am your personal AI assistant. How can I help you today?")
@@ -457,7 +466,7 @@ class TodoApp:
         # Clear previous partial response
         self.chat_history.delete(self.ai_response_start, tk.END)
         # Insert updated response
-        self.chat_history.insert(self.ai_response_start, text)
+        self.chat_history.insert(self.ai_response_start, markdown.markdown(text))
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
 
