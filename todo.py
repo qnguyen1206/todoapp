@@ -421,8 +421,6 @@ class TodoApp:
         
         self.update_chat_history(f"You: {user_text}")
         self.user_input.delete(0, tk.END)
-
-        self.update_chat_history("AI: THINKING...")
         
         # Disable input while processing
         self.user_input.config(state='disabled')
