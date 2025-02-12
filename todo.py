@@ -12,8 +12,6 @@ from tkcalendar import DateEntry
 from tkinter.font import Font
 from datetime import datetime
 from pathlib import Path
-from tkinterweb import HtmlFrame
-from tkinter import BooleanVar
 
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
@@ -617,7 +615,6 @@ class TodoApp:
 
     def remove_thinking_message(self):
         self.chat_history.config(state='normal')
-        # Delete the last 2 lines (thinking message and newlines)
         self.chat_history.delete("end-3l", "end")
         self.chat_history.config(state='disabled')
 
