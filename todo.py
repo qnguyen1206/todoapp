@@ -13,6 +13,7 @@ from tkinter.font import Font
 from datetime import datetime
 from pathlib import Path
 from tkinterweb import HtmlFrame
+from tkinter import BooleanVar
 
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
@@ -21,8 +22,14 @@ VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"
 class TodoApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Cat TODO App")
+        self.root.title("TODO App")
         self.root.geometry("1000x700")
+
+        self.inside_think = False  # Track if we're inside a <think> block
+        self.think_buffer = ''     # Buffer for partial tags between chunks
+        self.show_thinking = True  # Default state
+        self.show_thinking_var = tk.BooleanVar(value=self.show_thinking)
+        self.load_config()
         
         # Configure styles
         self.style = ttk.Style()
@@ -41,9 +48,6 @@ class TodoApp:
         # Version
         self.version = "0.0.0"
 
-        # Check if the AI have a response
-        self.has_ai_response = False
-
     def load_app_version(self):
         try:
             with open(VERSION_FILE, "r") as f:
@@ -52,6 +56,14 @@ class TodoApp:
             return "0.0.0 (dev)"
 
     def create_widgets(self):
+        menubar = tk.Menu(self.root)
+        options_menu = tk.Menu(menubar, tearoff=0)
+        options_menu.add_checkbutton(label="Show Thinking Messages", 
+                                command=self.toggle_thinking,
+                                variable=self.show_thinking_var)
+        menubar.add_cascade(label="Options", menu=options_menu)
+        self.root.config(menu=menubar)
+
         # Character stats frame
         char_frame = ttk.Frame(self.root)
         char_frame.pack(pady=10, padx=10, fill=tk.X)
@@ -383,7 +395,8 @@ class TodoApp:
         self.user_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.user_input.bind("<Return>", lambda e: self.send_to_ai())
         
-        ttk.Button(input_frame, text="Send", command=self.send_to_ai).pack(side=tk.RIGHT)
+        self.send_button = ttk.Button(input_frame, text="Send", command=self.send_to_ai)
+        self.send_button.pack(side=tk.RIGHT)
 
         # Configure Markdown tags
         self.chat_history.tag_config("bold", font=('Helvetica', 10, 'bold'))
@@ -408,10 +421,13 @@ class TodoApp:
         
         self.update_chat_history(f"You: {user_text}")
         self.user_input.delete(0, tk.END)
+
+        self.update_chat_history("AI: THINKING...")
         
         # Disable input while processing
         self.user_input.config(state='disabled')
         self.ai_dialog.config(cursor="watch")
+        self.send_button.config(state='disabled')
         
         # Start processing in a separate thread
         threading.Thread(target=self.get_ai_response, args=(user_text,)).start()
@@ -434,6 +450,10 @@ class TodoApp:
             self.root.after(0, self.prepare_ai_response)
             accumulated_response = ""
 
+            # Remove thinking message if enabled
+            if self.show_thinking:
+                self.root.after(0, self.remove_thinking_message)
+
             for line in response.iter_lines():
                 if line:
                     chunk = json.loads(line)
@@ -452,21 +472,55 @@ class TodoApp:
         finally:
             self.root.after(0, lambda: self.user_input.config(state='normal'))
             self.root.after(0, lambda: self.ai_dialog.config(cursor=""))
+            self.root.after(0, lambda: self.send_button.config(state='normal'))
 
     def prepare_ai_response(self):
         self.chat_history.config(state='normal')
         # Insert AI prefix and set start position
-        self.chat_history.insert(tk.END, "Assistant:")
+        self.chat_history.insert(tk.END, "Assistant :")
         self.ai_response_start = self.chat_history.index("end-1c")
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
+        self.inside_think = False
+        self.think_buffer = ''
 
     def update_ai_response(self, text):
+        if not self.show_thinking:
+            # Combine buffer with new text
+            full_text = self.think_buffer + text
+            self.think_buffer = ''
+            processed = []
+            i = 0
+            
+            while i < len(full_text):
+                if self.inside_think:
+                    # Look for closing tag
+                    end_idx = full_text.find('</think>', i)
+                    if end_idx != -1:
+                        i = end_idx + len('</think>')
+                        self.inside_think = False
+                    else:
+                        # Save remaining text for next chunk
+                        self.think_buffer = full_text[i:]
+                        break
+                else:
+                    # Look for opening tag
+                    start_idx = full_text.find('<think>', i)
+                    if start_idx != -1:
+                        # Add text before the tag
+                        processed.append(full_text[i:start_idx])
+                        i = start_idx + len('<think>')
+                        self.inside_think = True
+                    else:
+                        # Add remaining text
+                        processed.append(full_text[i:])
+                        break
+            text = ''.join(processed)
         self.chat_history.config(state='normal')
         # Clear previous partial response
         self.chat_history.delete(self.ai_response_start, tk.END)
         # Insert updated response
-        self.chat_history.insert(self.ai_response_start, markdown.markdown(text))
+        self.insert_with_markdown(text)
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
 
@@ -476,6 +530,98 @@ class TodoApp:
         self.chat_history.insert(tk.END, "\n\n")
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
+
+    # Add this new method for markdown processing
+    def insert_with_markdown(self, text):
+        # Split into lines for block-level processing
+        lines = text.split('\n')
+        list_mode = False
+        
+        for line in lines:
+            # Headers
+            if line.startswith('#'):
+                header_level = min(line.count('#'), 3)
+                clean_line = line.lstrip('#').strip()
+                self.chat_history.insert(tk.END, clean_line + '\n', f"h{header_level}")
+                continue
+                
+            # Lists
+            if line.startswith(('- ', '* ', '+ ')):
+                if not list_mode:
+                    list_mode = True
+                    self.chat_history.insert(tk.END, '\n')
+                self.chat_history.insert(tk.END, '• ' + line[2:] + '\n', "list")
+                continue
+            else:
+                list_mode = False
+                
+            # Bold and italic
+            pos = 0
+            while pos < len(line):
+                # Handle bold (**...**)
+                bold_start = line.find('**', pos)
+                if bold_start != -1:
+                    bold_end = line.find('**', bold_start + 2)
+                    if bold_end != -1:
+                        self.chat_history.insert(tk.END, line[pos:bold_start])
+                        self.chat_history.insert(tk.END, line[bold_start+2:bold_end], "bold")
+                        pos = bold_end + 2
+                        continue
+                        
+                # Handle italic (*...* or _..._)
+                italic_start = max(line.find('*', pos), line.find('_', pos))
+                if italic_start != -1:
+                    italic_end = max(line.find('*', italic_start + 1), 
+                                line.find('_', italic_start + 1))
+                    if italic_end != -1:
+                        self.chat_history.insert(tk.END, line[pos:italic_start])
+                        self.chat_history.insert(tk.END, line[italic_start+1:italic_end], "italic")
+                        pos = italic_end + 1
+                        continue
+                        
+                # Handle code blocks (`...`)
+                code_start = line.find('`', pos)
+                if code_start != -1:
+                    code_end = line.find('`', code_start + 1)
+                    if code_end != -1:
+                        self.chat_history.insert(tk.END, line[pos:code_start])
+                        self.chat_history.insert(tk.END, line[code_start+1:code_end], "code")
+                        pos = code_end + 1
+                        continue
+                        
+                # Insert remaining text
+                self.chat_history.insert(tk.END, line[pos:])
+                break
+                
+            self.chat_history.insert(tk.END, '\n')
+
+    def load_config(self):
+        config_file = str(Path.home()) + "/TODOapp/config.txt"
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, "r") as f:
+                    self.show_thinking = f.read().strip() == "True"
+                    self.show_thinking_var.set(self.show_thinking)
+            except:
+                self.show_thinking = True
+                self.show_thinking_var.set(True)
+
+    def save_config(self):
+        config_file = str(Path.home()) + "/TODOapp/config.txt"
+        with open(config_file, "w") as f:
+            f.write(str(self.show_thinking))
+
+    def toggle_thinking(self):
+        self.show_thinking = not self.show_thinking
+        self.show_thinking_var.set(self.show_thinking)
+        self.save_config()
+
+
+    def remove_thinking_message(self):
+        self.chat_history.config(state='normal')
+        # Delete the last 2 lines (thinking message and newlines)
+        self.chat_history.delete("end-3l", "end")
+        self.chat_history.config(state='disabled')
 
 if __name__ == "__main__":
     root = tk.Tk()
