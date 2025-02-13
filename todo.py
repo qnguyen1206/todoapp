@@ -238,7 +238,16 @@ class TodoApp:
             messagebox.showwarning("Warning", "Please select a task to remove")
             return
         
-        index = self.tree.index(selected[0])
+        task_values = self.tree.item(selected[0], 'values')
+        task_to_remove = (task_values[0], task_values[1], task_values[2])
+        
+        tasks = self.load_tasks()
+        try:
+            index = tasks.index(task_to_remove)
+        except ValueError:
+            messagebox.showerror("Error", "Task not found in data file")
+            return
+        
         tasks = self.load_tasks()
         if 0 <= index < len(tasks):
             del tasks[index]
@@ -256,7 +265,17 @@ class TodoApp:
             messagebox.showwarning("Warning", "Please select a task to edit")
             return
         
-        index = self.tree.index(selected[0])
+        task_values = self.tree.item(selected[0], 'values')
+        task_to_edit = (task_values[0], task_values[1], task_values[2])
+
+        tasks = self.load_tasks()
+        try:
+            # Find the index by content instead of Treeview position
+            index = tasks.index(task_to_edit)
+        except ValueError:
+            messagebox.showerror("Error", "Task not found in data file")
+            return
+        
         tasks = self.load_tasks()
         if 0 <= index < len(tasks):
             dialog = tk.Toplevel(self.root)
@@ -281,26 +300,26 @@ class TodoApp:
             priority_entry.grid(row=2, column=1, padx=5, pady=5)
             priority_entry.insert(0, tasks[index][2])
             
-            def validate_and_edit():
-                date = self.parse_date(date_entry.get())
-                if not date:
-                    messagebox.showerror("Error", "Invalid date format")
-                    return
-                
-                try:
-                    priority = int(priority_entry.get())
-                    if not 1 <= priority <= 5:
-                        raise ValueError
-                except ValueError:
-                    messagebox.showerror("Error", "Priority must be 1-5")
-                    return
-                
-                tasks[index] = (task_entry.get(), date, priority)
-                self.save_tasks(tasks)
-                self.refresh_task_list()
-                dialog.destroy()
-                
-            ttk.Button(dialog, text="Save", command=validate_and_edit).grid(row=3, columnspan=2, pady=10)
+        def validate_and_edit():
+            date = self.parse_date(date_entry.get())
+            if not date:
+                messagebox.showerror("Error", "Invalid date format")
+                return
+            
+            try:
+                priority = int(priority_entry.get())
+                if not 1 <= priority <= 5:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Error", "Priority must be 1-5")
+                return
+            
+            tasks[index] = (task_entry.get(), date, priority)
+            self.save_tasks(tasks)
+            self.refresh_task_list()
+            dialog.destroy()
+            
+        ttk.Button(dialog, text="Save", command=validate_and_edit).grid(row=3, columnspan=2, pady=10)
 
     def delete_task(self):
         selected = self.tree.selection()
@@ -308,7 +327,16 @@ class TodoApp:
             messagebox.showwarning("Warning", "Please select a task to delete")
             return
         
-        index = self.tree.index(selected[0])
+        task_values = self.tree.item(selected[0], 'values')
+        task_to_remove = (task_values[0], task_values[1], task_values[2])
+        
+        tasks = self.load_tasks()
+        try:
+            index = tasks.index(task_to_remove)
+        except ValueError:
+            messagebox.showerror("Error", "Task not found in data file")
+            return
+        
         tasks = self.load_tasks()
         if 0 <= index < len(tasks):
             del tasks[index]
@@ -345,11 +373,11 @@ class TodoApp:
 
         # Insert into Treeview with colors
         for task in overdue_tasks:
-            self.tree.insert("", tk.END, values=task, tags=("overdue",))
+            self.tree.insert("", tk.END, values=task, tags=("overdue",), text= task[0])
         for task in today_tasks:
-            self.tree.insert("", tk.END, values=task, tags=("today",))
+            self.tree.insert("", tk.END, values=task, tags=("today",), text= task[0])
         for task in upcoming_tasks:
-            self.tree.insert("", tk.END, values=task)
+            self.tree.insert("", tk.END, values=task, text= task[0])
 
         # Configure row colors
         self.tree.tag_configure("overdue", foreground="red")
@@ -611,7 +639,6 @@ class TodoApp:
         self.show_thinking = not self.show_thinking
         self.show_thinking_var.set(self.show_thinking)
         self.save_config()
-
 
     def remove_thinking_message(self):
         self.chat_history.config(state='normal')
