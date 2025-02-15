@@ -5,7 +5,6 @@ import tkinter as tk
 import requests
 import threading
 import markdown
-import markdown2
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk, messagebox, simpledialog
 from tkcalendar import DateEntry
@@ -463,9 +462,16 @@ class TodoApp:
                 'http://localhost:11434/api/generate',
                 json={
                     'model': 'deepseek-r1:14b',
-                    'prompt': f"""
-                    User: {prompt}""",
-                    'stream': True  # Enable streaming
+                    'prompt': f"""You are a TODO assistant. Use these commands when needed:
+    <command>add;[task];[date];[priority]</command>
+    <command>finish;[task]</command>
+    <command>delete;[task]</command>
+    <command>edit;[old task];[new task];[new date];[new priority]</command>
+    DO NOT ADD IN THIS EXAMPLE:
+    example:(<command>add;Buy milk;05-25-2024;3</command>
+    Current time: {datetime.now().strftime("%m-%d-%Y")})
+    User: {prompt}""",
+                    'stream': True
                 },
                 stream=True
             )
@@ -488,6 +494,7 @@ class TodoApp:
 
             # Add final newlines after completion
             self.root.after(0, self.finalize_ai_response)
+            self.root.after(0, self.handle_ai_commands, accumulated_response)
 
         except requests.exceptions.ConnectionError:
             self.root.after(0, self.update_chat_history, "Assistant: Could not connect to Ollama. Make sure it's running!")
@@ -644,6 +651,112 @@ class TodoApp:
         self.chat_history.config(state='normal')
         self.chat_history.delete("end-3l", "end")
         self.chat_history.config(state='disabled')
+
+    # Add these methods to the TodoApp class
+    def handle_ai_commands(self, full_response):
+        # Extract commands from response
+        command_pattern = re.compile(r'<command>(.*?)</command>', re.DOTALL)
+        commands = command_pattern.findall(full_response)
+        
+        # Remove commands from displayed message
+        display_message = command_pattern.sub('', full_response).strip()
+        if display_message:
+            self.update_chat_history(f"Assistant: {display_message}")
+
+        # Process commands
+        for cmd in commands:
+            self.process_command(cmd.strip())
+
+    def process_command(self, cmd_text):
+        parts = [p.strip() for p in cmd_text.split(';')]
+        if not parts:
+            return
+
+        action = parts[0].lower()
+        
+        try:
+            if action == "add":
+                task = parts[1]
+                date = parts[2]
+                priority = parts[3]
+                self.add_task_programmatically(task, date, priority)
+            elif action == "finish":
+                task = parts[1]
+                self.complete_task_by_name(task)
+            elif action == "delete":
+                task = parts[1]
+                self.delete_task_by_name(task)
+            elif action == "edit":
+                old_task = parts[1]
+                new_task = parts[2]
+                new_date = parts[3]
+                new_priority = parts[4]
+                self.edit_task_programmatically(old_task, new_task, new_date, new_priority)
+        except (IndexError, ValueError) as e:
+            self.update_chat_history(f"Assistant: Error processing command: {str(e)}")
+
+    def add_task_programmatically(self, task, date_str, priority_str):
+        date = self.parse_date(date_str)
+        if not date:
+            raise ValueError("Invalid date format")
+        
+        try:
+            priority = int(priority_str)
+            if not 1 <= priority <= 5:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Priority must be 1-5")
+
+        self.add_task(task, date, priority)
+        self.update_chat_history(f"Assistant: Task '{task}' added successfully!")
+
+    def complete_task_by_name(self, task_name):
+        tasks = self.load_tasks()
+        for t in tasks:
+            if t[0] == task_name:
+                tasks.remove(t)
+                self.tasks_completed += 1
+                if self.tasks_completed % 5 == 0:
+                    self.level += 1
+                self.save_character()
+                self.update_character_labels()
+                self.save_tasks(tasks)
+                self.refresh_task_list()
+                self.update_chat_history(f"Assistant: Task '{task_name}' completed!")
+                return
+        raise ValueError("Task not found")
+
+    def delete_task_by_name(self, task_name):
+        tasks = self.load_tasks()
+        new_tasks = [t for t in tasks if t[0] != task_name]
+        if len(new_tasks) != len(tasks):
+            self.save_tasks(new_tasks)
+            self.refresh_task_list()
+            self.update_chat_history(f"Assistant: Task '{task_name}' deleted!")
+        else:
+            raise ValueError("Task not found")
+
+    def edit_task_programmatically(self, old_task_name, new_task_name, new_date_str, new_priority_str):
+        new_date = self.parse_date(new_date_str)
+        if not new_date:
+            raise ValueError("Invalid new date format")
+        
+        try:
+            new_priority = int(new_priority_str)
+            if not 1 <= new_priority <= 5:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Priority must be 1-5")
+
+        tasks = self.load_tasks()
+        for i, t in enumerate(tasks):
+            if t[0] == old_task_name:
+                tasks[i] = (new_task_name, new_date, new_priority)
+                self.save_tasks(tasks)
+                self.refresh_task_list()
+                self.update_chat_history(f"Assistant: Task updated successfully!")
+                return
+        raise ValueError("Task not found")
 
 if __name__ == "__main__":
     root = tk.Tk()

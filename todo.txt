@@ -1,7 +1,3 @@
-JAPN 1002 Written Test L8 | 02-13-2025 | 1
-CS 3600 Quiz 3 | 02-13-2025 | 1
-JAPN 1002 Oral Test L8 | 02-13-2025 | 1
-CTC GUI HUD | 02-28-2025 | 2
 JAPN 1002 GH9-1 | 02-20-2025 | 1
 CS 3600 Assignment 2 A-B | 02-21-2025 | 1
 JAPN 1002 KH9 | 02-25-2025 | 1
@@ -10,6 +6,10 @@ CS 3001 Test 1 | 02-26-2025 | 1
 JAPN 1002 Te-form test | 02-27-2025 | 1
 JAPN 1002 GH9-2 | 02-27-2025 | 1
 InQnity Project Map Creation | 02-28-2025 | 5
+TODO app auto updater | 02-28-2025 | 5
+TODO app AI auto add, finish, delete, edit task | 02-28-2025 | 3
+CTC GUI HUD | 02-28-2025 | 2
 CTC Settings | 02-28-2025 | 2
 CTC GUI Menus | 02-28-2025 | 2
 CS 3600 Midterm Exam | 02-28-2025 | 1
+3001 Analysis of New ACM Code Essay | 03-03-2025 | 1
