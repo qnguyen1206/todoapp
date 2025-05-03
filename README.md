@@ -1,8 +1,6 @@
 **GAMIFY TODO APP WITH AI INTEGRATED**
 
--
-
-**THIS IS A PERSONAL PROJECTS SIMPLE GAMIFY TODO APP THAT HAVE DEEPSEEK-R1 14B PARAM INTEGRATE.**
+- **THIS IS A PERSONAL PROJECTS SIMPLE GAMIFY TODO APP THAT HAVE DEEPSEEK-R1 14B PARAM INTEGRATE.**
 
 REQUIREMENTS TO RUN THE APP:
 
@@ -14,6 +12,7 @@ WHAT CAN THE APP DO:
 - Keep records of levels, number of current tasks and number of completed tasks
 - Keep records of tasks locally in sorted order (default: increase in due date sorted)
 - Able to upload files for context to AI
+- Able to start on window startup
 
 WHAT CAN THE APP DO IN THE FUTURE:
 
