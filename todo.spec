@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 a = Analysis(
     ['todo.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=[('clipboard.png', '.')],
+    hiddenimports=[
+        'PIL',
+        'PIL._imagingtk',
+        'PIL._tkinter_finder',
+        'tkinter',
+        'tkinter.filedialog',
+        'win32com.client',
+        'tkcalendar',
+        'markdown',
+        'requests',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

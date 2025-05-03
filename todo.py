@@ -6,11 +6,17 @@ import requests
 import threading
 import markdown
 from tkinter.scrolledtext import ScrolledText
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 from tkcalendar import DateEntry
 from tkinter.font import Font
 from datetime import datetime
 from pathlib import Path
+from PIL import Image, ImageTk
+import shutil
+import mimetypes
+import winreg
+import sys
+import win32com.client
 
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
@@ -21,12 +27,6 @@ class TodoApp:
         self.root = root
         self.root.title("TODO App")
         self.root.geometry("1000x700")
-
-        self.inside_think = False  # Track if we're inside a <think> block
-        self.think_buffer = ''     # Buffer for partial tags between chunks
-        self.show_thinking = True  # Default state
-        self.show_thinking_var = tk.BooleanVar(value=self.show_thinking)
-        self.load_config()
         
         # Configure styles
         self.style = ttk.Style()
@@ -37,6 +37,20 @@ class TodoApp:
         self.level = 0
         self.tasks_completed = 0
         
+        # Add AI model configuration
+        self.current_ai_model = "deepseek-r1:14b"  # Default model
+        self.available_models = [
+            "deepseek-r1:14b",
+            "llama2:7b",
+            "llama2:13b",
+            "mistral:7b",
+            "codellama:13b",
+            "neural-chat:7b"
+        ]
+
+        # Add startup check before creating widgets
+        self.startup_enabled = self.check_startup_status()
+        
         # Create widgets
         self.create_widgets()
         self.load_character()
@@ -44,6 +58,16 @@ class TodoApp:
 
         # Version
         self.version = "0.0.0"
+
+        # Add this to your existing init
+        self.upload_folder = str(Path.home()) + "/TODOapp/uploads/"
+        Path(self.upload_folder).mkdir(parents=True, exist_ok=True)
+
+        # Add to your existing init
+        self.last_refresh_date = datetime.now().date()
+        
+        # Start the auto-refresh timer after initializing the UI
+        self.start_auto_refresh()
 
     def load_app_version(self):
         try:
@@ -55,11 +79,32 @@ class TodoApp:
     def create_widgets(self):
         menubar = tk.Menu(self.root)
         options_menu = tk.Menu(menubar, tearoff=0)
-        options_menu.add_checkbutton(label="Show Thinking Messages", 
-                                command=self.toggle_thinking,
-                                variable=self.show_thinking_var)
+        
+        # Add AI Model submenu
+        ai_model_menu = tk.Menu(options_menu, tearoff=0)
+        
+        # Create a StringVar to track the selected model
+        self.selected_model = tk.StringVar(value=self.current_ai_model)
+        
+        for model in self.available_models:
+            ai_model_menu.add_radiobutton(
+                label=model,
+                value=model,
+                variable=self.selected_model,  # Use the StringVar here
+                command=lambda m=model: self.change_ai_model(m)
+            )
+        
+        options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
         menubar.add_cascade(label="Options", menu=options_menu)
         self.root.config(menu=menubar)
+
+        # Add startup option
+        self.startup_var = tk.BooleanVar(value=self.startup_enabled)
+        options_menu.add_checkbutton(
+            label="Start with Windows",
+            variable=self.startup_var,
+            command=self.toggle_startup
+        )
 
         # Character stats frame
         char_frame = ttk.Frame(self.root)
@@ -345,9 +390,11 @@ class TodoApp:
             messagebox.showerror("Error", "Invalid task index")
 
     def refresh_task_list(self):
+        """Modified refresh_task_list method"""
         self.tree.delete(*self.tree.get_children())  # Clear existing tasks
         tasks = self.load_tasks()  # Load tasks from file
-        today = datetime.today().date()
+        current_datetime = datetime.now()
+        today = current_datetime.date()
         
         # Categorize tasks
         overdue_tasks = []
@@ -366,19 +413,19 @@ class TodoApp:
                 upcoming_tasks.append(task)  # Future tasks
 
         # Sort each category
-        overdue_tasks.sort(key=lambda x: ((datetime.strptime(x[1], "%m-%d-%Y")), (int(x[2]))))  # Earliest first
-        today_tasks.sort(key=lambda x: int(x[2]))  # Sort by priority (higher first)
-        upcoming_tasks.sort(key=lambda x: ((datetime.strptime(x[1], "%m-%d-%Y")), (int(x[2]))))  # Earliest first
+        overdue_tasks.sort(key=lambda x: (datetime.strptime(x[1], "%m-%d-%Y"), -int(x[2])))  # Earliest first
+        today_tasks.sort(key=lambda x: int(x[2]), reverse=True)  # Sort by priority (higher first)
+        upcoming_tasks.sort(key=lambda x: (datetime.strptime(x[1], "%m-%d-%Y"), -int(x[2])))  # Earliest first
 
         # Insert into Treeview with colors
         for task in overdue_tasks:
-            self.tree.insert("", tk.END, values=task, tags=("overdue",), text= task[0])
+            self.tree.insert("", tk.END, values=task, tags=("overdue",), text=task[0])
         for task in today_tasks:
-            self.tree.insert("", tk.END, values=task, tags=("today",), text= task[0])
+            self.tree.insert("", tk.END, values=task, tags=("today",), text=task[0])
         for task in upcoming_tasks:
-            self.tree.insert("", tk.END, values=task, text= task[0])
+            self.tree.insert("", tk.END, values=task, text=task[0])
 
-        # Configure row colors
+        # Configure row colors - moved outside the loop for efficiency
         self.tree.tag_configure("overdue", foreground="red")
         self.tree.tag_configure("today", foreground="orange")
 
@@ -407,14 +454,18 @@ class TodoApp:
 
     def open_ai_dialog(self):
         self.ai_dialog = tk.Toplevel(self.root)
-        self.ai_dialog.title("AI Assistant")
+        self.ai_dialog.title("AI Assistant" + " - " + self.current_ai_model)
         self.ai_dialog.geometry("1000x500")
         
         self.chat_history = ScrolledText(self.ai_dialog, wrap=tk.WORD, state='disabled')
-        self.chat_history.pack(padx=10, pady=10, fill=tk.BOTH, expand=False)
+        self.chat_history.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
         
         input_frame = ttk.Frame(self.ai_dialog)
         input_frame.pack(padx=10, pady=10, fill=tk.X)
+        
+        # Add upload button
+        self.upload_button = ttk.Button(input_frame, text="📎", width=3, command=self.upload_file)
+        self.upload_button.pack(side=tk.LEFT, padx=5)
         
         self.user_input = ttk.Entry(input_frame)
         self.user_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
@@ -429,13 +480,14 @@ class TodoApp:
         self.chat_history.tag_config("header", font=('Helvetica', 12, 'bold'))
         self.chat_history.tag_config("list", lmargin2=20, spacing3=3)
         self.chat_history.tag_config("code", background="#f0f0f0", relief='groove')
+        self.chat_history.tag_config("think", foreground="gray50", spacing1=5, spacing3=5)
         
         # Add initial greeting
-        self.update_chat_history("Assistant: Hi! I am your personal AI assistant. How can I help you today?")
+        self.update_chat_history("AI: Hello! I'm your personal task assistant. How can I help you today?\n")
 
     def update_chat_history(self, message):
         self.chat_history.config(state='normal')
-        self.chat_history.insert(tk.END, message + "\n\n")
+        self.chat_history.insert(tk.END, message + "\n")
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
 
@@ -444,8 +496,15 @@ class TodoApp:
         if not user_text:
             return
         
-        self.update_chat_history(f"You: {user_text}")
+        self.update_chat_history(f"User: {user_text}")
         self.user_input.delete(0, tk.END)
+
+         # Show "Thinking..." and store the index so we can replace it later
+        self.chat_history.config(state='normal')
+        self.chat_history.insert(tk.END, "AI: Thinking...\n", "think")
+        thinking_index = self.chat_history.index("end-2l")  # Store line before last newline
+        self.chat_history.config(state='disabled')
+        self.chat_history.see(tk.END)
         
         # Disable input while processing
         self.user_input.config(state='disabled')
@@ -453,53 +512,59 @@ class TodoApp:
         self.send_button.config(state='disabled')
         
         # Start processing in a separate thread
-        threading.Thread(target=self.get_ai_response, args=(user_text,)).start()
+        threading.Thread(target=self.get_ai_response, args=(user_text, thinking_index)).start()
 
     # Update the get_ai_response method with streaming support
-    def get_ai_response(self, prompt):
+    def get_ai_response(self, prompt, thinking_index):
         try:
+            # If there are uploaded files, include their paths in the context
+            uploaded_files = [f for f in os.listdir(self.upload_folder)]
+            files_context = "\nUploaded files: " + ", ".join(uploaded_files) if uploaded_files else ""
+            
             response = requests.post(
                 'http://localhost:11434/api/generate',
                 json={
-                    'model': 'deepseek-r1:14b',
-                    'prompt': f"""You are a TODO assistant. Use these commands when needed:
-    <command>add;[task];[date];[priority]</command>
-    <command>finish;[task]</command>
-    <command>delete;[task]</command>
-    <command>edit;[old task];[new task];[new date];[new priority]</command>
-    DO NOT ADD IN THIS EXAMPLE:
-    example:(<command>add;Buy milk;05-25-2024;3</command>
-    Current time: {datetime.now().strftime("%m-%d-%Y")})
-    User: {prompt}""",
+                    'model': self.current_ai_model,
+                    'prompt': f"""You are a TODO assistant. 
+
+                        Available commands:
+                        <command>add;[task];[date];[priority]</command>
+                        <command>finish;[task]</command>
+                        <command>delete;[task]</command>
+                        <command>edit;[old task];[new task];[new date];[new priority]</command>
+
+                        Current time: {datetime.now().strftime("%m-%d-%Y")}{files_context}
+                        User: {prompt}""",
                     'stream': True
                 },
                 stream=True
             )
 
-            # Initialize response tracking
-            self.root.after(0, self.prepare_ai_response)
+            # Accumulate the full response
+            # ...after accumulating response text
             accumulated_response = ""
-
-            # Remove thinking message if enabled
-            if self.show_thinking:
-                self.root.after(0, self.remove_thinking_message)
-
             for line in response.iter_lines():
                 if line:
                     chunk = json.loads(line)
                     if 'response' in chunk:
                         accumulated_response += chunk['response']
-                        # Update GUI with partial response
-                        self.root.after(0, self.update_ai_response, accumulated_response)
 
-            # Add final newlines after completion
-            self.root.after(0, self.finalize_ai_response)
+            # Replace "Thinking..." with the response
+            def replace_thinking():
+                self.chat_history.config(state='normal')
+                self.chat_history.delete(f"{thinking_index}", f"{thinking_index} lineend + 1c")
+                self.chat_history.insert(tk.END, f"AI: {accumulated_response}\n")
+                self.chat_history.config(state='disabled')
+                self.chat_history.see(tk.END)
+
+            self.root.after(0, replace_thinking)
             self.root.after(0, self.handle_ai_commands, accumulated_response)
 
+
         except requests.exceptions.ConnectionError:
-            self.root.after(0, self.update_chat_history, "Assistant: Could not connect to Ollama. Make sure it's running!")
+            self.root.after(0, self.update_chat_history, "AI: Could not connect to Ollama. Make sure it's running!")
         except Exception as e:
-            self.root.after(0, self.update_chat_history, f"Assistant: Error - {str(e)}")
+            self.root.after(0, self.update_chat_history, f"AI: Error - {str(e)}")
         finally:
             self.root.after(0, lambda: self.user_input.config(state='normal'))
             self.root.after(0, lambda: self.ai_dialog.config(cursor=""))
@@ -508,50 +573,19 @@ class TodoApp:
     def prepare_ai_response(self):
         self.chat_history.config(state='normal')
         # Insert AI prefix and set start position
-        self.chat_history.insert(tk.END, "Assistant :")
+        self.chat_history.insert(tk.END, "AI:")
         self.ai_response_start = self.chat_history.index("end-1c")
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
-        self.inside_think = False
-        self.think_buffer = ''
 
     def update_ai_response(self, text):
-        if not self.show_thinking:
-            # Combine buffer with new text
-            full_text = self.think_buffer + text
-            self.think_buffer = ''
-            processed = []
-            i = 0
-            
-            while i < len(full_text):
-                if self.inside_think:
-                    # Look for closing tag
-                    end_idx = full_text.find('</think>', i)
-                    if end_idx != -1:
-                        i = end_idx + len('</think>')
-                        self.inside_think = False
-                    else:
-                        # Save remaining text for next chunk
-                        self.think_buffer = full_text[i:]
-                        break
-                else:
-                    # Look for opening tag
-                    start_idx = full_text.find('<think>', i)
-                    if start_idx != -1:
-                        # Add text before the tag
-                        processed.append(full_text[i:start_idx])
-                        i = start_idx + len('<think>')
-                        self.inside_think = True
-                    else:
-                        # Add remaining text
-                        processed.append(full_text[i:])
-                        break
-            text = ''.join(processed)
         self.chat_history.config(state='normal')
-        # Clear previous partial response
-        self.chat_history.delete(self.ai_response_start, tk.END)
-        # Insert updated response
-        self.insert_with_markdown(text)
+        
+        # Check if this is the first response chunk
+        if self.chat_history.get("end-2c") != "\n":
+            self.chat_history.insert(tk.END, "AI: ")
+        
+        self.chat_history.insert(tk.END, text)
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
 
@@ -626,44 +660,13 @@ class TodoApp:
                 
             self.chat_history.insert(tk.END, '\n')
 
-    def load_config(self):
-        config_file = str(Path.home()) + "/TODOapp/config.txt"
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, "r") as f:
-                    self.show_thinking = f.read().strip() == "True"
-                    self.show_thinking_var.set(self.show_thinking)
-            except:
-                self.show_thinking = True
-                self.show_thinking_var.set(True)
-
-    def save_config(self):
-        config_file = str(Path.home()) + "/TODOapp/config.txt"
-        with open(config_file, "w") as f:
-            f.write(str(self.show_thinking))
-
-    def toggle_thinking(self):
-        self.show_thinking = not self.show_thinking
-        self.show_thinking_var.set(self.show_thinking)
-        self.save_config()
-
-    def remove_thinking_message(self):
-        self.chat_history.config(state='normal')
-        self.chat_history.delete("end-3l", "end")
-        self.chat_history.config(state='disabled')
-
     # Add these methods to the TodoApp class
     def handle_ai_commands(self, full_response):
         # Extract commands from response
         command_pattern = re.compile(r'<command>(.*?)</command>', re.DOTALL)
         commands = command_pattern.findall(full_response)
         
-        # Remove commands from displayed message
-        display_message = command_pattern.sub('', full_response).strip()
-        if display_message:
-            self.update_chat_history(f"Assistant: {display_message}")
-
-        # Process commands
+        # Process commands silently without displaying the message again
         for cmd in commands:
             self.process_command(cmd.strip())
 
@@ -693,7 +696,7 @@ class TodoApp:
                 new_priority = parts[4]
                 self.edit_task_programmatically(old_task, new_task, new_date, new_priority)
         except (IndexError, ValueError) as e:
-            self.update_chat_history(f"Assistant: Error processing command: {str(e)}")
+            self.update_chat_history(f"AI: Error processing command: {str(e)}")
 
     def add_task_programmatically(self, task, date_str, priority_str):
         date = self.parse_date(date_str)
@@ -708,7 +711,7 @@ class TodoApp:
             raise ValueError("Priority must be 1-5")
 
         self.add_task(task, date, priority)
-        self.update_chat_history(f"Assistant: Task '{task}' added successfully!")
+        self.update_chat_history(f"AI: Task '{task}' added successfully!")
 
     def complete_task_by_name(self, task_name):
         tasks = self.load_tasks()
@@ -722,7 +725,7 @@ class TodoApp:
                 self.update_character_labels()
                 self.save_tasks(tasks)
                 self.refresh_task_list()
-                self.update_chat_history(f"Assistant: Task '{task_name}' completed!")
+                self.update_chat_history(f"AI: Task '{task_name}' completed!")
                 return
         raise ValueError("Task not found")
 
@@ -732,7 +735,7 @@ class TodoApp:
         if len(new_tasks) != len(tasks):
             self.save_tasks(new_tasks)
             self.refresh_task_list()
-            self.update_chat_history(f"Assistant: Task '{task_name}' deleted!")
+            self.update_chat_history(f"AI: Task '{task_name}' deleted!")
         else:
             raise ValueError("Task not found")
 
@@ -754,9 +757,157 @@ class TodoApp:
                 tasks[i] = (new_task_name, new_date, new_priority)
                 self.save_tasks(tasks)
                 self.refresh_task_list()
-                self.update_chat_history(f"Assistant: Task updated successfully!")
+                self.update_chat_history(f"AI: Task updated successfully!")
                 return
         raise ValueError("Task not found")
+
+    def change_ai_model(self, model_name):
+        self.current_ai_model = model_name
+        if hasattr(self, 'ai_dialog') and self.ai_dialog.winfo_exists():
+            self.update_chat_history(f"System: Switched to {model_name} model\n")
+
+    def upload_file(self):
+        file_path = filedialog.askopenfilename(
+            title="Select a file",
+            filetypes=[
+                ("Images", "*.png *.jpg *.jpeg *.gif *.bmp"),
+                ("Documents", "*.pdf *.doc *.docx *.txt"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            # Create a unique filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            original_filename = Path(file_path).name
+            new_filename = f"{timestamp}_{original_filename}"
+            new_path = Path(self.upload_folder) / new_filename
+            
+            # Copy file to uploads folder
+            shutil.copy2(file_path, new_path)
+            
+            # Handle different file types
+            mime_type = mimetypes.guess_type(file_path)[0]
+            
+            if mime_type and mime_type.startswith('image/'):
+                self.display_image(new_path)
+            else:
+                self.display_file_link(new_filename)
+
+    def display_image(self, image_path):
+        try:
+            # Open and resize image
+            image = Image.open(image_path)
+            max_size = (300, 300)
+            image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            # Convert to PhotoImage
+            photo = ImageTk.PhotoImage(image)
+            
+            # Store reference to prevent garbage collection
+            if not hasattr(self, 'photo_references'):
+                self.photo_references = []
+            self.photo_references.append(photo)
+            
+            # Display in chat
+            self.chat_history.config(state='normal')
+            self.chat_history.insert(tk.END, "\nUser: Uploaded image:\n")
+            
+            # Create a label for the image and insert it
+            image_label = tk.Label(self.chat_history, image=photo)
+            self.chat_history.window_create(tk.END, window=image_label)
+            self.chat_history.insert(tk.END, "\n")
+            self.chat_history.config(state='disabled')
+            self.chat_history.see(tk.END)
+            
+        except Exception as e:
+            self.update_chat_history(f"Error displaying image: {str(e)}")
+
+    def display_file_link(self, filename):
+        self.chat_history.config(state='normal')
+        self.chat_history.insert(tk.END, f"\nUser: Uploaded file: {filename}\n")
+        self.chat_history.config(state='disabled')
+        self.chat_history.see(tk.END)
+
+    def check_startup_status(self):
+        """Check if the app is set to run at startup"""
+        startup_path = self.get_startup_path()
+        return startup_path.exists()
+
+    def get_startup_path(self):
+        """Get the path to the startup shortcut"""
+        startup_folder = Path(os.path.expandvars("%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"))
+        return startup_folder / "TODOApp.lnk"
+
+    def toggle_startup(self):
+        """Toggle startup status"""
+        if self.startup_var.get():
+            self.enable_startup()
+        else:
+            self.disable_startup()
+
+    def enable_startup(self):
+        """Enable startup with Windows"""
+        try:
+            # Get the path of the current executable
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                app_path = sys.executable
+            else:
+                # Running as script - create a batch file that runs the script directly
+                script_path = os.path.abspath(sys.argv[0])
+                app_dir = os.path.dirname(script_path)
+                
+                # Create a batch file to run Python directly
+                batch_path = os.path.join(app_dir, "run_todo.bat")
+                with open(batch_path, "w") as f:
+                    f.write(f'@echo off\n"{sys.executable}" "{script_path}"\n')
+                
+                app_path = batch_path
+
+            startup_path = self.get_startup_path()
+
+            # Create shortcut
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(str(startup_path))
+            shortcut.Targetpath = app_path
+            shortcut.WorkingDirectory = os.path.dirname(app_path)
+            shortcut.Description = "TODO App"
+            shortcut.save()
+
+            messagebox.showinfo("Success", "TODO App will now start with Windows")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to enable startup: {str(e)}")
+            self.startup_var.set(False)
+
+    def disable_startup(self):
+        """Disable startup with Windows"""
+        try:
+            startup_path = self.get_startup_path()
+            if startup_path.exists():
+                startup_path.unlink()
+            messagebox.showinfo("Success", "TODO App will no longer start with Windows")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to disable startup: {str(e)}")
+            self.startup_var.set(True)
+
+    def start_auto_refresh(self):
+        """Start the auto-refresh timer"""
+        # Check tasks every minute (60000 milliseconds)
+        self.check_tasks_status()
+        self.root.after(60000, self.start_auto_refresh)
+
+    def check_tasks_status(self):
+        """Check if tasks need to be refreshed"""
+        current_date = datetime.now().date()
+        
+        # Refresh if:
+        # 1. The date has changed (midnight crossed)
+        # 2. Or if there are tasks in the list (to update overdue status)
+        if (current_date != self.last_refresh_date or 
+            len(self.tree.get_children()) > 0):
+            self.refresh_task_list()
+            self.last_refresh_date = current_date
 
 if __name__ == "__main__":
     root = tk.Tk()
