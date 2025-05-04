@@ -15,7 +15,7 @@ IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
             tracking down the missing module yourself. Thanks!
 
 missing module named 'collections.abc' - imported by traceback (top-level), inspect (top-level), logging (top-level), typing (top-level), selectors (top-level), tracemalloc (top-level), http.client (top-level), typing_extensions (top-level), requests.compat (top-level), xml.etree.ElementTree (top-level), setuptools (top-level), setuptools._vendor.jaraco.functools (top-level), setuptools._vendor.more_itertools.more (top-level), setuptools._vendor.more_itertools.recipes (top-level), setuptools._distutils.dist (top-level), configparser (top-level), tomllib._parser (top-level), setuptools._vendor.tomli._parser (top-level), platformdirs.windows (conditional), setuptools._vendor.wheel.cli.tags (top-level), babel.core (top-level), babel.localedata (top-level), babel.plural (top-level), pytz.lazy (optional), asyncio.base_events (top-level), asyncio.coroutines (top-level), babel.dates (top-level), PIL.Image (top-level), PIL._typing (top-level), numpy.lib._npyio_impl (top-level), numpy.lib._function_base_impl (top-level), numpy._typing._nested_sequence (conditional), numpy._typing._shape (top-level), numpy._typing._dtype_like (top-level), numpy._typing._array_like (top-level), yaml.constructor (top-level), PIL.ImageFilter (top-level), PIL.ImagePalette (top-level), PIL.TiffImagePlugin (top-level), PIL.ImageOps (top-level), PIL.PngImagePlugin (top-level), PIL.Jpeg2KImagePlugin (top-level), PIL.IptcImagePlugin (top-level), PIL.ImageDraw (top-level), _pyrepl.types (top-level), _pyrepl.readline (top-level)
-missing module named posix - imported by posixpath (optional), shutil (conditional), importlib._bootstrap_external (conditional), os (conditional, optional), _pyrepl.unix_console (delayed, optional)
+missing module named posix - imported by os (conditional, optional), posixpath (optional), shutil (conditional), importlib._bootstrap_external (conditional), _pyrepl.unix_console (delayed, optional)
 missing module named resource - imported by posix (top-level)
 missing module named _frozen_importlib_external - imported by importlib._bootstrap (delayed), importlib (optional), importlib.abc (optional), zipimport (top-level)
 excluded module named _frozen_importlib - imported by importlib (optional), importlib.abc (optional), zipimport (top-level)
@@ -47,8 +47,8 @@ missing module named android - imported by platformdirs.android (delayed, condit
 missing module named _manylinux - imported by packaging._manylinux (delayed, optional), setuptools._vendor.packaging._manylinux (delayed, optional), setuptools._vendor.wheel.vendored.packaging._manylinux (delayed, optional)
 missing module named trove_classifiers - imported by setuptools.config._validate_pyproject.formats (optional)
 missing module named pyimod02_importers - imported by C:\Users\kylen\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py (delayed), C:\Users\kylen\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgres.py (delayed)
-missing module named _suggestions - imported by traceback (delayed, optional)
 missing module named collections.Mapping - imported by collections (optional), pytz.lazy (optional)
+missing module named _suggestions - imported by traceback (delayed, optional)
 missing module named 'win32com.gen_py' - imported by win32com (conditional, optional)
 missing module named _dummy_thread - imported by numpy._core.arrayprint (optional)
 missing module named 'numpy_distutils.cpuinfo' - imported by numpy.f2py.diagnose (delayed, conditional, optional)

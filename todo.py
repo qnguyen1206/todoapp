@@ -26,7 +26,7 @@ class TodoApp:
     def __init__(self, root):
         self.root = root
         self.root.title("TODO App")
-        self.root.geometry("1000x700")
+        self.root.state('zoomed')
         
         # Configure styles
         self.style = ttk.Style()
@@ -53,6 +53,23 @@ class TodoApp:
         
         # Create widgets
         self.create_widgets()
+
+        self.main_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
+        self.main_pane.pack(fill=tk.BOTH, expand=True)
+
+        # Left pane: task manager
+        self.task_frame = ttk.Frame(self.main_pane, width=800)
+        self.main_pane.add(self.task_frame, weight=3)
+
+        # Right pane: AI assistant
+        self.ai_frame = ttk.Frame(self.main_pane, width=200)
+        self.main_pane.add(self.ai_frame, weight=2)
+
+        # Populate each pane
+        self.create_task_manager_widgets(self.task_frame)
+        self.create_ai_widgets(self.ai_frame)
+
+
         self.load_character()
         self.refresh_task_list()
 
@@ -79,26 +96,20 @@ class TodoApp:
     def create_widgets(self):
         menubar = tk.Menu(self.root)
         options_menu = tk.Menu(menubar, tearoff=0)
-        
-        # Add AI Model submenu
+
+        # AI Model submenu
         ai_model_menu = tk.Menu(options_menu, tearoff=0)
-        
-        # Create a StringVar to track the selected model
         self.selected_model = tk.StringVar(value=self.current_ai_model)
-        
         for model in self.available_models:
             ai_model_menu.add_radiobutton(
                 label=model,
                 value=model,
-                variable=self.selected_model,  # Use the StringVar here
+                variable=self.selected_model,
                 command=lambda m=model: self.change_ai_model(m)
             )
-        
         options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
-        menubar.add_cascade(label="Options", menu=options_menu)
-        self.root.config(menu=menubar)
 
-        # Add startup option
+        # Startup checkbox
         self.startup_var = tk.BooleanVar(value=self.startup_enabled)
         options_menu.add_checkbutton(
             label="Start with Windows",
@@ -106,22 +117,26 @@ class TodoApp:
             command=self.toggle_startup
         )
 
+        menubar.add_cascade(label="Options", menu=options_menu)
+        self.root.config(menu=menubar)
+
+    def create_task_manager_widgets(self, parent):
         # Character stats frame
-        char_frame = ttk.Frame(self.root)
+        char_frame = ttk.Frame(parent)
         char_frame.pack(pady=10, padx=10, fill=tk.X)
 
         # Level row
         level_frame = ttk.Frame(char_frame)
         level_frame.pack(fill=tk.X, pady=2)
         ttk.Label(level_frame, text="Level:", font=('Helvetica', 12, 'bold')).pack(side=tk.LEFT)
-        self.level_label = ttk.Label(level_frame, text="0", font=('Helvetica', 12))
+        self.level_label = ttk.Label(level_frame, text=str(self.level), font=('Helvetica', 12))
         self.level_label.pack(side=tk.LEFT, padx=5)
 
         # Tasks Completed row
         completed_frame = ttk.Frame(char_frame)
         completed_frame.pack(fill=tk.X, pady=2)
         ttk.Label(completed_frame, text="Tasks Completed:", font=('Helvetica', 12, 'bold')).pack(side=tk.LEFT)
-        self.tasks_label = ttk.Label(completed_frame, text="0", font=('Helvetica', 12))
+        self.tasks_label = ttk.Label(completed_frame, text=str(self.tasks_completed), font=('Helvetica', 12))
         self.tasks_label.pack(side=tk.LEFT, padx=5)
 
         # Tasks Remaining row
@@ -132,45 +147,71 @@ class TodoApp:
         self.remaining_label.pack(side=tk.LEFT, padx=5)
 
         # Task list
-        self.tree = ttk.Treeview(self.root, columns=("Task", "Due Date", "Priority"), show="headings")
+        self.tree = ttk.Treeview(parent, columns=("Task", "Due Date", "Priority"), show="headings")
         self.tree.heading("Task", text="Task", command=lambda: self.sort_column("Task", False))
         self.tree.heading("Due Date", text="Due Date", command=lambda: self.sort_column("Due Date", False))
         self.tree.heading("Priority", text="Priority", command=lambda: self.sort_column("Priority", False))
-        self.tree.column("Task", width=400)
-        self.tree.column("Due Date", width=150)
-        self.tree.column("Priority", width=100)
+        self.tree.column("Task", width=350, minwidth=100, stretch=True)
+        self.tree.column("Due Date", width=250, minwidth=80, stretch=False)
+        self.tree.column("Priority", width=200, minwidth=40, stretch=False)
         self.tree.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
 
-        # Controls
-        control_frame = ttk.Frame(self.root)
+        # Controls frame
+        control_frame = ttk.Frame(parent)
         control_frame.pack(pady=10, fill=tk.X)
-        
         ttk.Button(control_frame, text="Add Task", command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Finish Task", command=self.remove_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Delete Task", command=self.delete_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Edit Task", command=self.edit_task).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Character Info", command=self.show_character).pack(side=tk.LEFT, padx=5)
 
-        # Add this with other buttons in control_frame
-        ttk.Button(control_frame, text="AI Assistant", command=self.open_ai_dialog).pack(side=tk.LEFT, padx=5)
-
-        # Add time display aligned to the right
+        # Time display aligned to the right
         self.time_label = ttk.Label(control_frame, font=('Helvetica', 12, 'bold'))
         self.time_label.pack(side=tk.RIGHT, padx=10)
-        self.update_time()
-
+        self.update_time()  # start the clock
 
         # Version label at bottom right
-        version_frame = ttk.Frame(self.root)
+        version_frame = ttk.Frame(parent)
         version_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
-        
         ttk.Label(
             version_frame,
             text=f"v {self.load_app_version()}",
             font=('Helvetica', 8),
             foreground="gray50",
-            anchor="e"  # Right-align text
+            anchor="e"
         ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
+
+
+    def create_ai_widgets(self, parent):
+        # Chat history
+        self.chat_history = ScrolledText(parent, wrap=tk.WORD, state='disabled')
+        self.chat_history.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        # Input row
+        input_frame = ttk.Frame(parent)
+        input_frame.pack(padx=10, pady=10, fill=tk.X)
+        self.upload_button = ttk.Button(input_frame, text="📎", width=3, command=self.upload_file)
+        self.upload_button.pack(side=tk.LEFT, padx=5)
+        self.user_input = ttk.Entry(input_frame)
+        self.user_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.user_input.bind("<Return>", lambda e: self.send_to_ai())
+        self.send_button = ttk.Button(input_frame, text="Send", command=self.send_to_ai)
+        self.send_button.pack(side=tk.RIGHT)
+
+        # Markdown tags
+        for tag, cfg in [
+            ("bold",    {'font':('Helvetica',10,'bold')}),
+            ("italic",  {'font':('Helvetica',10,'italic')}),
+            ("header",  {'font':('Helvetica',12,'bold')}),
+            ("list",    {'lmargin2':20,'spacing3':3}),
+            ("code",    {'background':"#f0f0f0",'relief':'groove'}),
+            ("think",   {'foreground':"gray50",'spacing1':5,'spacing3':5}),
+        ]:
+            self.chat_history.tag_config(tag, **cfg)
+
+        # Initial greeting
+        self.update_chat_history("AI: Hello! I'm your personal task assistant. How can I help you today?\n")
+
 
     def update_time(self):
         current_time = datetime.now().strftime("%m-%d-%Y %H:%M:%S")
@@ -451,39 +492,6 @@ class TodoApp:
     def show_character(self):
         message = f"Character Level: {self.level}\nTasks Completed: {self.tasks_completed}"
         messagebox.showinfo("Character Info", message)
-
-    def open_ai_dialog(self):
-        self.ai_dialog = tk.Toplevel(self.root)
-        self.ai_dialog.title("AI Assistant" + " - " + self.current_ai_model)
-        self.ai_dialog.geometry("1000x500")
-        
-        self.chat_history = ScrolledText(self.ai_dialog, wrap=tk.WORD, state='disabled')
-        self.chat_history.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-        
-        input_frame = ttk.Frame(self.ai_dialog)
-        input_frame.pack(padx=10, pady=10, fill=tk.X)
-        
-        # Add upload button
-        self.upload_button = ttk.Button(input_frame, text="📎", width=3, command=self.upload_file)
-        self.upload_button.pack(side=tk.LEFT, padx=5)
-        
-        self.user_input = ttk.Entry(input_frame)
-        self.user_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.user_input.bind("<Return>", lambda e: self.send_to_ai())
-        
-        self.send_button = ttk.Button(input_frame, text="Send", command=self.send_to_ai)
-        self.send_button.pack(side=tk.RIGHT)
-
-        # Configure Markdown tags
-        self.chat_history.tag_config("bold", font=('Helvetica', 10, 'bold'))
-        self.chat_history.tag_config("italic", font=('Helvetica', 10, 'italic'))
-        self.chat_history.tag_config("header", font=('Helvetica', 12, 'bold'))
-        self.chat_history.tag_config("list", lmargin2=20, spacing3=3)
-        self.chat_history.tag_config("code", background="#f0f0f0", relief='groove')
-        self.chat_history.tag_config("think", foreground="gray50", spacing1=5, spacing3=5)
-        
-        # Add initial greeting
-        self.update_chat_history("AI: Hello! I'm your personal task assistant. How can I help you today?\n")
 
     def update_chat_history(self, message):
         self.chat_history.config(state='normal')
