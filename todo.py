@@ -18,6 +18,7 @@ import winreg
 import sys
 import win32com.client
 
+DAILY_TASK_FILE = str(Path.home()) + "/TODOapp/dailytask.txt"
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
 VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"
@@ -145,6 +146,16 @@ class TodoApp:
         ttk.Label(remaining_frame, text="Tasks Remaining:", font=('Helvetica', 12, 'bold')).pack(side=tk.LEFT)
         self.remaining_label = ttk.Label(remaining_frame, text="0", font=('Helvetica', 12))
         self.remaining_label.pack(side=tk.LEFT, padx=5)
+
+        # Daily To Do List Panel
+        self.daily_todo_frame = tk.LabelFrame(self.task_frame, text="Daily To Do List", font=("Helvetica", 10, "bold"), bg="#f0f0f0")
+        self.daily_todo_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        # Add a listbox or labels inside the frame
+        self.daily_todo_listbox = tk.Listbox(self.daily_todo_frame, height=5)
+        self.daily_todo_listbox.pack(fill=tk.BOTH, padx=5, pady=5)
+
+        self.load_daily_tasks()
 
         # Task list
         self.tree = ttk.Treeview(parent, columns=("Task", "Due Date", "Priority"), show="headings")
@@ -916,6 +927,70 @@ class TodoApp:
             len(self.tree.get_children()) > 0):
             self.refresh_task_list()
             self.last_refresh_date = current_date
+    
+    def load_daily_tasks(self):
+        if not os.path.exists(DAILY_TASK_FILE):
+            with open(DAILY_TASK_FILE, "w") as f:
+                pass
+
+        with open(DAILY_TASK_FILE, "r") as file:
+            for line in file:
+                task = line.strip()
+                if task:
+                    self.create_daily_task_item(task)
+
+    def save_daily_tasks(self):
+        tasks = []
+        for widget in self.daily_tasks_container.winfo_children():
+            label = widget.children.get("label")
+            if label:
+                tasks.append(label.cget("text"))
+        with open(DAILY_TASK_FILE, "w") as file:
+            for task in tasks:
+                file.write(task + "\n")
+
+    def add_daily_task(self):
+        task_text = self.daily_add_entry.get().strip()
+        if task_text:
+            self.create_daily_task_item(task_text)
+            self.daily_add_entry.delete(0, tk.END)
+            self.save_daily_tasks()
+
+    def create_daily_task_item(self, task_text):
+        frame = tk.Frame(self.daily_tasks_container, bg="#f0f0f0")
+        frame.pack(fill=tk.X, padx=5, pady=2)
+
+        var = tk.BooleanVar()
+
+        cb = tk.Checkbutton(frame, variable=var, command=lambda: self.toggle_daily_task(label, var), bg="#f0f0f0")
+        cb.pack(side="left")
+
+        label = tk.Label(frame, text=task_text, anchor="w", name="label", bg="#f0f0f0")
+        label.pack(side="left", fill=tk.X, expand=True, padx=5)
+
+        edit_btn = tk.Button(frame, text="Edit", width=5, command=lambda: self.edit_daily_task(label))
+        edit_btn.pack(side="right", padx=2)
+
+        del_btn = tk.Button(frame, text="X", width=2, fg="red", command=lambda: self.remove_daily_task(frame))
+        del_btn.pack(side="right")
+
+    def edit_daily_task(self, label):
+        from tkinter.simpledialog import askstring
+        new_text = askstring("Edit Daily Task", "Update the task:", initialvalue=label.cget("text"))
+        if new_text:
+            label.config(text=new_text)
+            self.save_daily_tasks()
+
+    def remove_daily_task(self, frame):
+        frame.destroy()
+        self.save_daily_tasks()
+
+    def toggle_daily_task(self, label, var):
+        if var.get():
+            label.config(fg="gray", font=("Arial", 10, "overstrike"))
+        else:
+            label.config(fg="black", font=("Arial", 10, "normal"))
+
 
 if __name__ == "__main__":
     root = tk.Tk()

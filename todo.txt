@@ -1,9 +1,10 @@
+Survivor.io game like MVP | 05-11-2025 | 1
 IMH Gameplay Design | 06-01-2025 | 2
 IMH Map Design | 06-01-2025 | 2
 IMH Animations | 09-01-2025 | 3
 IMH Weapons Implementation | 09-01-2025 | 3
 IMH Map Implementation | 09-01-2025 | 3
 IMH Gameplay Implementation | 09-01-2025 | 3
-CTC GUI HUD | 09-01-2025 | 2
-CTC Settings | 09-01-2025 | 2
-CTC GUI Menus | 09-01-2025 | 2
+CTC Settings | 09-01-2025 | 1
+CTC GUI Menus | 09-01-2025 | 1
+CTC GUI HUD | 09-01-2025 | 1
