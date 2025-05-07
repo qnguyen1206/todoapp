@@ -154,13 +154,13 @@ class TodoApp:
         self.button_frame = tk.Frame(self.daily_todo_frame, bg="#f0f0f0")
         self.button_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
 
-        self.add_button = tk.Button(self.button_frame, text="+", width=2, command=self.add_task)
+        self.add_button = tk.Button(self.button_frame, text="+", width=2, command=self.add_daily_task)
         self.add_button.pack(side=tk.LEFT, padx=2)
 
-        self.remove_button = tk.Button(self.button_frame, text="-", width=2, command=self.remove_task)
+        self.remove_button = tk.Button(self.button_frame, text="-", width=2, command=self.remove_daily_task)
         self.remove_button.pack(side=tk.LEFT, padx=2)
 
-        self.edit_button = tk.Button(self.button_frame, text="✎", width=2, command=self.edit_task)
+        self.edit_button = tk.Button(self.button_frame, text="✎", width=2, command=self.edit_daily_task)
         self.edit_button.pack(side=tk.LEFT, padx=2)
 
         # Add a listbox or labels inside the frame
@@ -965,7 +965,7 @@ class TodoApp:
         task_text = simpledialog.askstring("New Task", "Enter task:")
         if task_text:
             var = tk.BooleanVar()
-            checkbox = tk.Checkbutton(self.tasks_frame, text=task_text, variable=var,
+            checkbox = tk.Checkbutton(self.daily_todo_listbox, text=task_text, variable=var,
                                       command=lambda v=var, cb=None: self.toggle_strikethrough(v, cb),
                                       anchor='w')
             checkbox.var = var
@@ -973,11 +973,20 @@ class TodoApp:
             checkbox.pack(fill="x", anchor="w", padx=5, pady=2)
             self.tasks.append(checkbox)
 
+            # Append to file
+            with open(DAILY_TASK_FILE, "w") as file:
+                file.write(task_text + "\n")
+
     def remove_daily_task(self):
+        removed = False
         for task in self.tasks[:]:
             if task.var.get():
                 task.destroy()
                 self.tasks.remove(task)
+                removed = True
+        
+        if removed:
+            self.save_daily_tasks()
 
     def edit_daily_task(self):
         for task in self.tasks:
@@ -985,6 +994,7 @@ class TodoApp:
                 new_text = simpledialog.askstring("Edit Task", "Update task:", initialvalue=task.cget("text"))
                 if new_text:
                     task.config(text=new_text)
+                    self.save_daily_tasks()  # Rewrites file with updated task
                 break
             
     def toggle_strikethrough(self, var, checkbox):
