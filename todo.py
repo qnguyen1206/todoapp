@@ -954,14 +954,18 @@ class TodoApp:
 
     def add_daily_task_from_file(self, task_text):
         # Create a frame for each task with its buttons
-        task_frame = tk.Frame(self.daily_todo_listbox)
+        task_frame = tk.Frame(self.daily_todo_listbox, bg="#f0f0f0")
         task_frame.pack(fill="x", anchor="w", padx=5, pady=2)
+        
+        # Add drag handle
+        drag_handle = tk.Label(task_frame, text="≡", fg="gray", bg="#f0f0f0", cursor="fleur")
+        drag_handle.pack(side=tk.LEFT, padx=(0, 5))
         
         # Create checkbox
         var = tk.BooleanVar()
         checkbox = tk.Checkbutton(task_frame, text=task_text, variable=var,
                                   command=lambda v=var, cb=None: self.toggle_strikethrough(v, cb),
-                                  anchor='w')
+                                  anchor='w', bg="#f0f0f0")
         checkbox.var = var
         checkbox.config(command=lambda v=var, cb=checkbox: self.toggle_strikethrough(v, cb))
         checkbox.pack(side=tk.LEFT, fill="x", expand=True)
@@ -979,6 +983,77 @@ class TodoApp:
         # Store the frame and checkbox
         checkbox.frame = task_frame
         self.tasks.append(checkbox)
+        
+        # Configure drag and drop
+        self.configure_drag_drop(task_frame, drag_handle, checkbox)
+
+    def configure_drag_drop(self, task_frame, drag_handle, checkbox):
+        # Store data needed during drag operations
+        task_frame.drag_data = {"y": 0, "item": None, "index": 0}
+        
+        # Bind mouse events to the drag handle
+        drag_handle.bind("<ButtonPress-1>", lambda e, f=task_frame: self.on_drag_start(e, f))
+        drag_handle.bind("<B1-Motion>", lambda e, f=task_frame: self.on_drag_motion(e, f))
+        drag_handle.bind("<ButtonRelease-1>", lambda e, f=task_frame, cb=checkbox: self.on_drag_stop(e, f, cb))
+
+    def on_drag_start(self, event, frame):
+        # Record the initial position and mark this item for dragging
+        frame.drag_data["y"] = event.y_root
+        frame.drag_data["item"] = frame
+        
+        # Find the index of this task in our list
+        for i, task in enumerate(self.tasks):
+            if task.frame == frame:
+                frame.drag_data["index"] = i
+                break
+        
+        # Change background color to indicate dragging
+        frame.config(bg="#e0e0e0")
+        for widget in frame.winfo_children():
+            if widget.winfo_class() != 'Button':  # Don't change button colors
+                widget.config(bg="#e0e0e0")
+
+    def on_drag_motion(self, event, frame):
+        # Calculate how far we've moved
+        delta_y = event.y_root - frame.drag_data["y"]
+        
+        if abs(delta_y) > 10:  # Only move if we've dragged a significant amount
+            # Get current position in the list
+            current_index = frame.drag_data["index"]
+            
+            # Determine new position based on drag direction
+            new_index = current_index
+            if delta_y < 0 and current_index > 0:  # Moving up
+                new_index = current_index - 1
+            elif delta_y > 0 and current_index < len(self.tasks) - 1:  # Moving down
+                new_index = current_index + 1
+            
+            # If position changed, update the list
+            if new_index != current_index:
+                # Update the task list
+                task = self.tasks.pop(current_index)
+                self.tasks.insert(new_index, task)
+                
+                # Repack all frames in the new order
+                for t in self.tasks:
+                    t.frame.pack_forget()
+                
+                for t in self.tasks:
+                    t.frame.pack(fill="x", anchor="w", padx=5, pady=2)
+                    
+                # Update the drag data for the next motion
+                frame.drag_data["y"] = event.y_root
+                frame.drag_data["index"] = new_index
+
+    def on_drag_stop(self, event, frame, checkbox):
+        # Reset the appearance
+        frame.config(bg="#f0f0f0")
+        for widget in frame.winfo_children():
+            if widget.winfo_class() != 'Button':  # Don't change button colors
+                widget.config(bg="#f0f0f0")
+        
+        # Save the new order
+        self.save_daily_tasks()
 
     def save_daily_tasks(self):
         """Modified to respect storage preference"""
