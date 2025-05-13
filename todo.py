@@ -40,11 +40,6 @@ class TodoApp:
         self.current_ai_model = "deepseek-r1:14b"  # Default model
         self.available_models = [
             "deepseek-r1:14b",
-            "llama2:7b",
-            "llama2:13b",
-            "mistral:7b",
-            "codellama:13b",
-            "neural-chat:7b"
         ]
 
         # Add startup check before creating widgets

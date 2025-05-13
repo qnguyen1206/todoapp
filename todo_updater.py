@@ -10,8 +10,16 @@ from tkinter import messagebox
 
 # Configuration (Update these values!)
 REPO_URL = "https://github.com/Kairu1206/todoapp/releases/latest"
-CURRENT_VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"  # Version file in your main app directory
-MAIN_APP_EXE = "todo.exe"  # Name of your main executable
+CURRENT_VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"
+# Get the path to the current executable
+if getattr(sys, 'frozen', False):
+    # Running as compiled executable
+    MAIN_APP_EXE = sys.executable
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    # Running as script
+    MAIN_APP_EXE = os.path.abspath(sys.argv[0])
+    APP_DIR = os.path.dirname(MAIN_APP_EXE)
 
 class Updater:
     def __init__(self):
@@ -39,17 +47,26 @@ class Updater:
         temp_dir = Path("update_temp")
         temp_dir.mkdir(exist_ok=True)
         
+        # Get the filename from the executable path
+        exe_filename = os.path.basename(MAIN_APP_EXE)
+        
         # Download new EXE
-        new_exe_path = temp_dir / MAIN_APP_EXE
+        new_exe_path = temp_dir / exe_filename
         with urllib.request.urlopen(asset_url) as response:
             with open(new_exe_path, "wb") as f:
                 f.write(response.read())
         
         # Download new version.txt
-        version_url = asset_url.replace(MAIN_APP_EXE, CURRENT_VERSION_FILE)
-        with urllib.request.urlopen(version_url) as response:
-            with open(temp_dir / CURRENT_VERSION_FILE, "wb") as f:
-                f.write(response.read())
+        version_filename = os.path.basename(CURRENT_VERSION_FILE)
+        version_url = asset_url.replace(exe_filename, version_filename)
+        try:
+            with urllib.request.urlopen(version_url) as response:
+                with open(temp_dir / version_filename, "wb") as f:
+                    f.write(response.read())
+        except:
+            # If version file download fails, create one with the remote version
+            with open(temp_dir / version_filename, "w") as f:
+                f.write(self.get_remote_version())
         
         return new_exe_path
 
@@ -58,8 +75,8 @@ class Updater:
 timeout /t 3 /nobreak >nul
 del "{MAIN_APP_EXE}"
 move "{new_exe_path}" "{MAIN_APP_EXE}"
-del "{new_exe_path.parent / CURRENT_VERSION_FILE}"
-move "{new_exe_path.parent / CURRENT_VERSION_FILE}" "{CURRENT_VERSION_FILE}"
+del "{new_exe_path.parent / os.path.basename(CURRENT_VERSION_FILE)}"
+move "{new_exe_path.parent / os.path.basename(CURRENT_VERSION_FILE)}" "{CURRENT_VERSION_FILE}"
 rmdir /s /q "{new_exe_path.parent}"
 start "" "{MAIN_APP_EXE}"
 del "%~f0"
@@ -79,8 +96,12 @@ del "%~f0"
                 # Get download URL for the EXE from GitHub
                 response = urllib.request.urlopen(REPO_URL)
                 data = json.load(response)
+                
+                # Get the filename of the current executable
+                exe_filename = os.path.basename(MAIN_APP_EXE)
+                
                 asset_url = next(
-                    (a["browser_download_url"] for a in data["assets"] if a["name"] == MAIN_APP_EXE),
+                    (a["browser_download_url"] for a in data["assets"] if a["name"] == exe_filename),
                     None
                 )
                 
