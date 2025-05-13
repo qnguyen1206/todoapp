@@ -4,7 +4,6 @@ import re
 import tkinter as tk
 import requests
 import threading
-import markdown
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from tkcalendar import DateEntry
@@ -14,7 +13,6 @@ from pathlib import Path
 from PIL import Image, ImageTk
 import shutil
 import mimetypes
-import winreg
 import sys
 import win32com.client
 
@@ -51,6 +49,10 @@ class TodoApp:
 
         # Add startup check before creating widgets
         self.startup_enabled = self.check_startup_status()
+        
+        # Add storage preference configuration - default to False
+        self.store_tasks = tk.BooleanVar(value=False)  # Default to NOT storing tasks
+        self.load_storage_preference()
         
         # Create widgets
         self.create_widgets()
@@ -116,6 +118,13 @@ class TodoApp:
             label="Start with Windows",
             variable=self.startup_var,
             command=self.toggle_startup
+        )
+
+        # Add storage preference checkbox
+        options_menu.add_checkbutton(
+            label="Store Tasks Persistently",
+            variable=self.store_tasks,
+            command=self.toggle_storage
         )
 
         menubar.add_cascade(label="Options", menu=options_menu)
@@ -204,7 +213,6 @@ class TodoApp:
             anchor="e"
         ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
-
     def create_ai_widgets(self, parent):
         # Chat history
         self.chat_history = ScrolledText(parent, wrap=tk.WORD, state='disabled')
@@ -235,12 +243,10 @@ class TodoApp:
         # Initial greeting
         self.update_chat_history("AI: Hello! I'm your personal task assistant. How can I help you today?\n")
 
-
     def update_time(self):
         current_time = datetime.now().strftime("%m-%d-%Y %H:%M:%S")
         self.time_label.config(text=current_time)
         self.root.after(1000, self.update_time)  # Update every second
-
 
     def sort_column(self, column, reverse):
         # Get current tasks
@@ -508,9 +514,11 @@ class TodoApp:
             return sorted(tasks, key=lambda x: (datetime.strptime(x[1], "%m-%d-%Y"), -int(x[2])))
 
     def save_tasks(self, tasks):
-        with open(TODO_FILE, "w") as f:
-            for task in tasks:
-                f.write(" | ".join(str(x) for x in task) + "\n")
+        """Modified to respect storage preference"""
+        if self.store_tasks.get():
+            with open(TODO_FILE, "w") as f:
+                for task in tasks:
+                    f.write(" | ".join(str(x) for x in task) + "\n")
 
     def show_character(self):
         message = f"Character Level: {self.level}\nTasks Completed: {self.tasks_completed}"
@@ -545,7 +553,6 @@ class TodoApp:
         # Start processing in a separate thread
         threading.Thread(target=self.get_ai_response, args=(user_text, thinking_index)).start()
 
-    # Update the get_ai_response method with streaming support
     def get_ai_response(self, prompt, thinking_index):
         try:
             # If there are uploaded files, include their paths in the context
@@ -627,7 +634,6 @@ class TodoApp:
         self.chat_history.config(state='disabled')
         self.chat_history.see(tk.END)
 
-    # Add this new method for markdown processing
     def insert_with_markdown(self, text):
         # Split into lines for block-level processing
         lines = text.split('\n')
@@ -691,7 +697,6 @@ class TodoApp:
                 
             self.chat_history.insert(tk.END, '\n')
 
-    # Add these methods to the TodoApp class
     def handle_ai_commands(self, full_response):
         # Extract commands from response
         command_pattern = re.compile(r'<command>(.*?)</command>', re.DOTALL)
@@ -981,14 +986,16 @@ class TodoApp:
         self.tasks.append(checkbox)
 
     def save_daily_tasks(self):
-        tasks = []
-        for task in self.tasks:
-            if task.winfo_exists():  # Check if widget still exists
-                tasks.append(task.cget("text"))
+        """Modified to respect storage preference"""
+        if self.store_tasks.get():
+            tasks = []
+            for task in self.tasks:
+                if task.winfo_exists():  # Check if widget still exists
+                    tasks.append(task.cget("text"))
     
-        with open(DAILY_TASK_FILE, "w") as file:
-            for task in tasks:
-                file.write(task + "\n")
+            with open(DAILY_TASK_FILE, "w") as file:
+                for task in tasks:
+                    file.write(task + "\n")
 
     def add_daily_task(self):
         task_text = simpledialog.askstring("New Task", "Enter task:")
@@ -1024,6 +1031,43 @@ class TodoApp:
             checkbox.config(fg="gray", font=("Arial", 10, "overstrike"))
         else:
             checkbox.config(fg="black", font=("Arial", 10, "normal"))
+
+    def load_storage_preference(self):
+        """Load the user's preference for storing tasks"""
+        storage_file = str(Path.home()) + "/TODOapp/storage_pref.txt"
+        try:
+            with open(storage_file, "r") as f:
+                pref = f.read().strip()
+                self.store_tasks.set(pref == "True")
+        except FileNotFoundError:
+            # Default to False if file doesn't exist
+            self.store_tasks.set(False)
+            # Save the default preference
+            self.save_storage_preference()
+
+    def save_storage_preference(self):
+        """Save the user's preference for storing tasks"""
+        storage_file = str(Path.home()) + "/TODOapp/storage_pref.txt"
+        with open(storage_file, "w") as f:
+            f.write(str(self.store_tasks.get()))
+
+    def toggle_storage(self):
+        """Toggle whether tasks are stored persistently"""
+        self.save_storage_preference()
+        if not self.store_tasks.get():
+            messagebox.showinfo(
+                "Storage Disabled", 
+                "Tasks will no longer be saved between sessions.\n"
+                "Existing saved tasks will remain until you restart the app."
+            )
+        else:
+            # Save current tasks immediately when enabling storage
+            self.save_tasks(self.load_tasks())
+            self.save_daily_tasks()
+            messagebox.showinfo(
+                "Storage Enabled", 
+                "Tasks will now be saved between sessions."
+            )
 
 
 if __name__ == "__main__":
