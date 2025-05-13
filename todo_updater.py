@@ -27,8 +27,8 @@ class Updater:
     def check_for_updates(self):
         try:
             # Replace with your actual GitHub repo API URL
-            github_username = "YOUR_USERNAME"  # Change this to your GitHub username
-            repo_name = "TODO-App"            # Change this to your repo name
+            github_username = "Kairu1206"  # Change this to your GitHub username
+            repo_name = "todoapp"            # Change this to your repo name
             
             api_url = f"https://api.github.com/repos/{github_username}/{repo_name}/releases/latest"
             response = requests.get(api_url)
