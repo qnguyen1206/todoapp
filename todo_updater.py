@@ -16,7 +16,14 @@ class Updater:
     def get_current_version(self):
         try:
             with open(self.version_file, "r") as f:
-                return f.read().strip()
+                version = f.read().strip()
+                # Clean up version string
+                parts = []
+                for part in version.split('.'):
+                    # Extract numeric part if mixed with text
+                    numeric = ''.join(c for c in part if c.isdigit())
+                    parts.append(numeric if numeric else '0')
+                return '.'.join(parts[:3])  # Limit to 3 components
         except FileNotFoundError:
             # Create version file if it doesn't exist
             os.makedirs(os.path.dirname(self.version_file), exist_ok=True)
@@ -28,7 +35,7 @@ class Updater:
         try:
             # Replace with your actual GitHub repo API URL
             github_username = "Kairu1206"  # Change this to your GitHub username
-            repo_name = "todoapp"            # Change this to your repo name
+            repo_name = "todoapp"          # Change this to your repo name
             
             api_url = f"https://api.github.com/repos/{github_username}/{repo_name}/releases/latest"
             response = requests.get(api_url)
@@ -43,20 +50,49 @@ class Updater:
             print(f"Update check failed: {e}")
     
     def is_newer_version(self, latest, current):
-        # Simple version comparison (assumes format like "1.2.3")
-        latest_parts = [int(x) for x in latest.split(".")]
-        current_parts = [int(x) for x in current.split(".")]
-        
-        for i in range(max(len(latest_parts), len(current_parts))):
-            latest_part = latest_parts[i] if i < len(latest_parts) else 0
-            current_part = current_parts[i] if i < len(current_parts) else 0
+        # More robust version comparison that handles invalid version formats
+        try:
+            # Clean up version strings and ensure they're valid
+            latest = latest.strip()
+            current = current.strip()
             
-            if latest_part > current_part:
-                return True
-            elif latest_part < current_part:
+            # Handle empty version strings
+            if not latest or not current:
                 return False
-        
-        return False
+                
+            # Split version strings into components
+            latest_parts = latest.split(".")
+            current_parts = current.split(".")
+            
+            # Convert parts to integers, handling non-numeric parts
+            latest_nums = []
+            for part in latest_parts:
+                try:
+                    latest_nums.append(int(part))
+                except ValueError:
+                    latest_nums.append(0)  # Non-numeric parts become 0
+                    
+            current_nums = []
+            for part in current_parts:
+                try:
+                    current_nums.append(int(part))
+                except ValueError:
+                    current_nums.append(0)  # Non-numeric parts become 0
+            
+            # Compare version components
+            for i in range(max(len(latest_nums), len(current_nums))):
+                latest_part = latest_nums[i] if i < len(latest_nums) else 0
+                current_part = current_nums[i] if i < len(current_nums) else 0
+                
+                if latest_part > current_part:
+                    return True
+                elif latest_part < current_part:
+                    return False
+            
+            return False
+        except Exception as e:
+            print(f"Version comparison error: {e}")
+            return False
     
     def prompt_update(self, new_version, download_url):
         root = tk.Tk()
@@ -91,3 +127,4 @@ class Updater:
 
 if __name__ == "__main__":
     Updater()
+
