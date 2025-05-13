@@ -15,6 +15,7 @@ a = Analysis(
         'tkcalendar',
         'markdown',
         'requests',
+        'todo_updater',  # Add the updater module
     ],
     hookspath=[],
     hooksconfig={},
