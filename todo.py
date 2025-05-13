@@ -1071,6 +1071,14 @@ class TodoApp:
 
 
 if __name__ == "__main__":
+    # Check for updates before launching the main app
+    import todo_updater
+    try:
+        todo_updater.Updater()
+    except Exception as e:
+        print(f"Update check failed: {e}")
+        
+    # Continue with normal app startup
     root = tk.Tk()
     app = TodoApp(root)
     root.mainloop()

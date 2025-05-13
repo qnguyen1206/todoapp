@@ -10,7 +10,7 @@ from tkinter import messagebox
 
 # Configuration (Update these values!)
 REPO_URL = "https://github.com/Kairu1206/todoapp/releases/latest"
-CURRENT_VERSION_FILE = "version.txt"  # Version file in your main app directory
+CURRENT_VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"  # Version file in your main app directory
 MAIN_APP_EXE = "todo.exe"  # Name of your main executable
 
 class Updater:

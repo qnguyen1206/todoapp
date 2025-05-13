@@ -4,7 +4,7 @@ a = Analysis(
     ['todo.py'],
     pathex=[],
     binaries=[],
-    datas=[('clipboard.png', '.')],
+    datas=[('clipboard.png', '.'), ('version.txt', '.')],
     hiddenimports=[
         'PIL',
         'PIL._imagingtk',
