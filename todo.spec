@@ -15,7 +15,11 @@ a = Analysis(
         'tkcalendar',
         'markdown',
         'requests',
-        'todo_updater',  # Add the updater module
+        'mysql.connector',
+        'socket',
+        'keyring',
+        'keyring.backends.Windows',
+        'todo_updater',
     ],
     hookspath=[],
     hooksconfig={},
