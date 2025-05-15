@@ -1,82 +1,76 @@
-**GAMIFY TODO APP WITH AI INTEGRATED**
-
-- **THIS IS A PERSONAL PROJECTS SIMPLE GAMIFY TODO APP THAT HAVE DEEPSEEK-R1 14B PARAM INTEGRATE.**
-
-REQUIREMENTS TO RUN THE APP:
-
-- Have LLMs or AIs locally, if not, please get one from Ollama
+____________________________________
+**REQUIREMENTS TO RUN THE APP:**
+____________________________________
+**(1) Have LLMs or AIs locally, if not, please get one from Ollama**
 
   - If you don't have Ollama, you can download it from https://ollama.ai/download
-  - If you have Ollama, please make sure you have the "[your models name]" model installed
+  - If you have Ollama, make sure you have the "[your models name]" model installed
     - You can install it by running the command `ollama run [your models name]` in your terminal
     - If you get an error, please run the command `ollama pull [your models name]` in your terminal
     - You can have multiple models installed:
       - Change the `self.current_ai_model` variable in the `todo.py` file to the model you want to use.
       - Add more models to the `self.available_models` list in the `todo.py` file to add more models to the AI Model menu in the app.
 
-- Have MySQL installed and running (for LAN sharing)
+**(2) Have MySQL installed and running (for LAN sharing)**
 
   - If you don't have MySQL, you can download it from https://dev.mysql.com/downloads/installer/
-  - Please follow the instructions in the app to install and configure MySQL:
 
-    - MySQL Installation Guide
-      The MySQL sharing feature requires MySQL Server to be installed and running on your computer.
-      Follow these steps to install MySQL:
+**(3) Python 3.13 (or later)**
+  - If you don't have Python 3.13 or above, you can download it from https://www.python.org/
 
-      1. Download MySQL Installer:
+____________________________________
+**HOW TO RUN THE APP:**
+____________________________________
 
-      - Go to https://dev.mysql.com/downloads/installer/
-      - Download the MySQL Installer for Windows
+**STEP 1 /!\\ THIS STEP IS VERY IMPORTANT. PLEASE FOLLOW IT CORRECTLY /!\\**
+  - Download the lastest version of the app from GitHub Release
+  - Extract the folder
+  - Go into the folder
+  - Change the name of the inside folder to "TODOapp"
+    
+  - Expected Structure Before:
+    - todoapp-1.2.3 → todoapp-1.2.3 → [source code]
+  - Expected Structure After:
+    - todoapp-1.2.3 → TODOapp → [source code]
+    
+**STEP 2**
+  - Run Ollama
+  - Run MySQL WorkBench
+  - Run MySQL Server
+    
+**STEP 3**
+  - Run the app
 
-      2. Run the installer:
+____________________________________
+**NOTES:**
+____________________________________
 
-      - Choose "Custom" installation
-      - Select at minimum:
-        - MySQL Server
-        - MySQL Workbench (optional but recommended)
-      - Click "Next" and follow the installation steps
+**Problem 1**
 
-      3. Configure MySQL Server:
+*Description*
 
-      - Use the recommended defaults
-      - Set a root password (remember this password!)
-      - Create a user account if prompted
-      - Make sure "Configure MySQL Server as a Windows Service" is selected
-      - Ensure "Start the MySQL Server at System Startup" is checked
+- When you first run the app and the version will be 0.0.0.
 
-      4. Verify MySQL is running:
+*Fix*
 
-      - Open Services (search for "services" in Windows search)
-      - Look for "MySQL" in the list
-      - Status should show "Running"
-      - If not running, right-click and select "Start"
+- This is the default value when the app is first install in order to maintain the lowest possible version for the auto updater to work.
+- Currently working on the fix for the auto updater.
 
-      5. Configure TODO App:
+**Problem 2**
 
-      - Return to the TODO App
-      - Go to Options → Configure MySQL
-      - Enter your MySQL credentials:
-        - Host: localhost
-        - User: root (or the user you created)
-        - Password: (the password you set)
-        - Database: todoapp (this will be created automatically)
+*Description*
 
-      6. Enable MySQL sharing:
+- App throwing error "todoapp table does not exist" or something similar.
 
-      - Go to Options → Enable MySQL Sharing
+*Fix*
 
-      Troubleshooting:
+- This error is thrown on the first run because the local machine does not have the table.
+- Run "Test Connection" in "Config MySQL Connection". This will create a new todoapp table.
+- Currently working on the fix for this create table problem.
 
-      - If you get "Access denied" errors, check your username and password
-      - If you get "Can't connect to MySQL server" errors, make sure the MySQL service is running
-      - If you installed MySQL previously, you may need to reset your root password
-
-      Need more help? Visit:
-      https://dev.mysql.com/doc/mysql-installation-excerpt/8.0/en/
-
-- Python 3.13 (or later)
-
-WHAT CAN THE APP DO:
+____________________________________
+**WHAT CAN THE APP DO:**
+____________________________________
 
 - Add, Remove, Finish, Edit Tasks Manually or through AI
 - Keep records of levels, number of current tasks and number of completed tasks
@@ -85,7 +79,9 @@ WHAT CAN THE APP DO:
 - Able to start on window startup
 - Share tasks on LAN through MySQL
 
+____________________________________
 WHAT CAN THE APP DO IN THE FUTURE:
+____________________________________
 
 - Keep records of what tasks have been done
 - Better UI including level progress bar and more settings for personal preferences
