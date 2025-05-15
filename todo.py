@@ -2120,5 +2120,5 @@ if __name__ == "__main__":
     # Continue with normal app startup
     root = tk.Tk()
     app = TodoApp(root)
-    app.root.iconphoto(True, tk.PhotoImage(file='clipboard.png'))
+    app.root.iconphoto(True, tk.PhotoImage(file=ICON_PATH))
     root.mainloop()
