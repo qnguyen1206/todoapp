@@ -107,66 +107,6 @@ class TodoApp:
         except FileNotFoundError:
             return "0.0.0 (dev)"
 
-    def create_widgets(self):
-        menubar = tk.Menu(self.root)
-        self.options_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
-
-        # AI Model submenu
-        ai_model_menu = tk.Menu(self.options_menu, tearoff=0)
-        self.selected_model = tk.StringVar(value=self.current_ai_model)
-        for model in self.available_models:
-            ai_model_menu.add_radiobutton(
-                label=model,
-                value=model,
-                variable=self.selected_model,
-                command=lambda m=model: self.change_ai_model(m)
-            )
-        self.options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
-
-        # Startup checkbox
-        self.startup_var = tk.BooleanVar(value=self.startup_enabled)
-        self.options_menu.add_checkbutton(
-            label="Start with Windows",
-            variable=self.startup_var,
-            command=self.toggle_startup
-        )
-
-        # Add storage preference checkbox
-        self.options_menu.add_checkbutton(
-            label="Store Tasks Persistently",
-            variable=self.store_tasks,
-            command=self.toggle_storage
-        )
-        
-        # Add MySQL sharing option
-        self.options_menu.add_checkbutton(
-            label="Enable MySQL Sharing",
-            variable=self.mysql_enabled,
-            command=self.toggle_mysql
-        )
-        self.options_menu.add_command(label="Configure MySQL", command=self.configure_mysql)
-        
-        # Add LAN sharing options
-        self.share_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
-        self.share_menu.add_command(label="Share Tasks on LAN", command=self.share_tasks_on_lan)
-        self.share_menu.add_command(label="Import Tasks from LAN", command=self.import_tasks_from_lan)
-        
-        # Add MySQL-specific sharing options (initially disabled)
-        self.share_menu.add_separator()
-        # Store the index of the MySQL sharing menu item
-        self.mysql_share_index = 3  # Index after separator (0=Share, 1=Import, 2=separator)
-        self.share_menu.add_command(
-            label="MySQL Sharing (Disabled)", 
-            state=tk.DISABLED
-        )
-        
-        menubar.add_cascade(label="Options", menu=self.options_menu)
-        menubar.add_cascade(label="Share", menu=self.share_menu)
-        self.root.config(menu=menubar)
-        
-        # Update the menu state based on current MySQL status
-        self.update_mysql_menu_state()
-
     def update_mysql_menu_state(self):
         """Update menu items based on MySQL enabled status"""
         if self.mysql_enabled.get():
@@ -196,6 +136,12 @@ class TodoApp:
         ttk.Label(level_frame, text="Level:", font=('Helvetica', 12, 'bold')).pack(side=tk.LEFT)
         self.level_label = ttk.Label(level_frame, text=str(self.level), font=('Helvetica', 12))
         self.level_label.pack(side=tk.LEFT, padx=5)
+
+        # Add progress bar for level
+        self.level_progress = ttk.Progressbar(level_frame, length=500, mode='determinate')
+        self.level_progress.pack(side=tk.LEFT, padx=5)
+        # Set initial progress value based on tasks completed
+        self.update_level_progress()
 
         # Tasks Completed row
         completed_frame = ttk.Frame(char_frame)
@@ -338,6 +284,14 @@ class TodoApp:
     def update_character_labels(self):
         self.level_label.config(text=str(self.level))
         self.tasks_label.config(text=str(self.tasks_completed))
+        self.update_level_progress()  # Update progress bar
+    
+    def update_level_progress(self):
+        """Update the level progress bar based on tasks completed"""
+        # Calculate progress to next level (every 5 tasks)
+        tasks_to_next_level = 5
+        progress_value = (self.tasks_completed % tasks_to_next_level) * (100 / tasks_to_next_level)
+        self.level_progress.config(value=progress_value)
 
     def parse_date(self, raw_date):
         digits = re.sub(r"\D", "", raw_date)
