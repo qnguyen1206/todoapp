@@ -56,28 +56,9 @@
 
 ---
 
-**Problem 1**
+- For the first time running the app, the user will need to run "Test Connection" in "Config MySQL Connection" or "Enable MySQL Sharing" in order to create the todoapp table if the user wants to use the LAN sharing feature.
 
-_Description_
-
-- When you first run the app and the version will be 0.0.0.
-
-_Fix_
-
-- This is the default value when the app is first install in order to maintain the lowest possible version for the auto updater to work.
-- Currently working on the fix for the auto updater.
-
-**Problem 2**
-
-_Description_
-
-- App throwing error "todoapp table does not exist" or something similar.
-
-_Fix_
-
-- This error is thrown on the first run because the local machine does not have the table.
-- Run "Test Connection" in "Config MySQL Connection" or "Enable MySQL Sharing". This will create a new todoapp table for the first time run.
-- Currently working on the fix for this create table problem.
+- The app will automatically check for updates and prompt the user to update if a new version is available.
 
 ---
 
