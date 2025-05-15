@@ -1,8 +1,6 @@
----
-
+________________________________
 **REQUIREMENTS TO RUN THE APP:**
-
----
+________________________________
 
 **(1) Have LLMs or AIs locally, if not, please get one from Ollama**
 
@@ -22,11 +20,9 @@
 
 - If you don't have Python 3.13 or above, you can download it from https://www.python.org/
 
----
-
+________________________
 **HOW TO RUN THE APP:**
-
----
+________________________
 
 **STEP 1 /!\\ THIS STEP IS VERY IMPORTANT. PLEASE FOLLOW IT CORRECTLY /!\\**
 
@@ -50,21 +46,17 @@
 - Go to dist folder
 - Run the todo.exe file
 
----
-
+_________________
 **NOTES:**
-
----
+_________________
 
 - For the first time running the app, the user will need to run "Test Connection" in "Config MySQL Connection" or "Enable MySQL Sharing" in order to create the todoapp table if the user wants to use the LAN sharing feature.
 
 - The app will automatically check for updates and prompt the user to update if a new version is available.
 
----
-
+_________________________
 **WHAT CAN THE APP DO:**
-
----
+_________________________
 
 - Add, Remove, Finish, Edit Tasks Manually or through AI
 - Keep records of levels, number of current tasks and number of completed tasks
@@ -72,13 +64,11 @@
 - Able to upload files for context to AI
 - Able to start on window startup
 - Share tasks on LAN through MySQL
+- Auto update
 
----
+_________________________________
 
 WHAT CAN THE APP DO IN THE FUTURE:
+__________________________________
 
----
-
-- Keep records of what tasks have been done
-- Better UI including level progress bar and more settings for personal preferences
-- Something fun for more engagment
+- Please let me know! For now the app is at its finest.
