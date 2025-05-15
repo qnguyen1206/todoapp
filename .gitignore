@@ -1,4 +1,13 @@
 todo.txt
 character.txt
 dailytask.txt
+storage_pref.txt
+config.txt
+
 mysql_config.json
+
+todo.exe
+
+build/
+dist/
+uploads/

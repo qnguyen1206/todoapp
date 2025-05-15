@@ -11,6 +11,7 @@ class Updater:
     def __init__(self):
         self.version_file = str(Path.home()) + "/TODOapp/version.txt"
         self.current_version = self.get_current_version()
+        print(self.current_version)
         self.check_for_updates()
     
     def get_current_version(self):
@@ -20,9 +21,12 @@ class Updater:
                 # Clean up version string
                 parts = []
                 for part in version.split('.'):
-                    # Extract numeric part if mixed with text
-                    numeric = ''.join(c for c in part if c.isdigit())
-                    parts.append(numeric if numeric else '0')
+                    if part.isalpha():
+                        parts.append(part)                 # keep “dev”
+                    else:
+                        # pull out any leading digits (or default to "0")
+                        num = ''.join(c for c in part if c.isdigit()) or '0'
+                        parts.append(num)
                 return '.'.join(parts[:3])  # Limit to 3 components
         except FileNotFoundError:
             # Create version file if it doesn't exist
@@ -42,7 +46,7 @@ class Updater:
             
             if response.status_code == 200:
                 latest_release = json.loads(response.text)
-                latest_version = latest_release["tag_name"].replace("v", "")
+                latest_version = latest_release["tag_name"].lstrip("v")
                 
                 if self.is_newer_version(latest_version, self.current_version):
                     self.prompt_update(latest_version, latest_release["assets"][0]["browser_download_url"])
@@ -109,8 +113,13 @@ class Updater:
             # Download the new version
             response = requests.get(url, stream=True)
             if response.status_code == 200:
+                # Determine if it's a zip file
+                is_zip = url.lower().endswith('.zip')
+                
                 # Save to a temporary file
-                temp_file = str(Path.home()) + "/TODOapp/update.exe"
+                download_path = str(Path.home()) + "/TODOapp/"
+                temp_file = download_path + ("update.zip" if is_zip else "update.exe")
+                
                 with open(temp_file, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
@@ -119,12 +128,67 @@ class Updater:
                 with open(self.version_file, "w") as f:
                     f.write(new_version)
                 
-                # Run the installer and exit current app
-                subprocess.Popen([temp_file])
+                # Create a cleanup script that will run after the app exits
+                cleanup_script = download_path + "cleanup.py"
+                
+                # Use raw strings or forward slashes for file paths to avoid escape sequence issues
+                temp_file_path = temp_file.replace("\\", "/")
+                cleanup_script_path = cleanup_script.replace("\\", "/")
+                
+                with open(cleanup_script, "w") as f:
+                    f.write(f"""
+import os
+import time
+import sys
+from pathlib import Path
+
+# Wait a moment for the original process to exit
+time.sleep(2)
+
+# Files to clean up
+files_to_remove = [
+    r"{temp_file_path}",
+    r"{cleanup_script_path}"
+]
+
+# Remove each file
+for file_path in files_to_remove:
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"Removed: {{file_path}}")
+    except Exception as e:
+        print(f"Failed to remove {{file_path}}: {{e}}")
+""")
+                
+                # If it's a zip file, extract it
+                if is_zip:
+                    import zipfile
+                    with zipfile.ZipFile(temp_file, 'r') as zip_ref:
+                        zip_ref.extractall(download_path)
+                    # Look for the exe file
+                    exe_file = download_path + "todo.exe"
+                    # Run the installer and exit current app
+                    subprocess.Popen([exe_file])
+                    # Run cleanup script in background
+                    subprocess.Popen([sys.executable, cleanup_script], 
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    # Run the installer and exit current app
+                    subprocess.Popen([temp_file])
+                    # Run cleanup script in background
+                    subprocess.Popen([sys.executable, cleanup_script],
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
+                
                 sys.exit()
         except Exception as e:
             messagebox.showerror("Update Failed", f"Failed to update: {str(e)}")
 
 if __name__ == "__main__":
     Updater()
+
+
+
+
+
 
