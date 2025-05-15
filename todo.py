@@ -109,10 +109,10 @@ class TodoApp:
 
     def create_widgets(self):
         menubar = tk.Menu(self.root)
-        options_menu = tk.Menu(menubar, tearoff=0)
+        self.options_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
 
         # AI Model submenu
-        ai_model_menu = tk.Menu(options_menu, tearoff=0)
+        ai_model_menu = tk.Menu(self.options_menu, tearoff=0)
         self.selected_model = tk.StringVar(value=self.current_ai_model)
         for model in self.available_models:
             ai_model_menu.add_radiobutton(
@@ -121,39 +121,69 @@ class TodoApp:
                 variable=self.selected_model,
                 command=lambda m=model: self.change_ai_model(m)
             )
-        options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
+        self.options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
 
         # Startup checkbox
         self.startup_var = tk.BooleanVar(value=self.startup_enabled)
-        options_menu.add_checkbutton(
+        self.options_menu.add_checkbutton(
             label="Start with Windows",
             variable=self.startup_var,
             command=self.toggle_startup
         )
 
         # Add storage preference checkbox
-        options_menu.add_checkbutton(
+        self.options_menu.add_checkbutton(
             label="Store Tasks Persistently",
             variable=self.store_tasks,
             command=self.toggle_storage
         )
         
         # Add MySQL sharing option
-        options_menu.add_checkbutton(
+        self.options_menu.add_checkbutton(
             label="Enable MySQL Sharing",
             variable=self.mysql_enabled,
             command=self.toggle_mysql
         )
-        options_menu.add_command(label="Configure MySQL", command=self.configure_mysql)
+        self.options_menu.add_command(label="Configure MySQL", command=self.configure_mysql)
         
         # Add LAN sharing options
-        share_menu = tk.Menu(menubar, tearoff=0)
-        share_menu.add_command(label="Share Tasks on LAN", command=self.share_tasks_on_lan)
-        share_menu.add_command(label="Import Tasks from LAN", command=self.import_tasks_from_lan)
+        self.share_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
+        self.share_menu.add_command(label="Share Tasks on LAN", command=self.share_tasks_on_lan)
+        self.share_menu.add_command(label="Import Tasks from LAN", command=self.import_tasks_from_lan)
         
-        menubar.add_cascade(label="Options", menu=options_menu)
-        menubar.add_cascade(label="Share", menu=share_menu)
+        # Add MySQL-specific sharing options (initially disabled)
+        self.share_menu.add_separator()
+        # Store the index of the MySQL sharing menu item
+        self.mysql_share_index = 3  # Index after separator (0=Share, 1=Import, 2=separator)
+        self.share_menu.add_command(
+            label="MySQL Sharing (Disabled)", 
+            state=tk.DISABLED
+        )
+        
+        menubar.add_cascade(label="Options", menu=self.options_menu)
+        menubar.add_cascade(label="Share", menu=self.share_menu)
         self.root.config(menu=menubar)
+        
+        # Update the menu state based on current MySQL status
+        self.update_mysql_menu_state()
+
+    def update_mysql_menu_state(self):
+        """Update menu items based on MySQL enabled status"""
+        if self.mysql_enabled.get():
+            # MySQL is enabled - update menu items
+            self.share_menu.entryconfig(
+                self.mysql_share_index, 
+                label="MySQL Sharing (Enabled)",
+                state=tk.NORMAL
+            )
+            # You could add additional MySQL-specific menu items here
+        else:
+            # MySQL is disabled - update menu items
+            self.share_menu.entryconfig(
+                self.mysql_share_index, 
+                label="MySQL Sharing (Disabled)",
+                state=tk.DISABLED
+            )
 
     def create_task_manager_widgets(self, parent):
         # Character stats frame
@@ -1173,85 +1203,365 @@ class TodoApp:
                 "Tasks will now be saved between sessions."
             )
 
-    def toggle_mysql(self):
-        """Toggle MySQL sharing functionality"""
+    def create_widgets(self):
+        menubar = tk.Menu(self.root)
+        self.options_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
+
+        # AI Model submenu
+        ai_model_menu = tk.Menu(self.options_menu, tearoff=0)
+        self.selected_model = tk.StringVar(value=self.current_ai_model)
+        for model in self.available_models:
+            ai_model_menu.add_radiobutton(
+                label=model,
+                value=model,
+                variable=self.selected_model,
+                command=lambda m=model: self.change_ai_model(m)
+            )
+        self.options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
+
+        # Startup checkbox
+        self.startup_var = tk.BooleanVar(value=self.startup_enabled)
+        self.options_menu.add_checkbutton(
+            label="Start with Windows",
+            variable=self.startup_var,
+            command=self.toggle_startup
+        )
+
+        # Add storage preference checkbox
+        self.options_menu.add_checkbutton(
+            label="Store Tasks Persistently",
+            variable=self.store_tasks,
+            command=self.toggle_storage
+        )
+        
+        # Create Share menu with all sharing options
+        self.share_menu = tk.Menu(menubar, tearoff=0)
+        
+        # LAN sharing section
+        self.share_menu.add_command(label="Share Tasks on LAN", command=self.share_tasks_on_lan)
+        self.share_menu.add_command(label="Import Tasks from LAN", command=self.import_tasks_from_lan)
+        
+        # MySQL sharing section
+        self.share_menu.add_separator()
+        self.share_menu.add_checkbutton(
+            label="Enable MySQL Sharing",
+            variable=self.mysql_enabled,
+            command=self.toggle_mysql
+        )
+        self.share_menu.add_command(label="Configure MySQL Connection", command=self.configure_mysql)
+        
+        # Add menus to menubar
+        menubar.add_cascade(label="Options", menu=self.options_menu)
+        menubar.add_cascade(label="Share", menu=self.share_menu)
+        self.root.config(menu=menubar)
+        
+        # Update menu states based on current settings
+        self.update_share_menu_state()
+
+    def update_share_menu_state(self):
+        """Update menu items based on MySQL enabled status"""
+        # Enable/disable LAN sharing options based on MySQL status
         if self.mysql_enabled.get():
-            # Test connection before enabling
-            if self.test_mysql_connection():
-                self.setup_mysql_tables()
-                messagebox.showinfo("MySQL Enabled", "MySQL sharing has been enabled.")
-                # Sync current tasks to MySQL
-                self.sync_tasks_to_mysql()
-            else:
+            # Enable LAN sharing options when MySQL is enabled
+            self.share_menu.entryconfigure("Share Tasks on LAN", state=tk.NORMAL)
+            self.share_menu.entryconfigure("Import Tasks from LAN", state=tk.NORMAL)
+        else:
+            # Disable LAN sharing options when MySQL is disabled
+            self.share_menu.entryconfigure("Share Tasks on LAN", state=tk.DISABLED)
+            self.share_menu.entryconfigure("Import Tasks from LAN", state=tk.DISABLED)
+        
+        # Always keep Configure MySQL Connection enabled
+        self.share_menu.entryconfigure("Configure MySQL Connection", state=tk.NORMAL)
+
+    def show_mysql_status_details(self):
+        """Show detailed MySQL status information"""
+        mysql_status = self.check_mysql_status()
+        
+        if mysql_status == "running":
+            message = "MySQL is running and properly configured."
+        elif mysql_status == "access_denied":
+            message = "MySQL is running, but the credentials are incorrect.\n\nPlease use 'Configure MySQL Connection' to update your credentials."
+        elif mysql_status == "not_running":
+            message = "MySQL service is installed but not running.\n\nYou can start it manually through Windows Services or by disabling and re-enabling MySQL sharing."
+        else:
+            message = "MySQL is not installed or not detected.\n\nPlease install MySQL Server to use this feature."
+        
+        messagebox.showinfo("MySQL Status Details", message)
+
+    def toggle_mysql(self):
+        """Toggle MySQL sharing functionality with installation check"""
+        if self.mysql_enabled.get():
+            # Check if MySQL is installed first
+            mysql_status = self.check_mysql_status()
+            
+            if mysql_status == "not_installed":
+                # MySQL not installed - show installation guide
+                self.show_mysql_installation_guide()
+                # Reset the checkbox since MySQL isn't available
                 self.mysql_enabled.set(False)
-                messagebox.showerror("Connection Failed", "Could not connect to MySQL. Please check your configuration.")
+            elif mysql_status == "not_running":
+                # MySQL installed but not running
+                if messagebox.askyesno("MySQL Service", 
+                                      "MySQL is installed but not running. Would you like to try starting it?"):
+                    if self.start_mysql_service():
+                        # Service started, now open config dialog
+                        self.configure_mysql(after_config=self.test_and_enable_mysql)
+                    else:
+                        messagebox.showerror("Service Error", 
+                                            "Could not start MySQL service. Please start it manually.")
+                        self.mysql_enabled.set(False)
+                else:
+                    self.mysql_enabled.set(False)
+            elif mysql_status == "access_denied":
+                # MySQL is running but credentials are wrong - open config dialog
+                messagebox.showinfo("MySQL Configuration", 
+                                   "MySQL is running, but we need the correct credentials to connect.")
+                self.configure_mysql(after_config=self.test_and_enable_mysql)
+            else:
+                # MySQL is installed and running with correct credentials
+                self.test_and_enable_mysql()
         else:
             messagebox.showinfo("MySQL Disabled", "MySQL sharing has been disabled.")
+            self.save_mysql_config()
         
-        # Save the configuration
-        self.save_mysql_config()
+        # Update menu state after toggling
+        self.update_share_menu_state()
 
-    def configure_mysql(self):
-        """Open dialog to configure MySQL connection"""
+    def update_mysql_menu(self):
+        """Update the MySQL status menu item by recreating it"""
+        # Remove all items after the Configure MySQL option
+        try:
+            # Find the index of "Configure MySQL Connection"
+            for i in range(self.share_menu.index("end") + 1):
+                if self.share_menu.entrycget(i, "label") == "Configure MySQL Connection":
+                    config_index = i
+                    break
+            
+            # Delete all items after it
+            while self.share_menu.index("end") > config_index:
+                self.share_menu.delete(self.share_menu.index("end"))
+            
+            # Add separator and status item
+            self.share_menu.add_separator()
+            self.update_mysql_menu_state()
+        except:
+            # If there's an error, just rebuild the menu
+            self.update_mysql_menu_state()
+
+    def show_mysql_installation_guide(self):
+        """Show a dialog with MySQL installation instructions"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("MySQL Installation Required")
+        dialog.geometry("600x500")
+        dialog.resizable(True, True)
+        
+        # Create a frame with scrollbar
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Add text widget with installation instructions
+        text = tk.Text(frame, wrap=tk.WORD, yscrollcommand=scrollbar.set)
+        text.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text.yview)
+        
+        # Installation instructions
+        instructions = """
+MySQL Installation Guide
+
+The MySQL sharing feature requires MySQL Server to be installed and running on your computer.
+Follow these steps to install MySQL:
+
+1. Download MySQL Installer:
+   - Go to https://dev.mysql.com/downloads/installer/
+   - Download the MySQL Installer for Windows
+
+2. Run the installer:
+   - Choose "Custom" installation
+   - Select at minimum:
+     * MySQL Server
+     * MySQL Workbench (optional but recommended)
+   - Click "Next" and follow the installation steps
+
+3. Configure MySQL Server:
+   - Use the recommended defaults
+   - Set a root password (remember this password!)
+   - Create a user account if prompted
+   - Make sure "Configure MySQL Server as a Windows Service" is selected
+   - Ensure "Start the MySQL Server at System Startup" is checked
+
+4. Verify MySQL is running:
+   - Open Services (search for "services" in Windows search)
+   - Look for "MySQL" in the list
+   - Status should show "Running"
+   - If not running, right-click and select "Start"
+
+5. Configure TODO App:
+   - Return to the TODO App
+   - Go to Options → Configure MySQL
+   - Enter your MySQL credentials:
+     * Host: localhost
+     * User: root (or the user you created)
+     * Password: (the password you set)
+     * Database: todoapp (this will be created automatically)
+
+6. Enable MySQL sharing:
+   - Go to Options → Enable MySQL Sharing
+
+Troubleshooting:
+- If you get "Access denied" errors, check your username and password
+- If you get "Can't connect to MySQL server" errors, make sure the MySQL service is running
+- If you installed MySQL previously, you may need to reset your root password
+
+Need more help? Visit:
+https://dev.mysql.com/doc/mysql-installation-excerpt/8.0/en/
+"""
+        
+        text.insert(tk.END, instructions)
+        text.config(state=tk.DISABLED)  # Make text read-only
+        
+        # Add buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Download button
+        def open_mysql_download():
+            import webbrowser
+            webbrowser.open("https://dev.mysql.com/downloads/installer/")
+        
+        download_button = ttk.Button(button_frame, text="Download MySQL", command=open_mysql_download)
+        download_button.pack(side=tk.LEFT, padx=5)
+        
+        # Close button
+        close_button = ttk.Button(button_frame, text="Close", command=dialog.destroy)
+        close_button.pack(side=tk.RIGHT, padx=5)
+
+    def configure_mysql(self, after_config=None):
+        """Open dialog to configure MySQL connection with improved validation"""
         dialog = tk.Toplevel(self.root)
         dialog.title("MySQL Configuration")
-        dialog.geometry("300x200")
+        dialog.geometry("350x250")
         dialog.resizable(False, False)
         
         # Host
         ttk.Label(dialog, text="Host:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         host_entry = ttk.Entry(dialog, width=25)
         host_entry.grid(row=0, column=1, padx=5, pady=5)
-        host_entry.insert(0, self.mysql_config['host'])
+        host_entry.insert(0, self.mysql_config.get('host', 'localhost'))
+        
+        # Port (new field)
+        ttk.Label(dialog, text="Port:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        port_entry = ttk.Entry(dialog, width=25)
+        port_entry.grid(row=1, column=1, padx=5, pady=5)
+        port_entry.insert(0, self.mysql_config.get('port', '3306'))
         
         # User
-        ttk.Label(dialog, text="User:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(dialog, text="User:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
         user_entry = ttk.Entry(dialog, width=25)
-        user_entry.grid(row=1, column=1, padx=5, pady=5)
-        user_entry.insert(0, self.mysql_config['user'])
+        user_entry.grid(row=2, column=1, padx=5, pady=5)
+        user_entry.insert(0, self.mysql_config.get('user', 'root'))
         
         # Password
-        ttk.Label(dialog, text="Password:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(dialog, text="Password:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
         password_entry = ttk.Entry(dialog, width=25, show="*")
-        password_entry.grid(row=2, column=1, padx=5, pady=5)
-        password_entry.insert(0, self.mysql_config['password'])
+        password_entry.grid(row=3, column=1, padx=5, pady=5)
+        password_entry.insert(0, self.mysql_config.get('password', ''))
         
         # Database
-        ttk.Label(dialog, text="Database:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(dialog, text="Database:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
         db_entry = ttk.Entry(dialog, width=25)
-        db_entry.grid(row=3, column=1, padx=5, pady=5)
-        db_entry.insert(0, self.mysql_config['database'])
+        db_entry.grid(row=4, column=1, padx=5, pady=5)
+        db_entry.insert(0, self.mysql_config.get('database', 'todoapp'))
+        
+        # Status label
+        status_label = ttk.Label(dialog, text="")
+        status_label.grid(row=5, column=0, columnspan=2, padx=5, pady=5)
         
         # Test connection button
         def test_connection():
-            config = {
-                'host': host_entry.get(),
-                'user': user_entry.get(),
-                'password': password_entry.get(),
-                'database': db_entry.get()
-            }
+            status_label.config(text="Testing connection...")
+            dialog.update()
             
             try:
+                # Get values from entries
+                config = {
+                    'host': host_entry.get(),
+                    'port': int(port_entry.get()),
+                    'user': user_entry.get(),
+                    'password': password_entry.get(),
+                    'connect_timeout': 5  # Add timeout
+                }
+                
+                # First test connection without database
+                conn = mysql.connector.connect(**config)
+                
+                # Check if database exists
+                cursor = conn.cursor()
+                cursor.execute("SHOW DATABASES")
+                databases = [db[0] for db in cursor]
+                
+                db_name = db_entry.get()
+                if db_name.lower() not in [db.lower() for db in databases]:
+                    # Database doesn't exist - offer to create it
+                    if messagebox.askyesno("Create Database", 
+                                         f"Database '{db_name}' doesn't exist. Create it?"):
+                        cursor.execute(f"CREATE DATABASE `{db_name}`")
+                        status_label.config(text=f"Database '{db_name}' created successfully!")
+                    else:
+                        status_label.config(text="Database not created. Connection test incomplete.")
+                        cursor.close()
+                        conn.close()
+                        return
+                
+                cursor.close()
+                conn.close()
+                
+                # Now try connecting with the database
+                config['database'] = db_name
                 conn = mysql.connector.connect(**config)
                 conn.close()
-                messagebox.showinfo("Success", "Connection successful!")
+                
+                status_label.config(text="Connection successful!")
+            except ValueError:
+                status_label.config(text="Error: Port must be a number")
+            except mysql.connector.Error as err:
+                if err.errno == mysql.connector.errorcode.ER_ACCESS_DENIED_ERROR:
+                    status_label.config(text="Access denied. Check username and password.")
+                elif err.errno == mysql.connector.errorcode.ER_BAD_DB_ERROR:
+                    status_label.config(text=f"Database '{db_entry.get()}' does not exist.")
+                else:
+                    status_label.config(text=f"Error: {err}")
             except Exception as e:
-                messagebox.showerror("Error", f"Connection failed: {str(e)}")
+                status_label.config(text=f"Error: {e}")
         
-        ttk.Button(dialog, text="Test Connection", command=test_connection).grid(row=4, column=0, padx=5, pady=10)
+        ttk.Button(dialog, text="Test Connection", command=test_connection).grid(row=6, column=0, padx=5, pady=10)
         
         # Save button
         def save_config():
-            self.mysql_config = {
-                'host': host_entry.get(),
-                'user': user_entry.get(),
-                'password': password_entry.get(),
-                'database': db_entry.get()
-            }
-            self.save_mysql_config()
-            dialog.destroy()
+            try:
+                # Validate port is a number
+                port = int(port_entry.get())
+                
+                self.mysql_config = {
+                    'host': host_entry.get(),
+                    'port': port,
+                    'user': user_entry.get(),
+                    'password': password_entry.get(),
+                    'database': db_entry.get()
+                }
+                self.save_mysql_config()
+                dialog.destroy()
+                
+                # Call the callback function if provided
+                if after_config:
+                    after_config()
+            except ValueError:
+                status_label.config(text="Error: Port must be a number")
             
-        ttk.Button(dialog, text="Save", command=save_config).grid(row=4, column=1, padx=5, pady=10)
+        ttk.Button(dialog, text="Save", command=save_config).grid(row=6, column=1, padx=5, pady=10)
 
     def load_mysql_config(self):
         """Load MySQL configuration from file with better security"""
@@ -1329,32 +1639,55 @@ class TodoApp:
             print(f"Error saving MySQL config: {e}")
 
     def test_mysql_connection(self):
-        """Test connection to MySQL server and create database if needed"""
+        """Test MySQL connection with better error handling"""
         try:
-            # First try to connect without specifying the database
+            # First test connection without database
             config = self.mysql_config.copy()
-            database_name = config.pop('database')  # Remove database from config temporarily
+            if 'database' in config:
+                db_name = config.pop('database')
+            else:
+                db_name = 'todoapp'  # Default database name
             
-            # Connect to MySQL server without specifying database
+            # Add timeout to avoid hanging
+            config['connect_timeout'] = 5
+            
+            # Try to connect
             conn = mysql.connector.connect(**config)
-            cursor = conn.cursor()
             
             # Check if database exists
-            cursor.execute("SHOW DATABASES LIKE %s", (database_name,))
-            result = cursor.fetchone()
+            cursor = conn.cursor()
+            cursor.execute("SHOW DATABASES")
+            databases = [db[0] for db in cursor]
             
-            # If database doesn't exist, create it
-            if not result:
-                cursor.execute(f"CREATE DATABASE {database_name}")
-                print(f"Created database: {database_name}")
-            
+            if db_name.lower() not in [db.lower() for db in databases]:
+                # Database doesn't exist - create it
+                cursor.execute(f"CREATE DATABASE `{db_name}`")
+                print(f"Created database: {db_name}")
+                
             cursor.close()
             conn.close()
             
-            # Now try connecting with the database specified
+            # Now try connecting with the database
+            self.mysql_config['database'] = db_name
             conn = mysql.connector.connect(**self.mysql_config)
             conn.close()
+            
             return True
+        except mysql.connector.Error as err:
+            print(f"MySQL Error: {err}")
+            if err.errno == mysql.connector.errorcode.ER_ACCESS_DENIED_ERROR:
+                messagebox.showerror("Access Denied", 
+                                   "Access denied. Please check your username and password.")
+            elif err.errno == mysql.connector.errorcode.ER_BAD_DB_ERROR:
+                messagebox.showerror("Database Error", 
+                                   f"Database '{db_name}' does not exist and could not be created.")
+            else:
+                messagebox.showerror("Connection Error", f"Error: {err}")
+            return False
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            messagebox.showerror("Connection Error", f"Unexpected error: {e}")
+            return False
         except Exception as e:
             print(f"MySQL connection error: {e}")
             return False
@@ -1658,6 +1991,123 @@ class TodoApp:
         for task in new_daily_tasks:
             self.add_daily_task_from_file(task)
         self.save_daily_tasks()
+
+    def check_mysql_status(self):
+        """Check MySQL status and return a status code
+    
+        Returns:
+            str: One of the following status codes:
+                - "running": MySQL is running and credentials are correct
+                - "access_denied": MySQL is running but credentials are wrong
+                - "not_running": MySQL service exists but is not running
+                - "not_installed": MySQL is not installed
+        """
+        try:
+            # First try to connect without database to check basic connectivity
+            config = self.mysql_config.copy()
+            if 'database' in config:
+                config.pop('database')
+            
+            # Add timeout to avoid hanging
+            config['connect_timeout'] = 3
+            
+            try:
+                # Try to connect with the provided credentials
+                conn = mysql.connector.connect(**config)
+                conn.close()
+                return "running"
+            except mysql.connector.Error as err:
+                if err.errno == mysql.connector.errorcode.ER_ACCESS_DENIED_ERROR:
+                    # MySQL is running but credentials are wrong
+                    return "access_denied"
+                else:
+                    # Check if MySQL service is running
+                    if self.is_mysql_service_running():
+                        return "not_running"
+                    else:
+                        return "not_installed"
+        except:
+            # Check if MySQL service exists
+            if self.is_mysql_service_running():
+                return "not_running"
+            else:
+                return "not_installed"
+
+    def is_mysql_service_running(self):
+        """Check if MySQL service is running on Windows"""
+        try:
+            # Try to check service status using Windows-specific methods
+            import win32serviceutil
+            import win32service
+            
+            try:
+                # Try common MySQL service names
+                service_names = ["MySQL", "MySQL80", "MySQLServer", "MySQL Server"]
+                
+                for service_name in service_names:
+                    try:
+                        status = win32serviceutil.QueryServiceStatus(service_name)[1]
+                        if status == win32service.SERVICE_RUNNING:
+                            return True
+                    except:
+                        continue
+                
+                return False
+            except:
+                # Fall back to checking port 3306
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                result = s.connect_ex(('127.0.0.1', 3306))
+                s.close()
+                return result == 0
+        except:
+            # If all else fails, try a simple connection to port 3306
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                result = s.connect_ex(('127.0.0.1', 3306))
+                s.close()
+                return result == 0
+            except:
+                return False
+
+    def start_mysql_service(self):
+        """Attempt to start MySQL service on Windows"""
+        try:
+            import win32serviceutil
+            
+            # Try common MySQL service names
+            service_names = ["MySQL", "MySQL80", "MySQLServer", "MySQL Server"]
+            
+            for service_name in service_names:
+                try:
+                    win32serviceutil.StartService(service_name)
+                    # Wait a moment for the service to start
+                    import time
+                    time.sleep(2)
+                    return True
+                except:
+                    continue
+            
+            return False
+        except:
+            return False
+
+    def test_and_enable_mysql(self):
+        """Test MySQL connection and enable if successful"""
+        if self.test_mysql_connection():
+            # Connection successful - setup tables and enable
+            self.setup_mysql_tables()
+            messagebox.showinfo("MySQL Enabled", "MySQL sharing has been enabled successfully.")
+            self.save_mysql_config()
+            return True
+        else:
+            # Connection failed - disable MySQL
+            self.mysql_enabled.set(False)
+            self.save_mysql_config()
+            return False
 
 if __name__ == "__main__":
     # Check for updates before launching the main app
