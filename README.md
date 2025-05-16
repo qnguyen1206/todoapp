@@ -50,7 +50,10 @@ _________________
 **NOTES:**
 _________________
 
-- For the first time running the app, the user will need to run "Test Connection" in "Config MySQL Connection" or "Enable MySQL Sharing" in order to create the todoapp table if the user wants to use the LAN sharing feature.
+**For the first time running the app**
+
+  - User will need to run "Test Connection" in "Config MySQL Connection" or "Enable MySQL Sharing" in order to create the todoapp table if the user wants to use the LAN sharing feature.
+  - If there are errors pop up, it is because the app was checking for first time run and creating files that is needed for the app to run properly.
 
 - The app will automatically check for updates and prompt the user to update if a new version is available.
 
