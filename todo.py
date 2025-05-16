@@ -20,7 +20,12 @@ import socket
 import base64
 import keyring
 
-ICON_PATH = str(Path.home()) + "/TODOapp/clipboard.png"
+if getattr(sys, "frozen", False):
+    base_path = sys._MEIPASS
+else:
+    base_path = os.path.dirname(__file__)
+
+ICON_PATH = os.path.join(base_path, "clipboard.png")
 DAILY_TASK_FILE = str(Path.home()) + "/TODOapp/dailytask.txt"
 TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
 CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
