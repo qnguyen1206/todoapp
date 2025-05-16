@@ -24,16 +24,10 @@ ________________________
 **HOW TO RUN THE APP:**
 ________________________
 
-**STEP 1 /!\\ THIS STEP IS VERY IMPORTANT. PLEASE FOLLOW IT CORRECTLY /!\\**
+**STEP 1**
 
 - Download the lastest version of the app from GitHub Release
 - Extract the folder
-- Go into the folder
-- Change the name of the inside folder to "TODOapp"
-- Expected Structure Before:
-  - todoapp-1.2.3 → todoapp-1.2.3 → [source code]
-- Expected Structure After:
-  - todoapp-1.2.3 → TODOapp → [source code]
 
 **STEP 2**
 
@@ -43,7 +37,6 @@ ________________________
 
 **STEP 3**
 
-- Go to dist folder
 - Run the todo.exe file
 
 _________________
