@@ -529,10 +529,9 @@ class TodoApp:
 
     def save_tasks(self, tasks, skip_mysql=False):
         """Modified to respect storage preference and sync to MySQL if enabled"""
-        if self.store_tasks.get():
-            with open(TODO_FILE, "w") as f:
-                for task in tasks:
-                    f.write(" | ".join(str(x) for x in task) + "\n")
+        with open(TODO_FILE, "w") as f:
+            for task in tasks:
+                f.write(" | ".join(str(x) for x in task) + "\n")
     
         # Sync to MySQL if enabled and not skipping
         if self.mysql_enabled.get() and not skip_mysql:
