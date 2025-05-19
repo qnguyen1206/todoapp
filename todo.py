@@ -169,14 +169,8 @@ class TodoApp:
         self.button_frame = tk.Frame(self.daily_todo_frame, bg="#f0f0f0")
         self.button_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
 
-        self.add_button = tk.Button(self.button_frame, text="+", width=2, command=self.add_daily_task)
+        self.add_button = tk.Button(self.button_frame, text="+ Add", width=5, command=self.add_daily_task)
         self.add_button.pack(side=tk.LEFT, padx=2)
-
-        # Remove these buttons since each task will have its own
-        # self.remove_button = tk.Button(self.button_frame, text="-", width=2, command=self.remove_daily_task)
-        # self.remove_button.pack(side=tk.LEFT, padx=2)
-        # self.edit_button = tk.Button(self.button_frame, text="✎", width=2, command=self.edit_daily_task)
-        # self.edit_button.pack(side=tk.LEFT, padx=2)
 
         # Add a frame instead of listbox for better layout control
         self.daily_todo_listbox = tk.Frame(self.daily_todo_frame)
@@ -993,12 +987,12 @@ class TodoApp:
         checkbox.pack(side=tk.LEFT, fill="x", expand=True)
         
         # Add edit button
-        edit_btn = tk.Button(task_frame, text="✎", width=2, 
+        edit_btn = tk.Button(task_frame, text="✎ Edit", width=5, 
                              command=lambda t=checkbox: self.edit_specific_task(t))
         edit_btn.pack(side=tk.RIGHT, padx=2)
         
         # Add remove button
-        remove_btn = tk.Button(task_frame, text="×", width=2, 
+        remove_btn = tk.Button(task_frame, text="× Remove", width=9, 
                                command=lambda f=task_frame, t=checkbox: self.remove_specific_task(f, t))
         remove_btn.pack(side=tk.RIGHT, padx=2)
         
