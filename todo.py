@@ -179,28 +179,25 @@ class TodoApp:
         self.load_daily_tasks()
 
         # Task list
-        self.tree = ttk.Treeview(parent, columns=("Task", "Due Date", "Priority"), show="headings")
-        self.tree.heading("Task", text="Task", command=lambda: self.sort_column("Task", False))
-        self.tree.heading("Due Date", text="Due Date", command=lambda: self.sort_column("Due Date", False))
-        self.tree.heading("Priority", text="Priority", command=lambda: self.sort_column("Priority", False))
-        self.tree.column("Task", width=350, minwidth=100, stretch=True)
-        self.tree.column("Due Date", width=250, minwidth=80, stretch=False)
-        self.tree.column("Priority", width=200, minwidth=40, stretch=False)
+        self.todo_frame = tk.LabelFrame(parent, text="To Do List",
+                                       font=("Helvetica", 10, "bold"),
+                                       bg="#f0f0f0")
+        self.todo_frame.pack(fill=tk.BOTH, padx=10, pady=(10, 0), expand=True)
+
+       # Task list inside its frame
+        self.tree = ttk.Treeview(self.todo_frame, columns=("Task", "Due Date", "Priority"), show="headings")
+        for col, width in [("Task", 350), ("Due Date", 250), ("Priority", 200)]:
+            self.tree.heading(col, text=col, command=lambda c=col: self.sort_column(c, False))
+            self.tree.column(col, width=width, minwidth=40 if col=="Priority" else 80, stretch=(col=="Task"))
         self.tree.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
 
-        # Controls frame
-        control_frame = ttk.Frame(parent)
-        control_frame.pack(pady=10, fill=tk.X)
-        ttk.Button(control_frame, text="Add Task", command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Finish Task", command=self.remove_task).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Delete Task", command=self.delete_task).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Edit Task", command=self.edit_task).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Character Info", command=self.show_character).pack(side=tk.LEFT, padx=5)
-
-        # Time display aligned to the right
-        self.time_label = ttk.Label(control_frame, font=('Helvetica', 12, 'bold'))
-        self.time_label.pack(side=tk.RIGHT, padx=10)
-        self.update_time()  # start the clock
+        # Controls frame INSIDE the To Do List frame
+        control_frame = ttk.Frame(self.todo_frame)
+        control_frame.pack(pady=5, padx=10, fill=tk.X)
+        ttk.Button(control_frame, text="Add Task",     command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Finish Task",  command=self.remove_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Delete Task",  command=self.delete_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Edit Task",    command=self.edit_task).pack(side=tk.LEFT, padx=5)
 
         # Version label at bottom right
         version_frame = ttk.Frame(parent)
@@ -212,6 +209,13 @@ class TodoApp:
             foreground="gray50",
             anchor="e"
         ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
+
+        # Time display aligned to the right
+        time_frame = ttk.Frame(parent)
+        time_frame.pack(side=tk.RIGHT, padx=10)
+        self.time_label = ttk.Label(time_frame, font=('Helvetica', 12, 'bold'))
+        self.time_label.pack(side=tk.RIGHT, padx=10)
+        self.update_time()  # start the clock
 
     def create_ai_widgets(self, parent):
         # Chat history
@@ -530,10 +534,6 @@ class TodoApp:
         # Sync to MySQL if enabled and not skipping
         if self.mysql_enabled.get() and not skip_mysql:
             self.sync_tasks_to_mysql()
-
-    def show_character(self):
-        message = f"Character Level: {self.level}\nTasks Completed: {self.tasks_completed}"
-        messagebox.showinfo("Character Info", message)
 
     def update_chat_history(self, message):
         self.chat_history.config(state='normal')
