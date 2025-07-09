@@ -1,3 +1,8 @@
+**GAMIFY TO-DO APP WITH LOCAL AI INTEGRATED**
+
+![todo_app_screenshot](https://github.com/user-attachments/assets/d5f753cc-e73a-4689-91d6-2174f9b166cb)
+
+
 ________________________________
 **REQUIREMENTS TO RUN THE APP:**
 ________________________________
