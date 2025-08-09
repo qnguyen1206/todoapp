@@ -370,6 +370,9 @@ class MySQLLANManager:
 
     def toggle_mysql(self):
         """Toggle MySQL sharing functionality with installation check"""
+        # Toggle the state since it's now a command button, not a checkbutton
+        self.mysql_enabled.set(not self.mysql_enabled.get())
+        
         if self.mysql_enabled.get():
             # Check if MySQL is installed first
             mysql_status = self.check_mysql_status()
@@ -379,6 +382,9 @@ class MySQLLANManager:
                 self.show_mysql_installation_guide()
                 # Reset the checkbox since MySQL isn't available
                 self.mysql_enabled.set(False)
+                # Update the menu state
+                if hasattr(self.parent_app, 'update_share_menu_state'):
+                    self.parent_app.update_share_menu_state()
             elif mysql_status == "not_running":
                 # MySQL installed but not running
                 if messagebox.askyesno("MySQL Service", 
@@ -390,8 +396,14 @@ class MySQLLANManager:
                         messagebox.showerror("Service Error", 
                                             "Could not start MySQL service. Please start it manually.")
                         self.mysql_enabled.set(False)
+                        # Update the menu state
+                        if hasattr(self.parent_app, 'update_share_menu_state'):
+                            self.parent_app.update_share_menu_state()
                 else:
                     self.mysql_enabled.set(False)
+                    # Update the menu state
+                    if hasattr(self.parent_app, 'update_share_menu_state'):
+                        self.parent_app.update_share_menu_state()
             elif mysql_status == "access_denied":
                 # MySQL is running but credentials are wrong - open config dialog
                 messagebox.showinfo("MySQL Configuration", 
@@ -403,6 +415,10 @@ class MySQLLANManager:
         else:
             messagebox.showinfo("MySQL Disabled", "MySQL sharing has been disabled.")
             self.save_mysql_config()
+        
+        # Update the menu state to reflect the new status
+        if hasattr(self.parent_app, 'update_share_menu_state'):
+            self.parent_app.update_share_menu_state()
 
     def test_and_enable_mysql(self):
         """Test MySQL connection and enable if successful"""
@@ -411,11 +427,17 @@ class MySQLLANManager:
             self.setup_mysql_tables()
             messagebox.showinfo("MySQL Enabled", "MySQL sharing has been enabled successfully.")
             self.save_mysql_config()
+            # Update the menu state to reflect the new status
+            if hasattr(self.parent_app, 'update_share_menu_state'):
+                self.parent_app.update_share_menu_state()
             return True
         else:
             # Connection failed - disable MySQL
             self.mysql_enabled.set(False)
             self.save_mysql_config()
+            # Update the menu state to reflect the new status
+            if hasattr(self.parent_app, 'update_share_menu_state'):
+                self.parent_app.update_share_menu_state()
             return False
 
     def show_mysql_installation_guide(self):

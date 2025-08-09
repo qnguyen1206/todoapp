@@ -19,6 +19,14 @@ from mysql_lan_manager import MySQLLANManager
 from daily_todo_manager import DailyToDoManager
 from todo_list_manager import ToDoListManager
 
+# Import updater system
+try:
+    from modular_updater import ModularUpdater
+    MODULAR_UPDATER_AVAILABLE = True
+except ImportError:
+    from todo_updater import Updater
+    MODULAR_UPDATER_AVAILABLE = False
+
 if getattr(sys, "frozen", False):
     base_path = sys._MEIPASS
 else:
@@ -503,16 +511,23 @@ class TodoApp(metaclass=SingletonMeta):
         
         # MySQL sharing section
         self.share_menu.add_separator()
-        self.share_menu.add_checkbutton(
+        self.mysql_menu_index = self.share_menu.index(tk.END) + 1  # Store the index of the MySQL menu item
+        self.share_menu.add_command(
             label="Enable MySQL Sharing",
-            variable=self.mysql_lan_manager.mysql_enabled,
             command=self.mysql_lan_manager.toggle_mysql
         )
         self.share_menu.add_command(label="Configure MySQL Connection", command=self.mysql_lan_manager.configure_mysql)
         
+        # Create Help menu with updates
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Check for Updates", command=self.check_for_updates)
+        help_menu.add_separator()
+        help_menu.add_command(label="About", command=self.show_about)
+        
         # Add menus to menubar
         menubar.add_cascade(label="Options", menu=self.options_menu)
         menubar.add_cascade(label="Share", menu=self.share_menu)
+        menubar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=menubar)
         
         # Update menu states based on current settings
@@ -525,19 +540,109 @@ class TodoApp(metaclass=SingletonMeta):
             # Enable LAN sharing options when MySQL is enabled
             self.share_menu.entryconfigure("Share Tasks on LAN", state=tk.NORMAL)
             self.share_menu.entryconfigure("Import Tasks from LAN", state=tk.NORMAL)
+            # Update the menu text to show disable option using index
+            self.share_menu.entryconfigure(self.mysql_menu_index, label="Disable MySQL Sharing")
         else:
             # Disable LAN sharing options when MySQL is disabled
             self.share_menu.entryconfigure("Share Tasks on LAN", state=tk.DISABLED)
             self.share_menu.entryconfigure("Import Tasks from LAN", state=tk.DISABLED)
+            # Update the menu text to show enable option using index
+            self.share_menu.entryconfigure(self.mysql_menu_index, label="Enable MySQL Sharing")
         
         # Always keep Configure MySQL Connection enabled
         self.share_menu.entryconfigure("Configure MySQL Connection", state=tk.NORMAL)
 
+    def check_for_updates(self):
+        """Check for updates using the appropriate updater"""
+        try:
+            if MODULAR_UPDATER_AVAILABLE:
+                # Use the new modular updater
+                updater = ModularUpdater()
+                
+                # Check for modular updates first
+                if updater.check_modular_updates():
+                    result = messagebox.askyesno(
+                        "Updates Available", 
+                        "Modular updates are available. Would you like to download and install them?\n\n"
+                        "This will only update the changed components and is faster than a full update."
+                    )
+                    if result:
+                        self.root.config(cursor="wait")
+                        try:
+                            updater.download_modular_updates()
+                            messagebox.showinfo("Update Complete", 
+                                              "Modular updates have been installed successfully.\n"
+                                              "Some changes may require a restart to take full effect.")
+                        except Exception as e:
+                            messagebox.showerror("Update Error", f"Failed to install modular updates: {e}")
+                        finally:
+                            self.root.config(cursor="")
+                else:
+                    # Check for full updates if no modular updates
+                    if updater.check_for_updates():
+                        result = messagebox.askyesno(
+                            "Updates Available", 
+                            "A full application update is available. Would you like to download and install it?\n\n"
+                            "This will download the complete application."
+                        )
+                        if result:
+                            self.root.config(cursor="wait")
+                            try:
+                                updater.download_and_replace()
+                                messagebox.showinfo("Update Complete", 
+                                                  "Update has been downloaded and installed successfully.\n"
+                                                  "Please restart the application to use the new version.")
+                            except Exception as e:
+                                messagebox.showerror("Update Error", f"Failed to install update: {e}")
+                            finally:
+                                self.root.config(cursor="")
+                    else:
+                        messagebox.showinfo("No Updates", "You are running the latest version of the application.")
+            else:
+                # Fall back to the simple updater
+                updater = Updater()
+                messagebox.showinfo("Update Check", "Using legacy updater. Check console for update status.")
+                
+        except Exception as e:
+            messagebox.showerror("Update Error", f"Failed to check for updates: {e}")
+
+    def show_about(self):
+        """Show application information"""
+        try:
+            with open(VERSION_FILE, 'r') as f:
+                version = f.read().strip()
+        except:
+            version = "Unknown"
+        
+        about_text = f"""TODO App
+Version: {version}
+        
+A comprehensive task management application with:
+• Task creation and management
+• AI assistant integration
+• LAN/MySQL sharing capabilities
+• Automatic updates
+• Level progression system
+
+Built with Python and Tkinter"""
+        
+        messagebox.showinfo("About TODO App", about_text)
+
 if __name__ == "__main__":
     # Check for updates before launching the main app
-    import todo_updater
     try:
-        todo_updater.Updater()
+        if MODULAR_UPDATER_AVAILABLE:
+            # Use modular updater for better update experience
+            updater = ModularUpdater()
+            # Silently check for modular updates on startup
+            if updater.check_modular_updates():
+                print("Modular updates available. Use Help -> Check for Updates to install.")
+            elif updater.check_for_updates():
+                print("Full update available. Use Help -> Check for Updates to install.")
+        else:
+            # Fall back to simple updater
+            import todo_updater
+            todo_updater.Updater()
     except Exception as e:
         print(f"Update check failed: {e}")
         
