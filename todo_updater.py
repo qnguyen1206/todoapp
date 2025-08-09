@@ -37,6 +37,11 @@ class Updater:
     
     def check_for_updates(self):
         try:
+            # Check if modular updater is available (newer version)
+            if os.path.exists("modular_updater.py"):
+                print("Modular updater detected. This legacy updater is no longer needed.")
+                return
+            
             # Replace with your actual GitHub repo API URL
             github_username = "Kairu1206"  # Change this to your GitHub username
             repo_name = "todoapp"          # Change this to your repo name
@@ -49,9 +54,48 @@ class Updater:
                 latest_version = latest_release["tag_name"].lstrip("v")
                 
                 if self.is_newer_version(latest_version, self.current_version):
+                    # Show migration message for versions with modular updater
+                    version_parts = [int(x) for x in latest_version.split('.')]
+                    if version_parts >= [1, 1, 3]:  # Versions 1.1.3+ have modular updater
+                        self.show_migration_notice(latest_version, latest_release["assets"][0]["browser_download_url"])
+                    else:
+                        # Regular update for older versions
+                        self.prompt_update(latest_version, latest_release["assets"][0]["browser_download_url"])
+                else:
+                    print("No updates available.")
+            else:
+                print("Could not check for updates - API request failed")
+                
+                if self.is_newer_version(latest_version, self.current_version):
                     self.prompt_update(latest_version, latest_release["assets"][0]["browser_download_url"])
         except Exception as e:
             print(f"Update check failed: {e}")
+    
+    def show_migration_notice(self, new_version, download_url):
+        """Show migration notice for versions with modular updater"""
+        root = tk.Tk()
+        root.withdraw()
+        
+        message = f"""🎉 Great News! Version {new_version} includes automatic updates!
+
+This is the LAST TIME you'll need to manually download the app.
+
+What's New:
+✅ Automatic updates through Help → Check for Updates menu
+✅ No more manual downloads required
+✅ Professional update experience
+
+Would you like to download v{new_version} now?
+(This will be your final manual update!)"""
+
+        if messagebox.askyesno("Final Manual Update", message):
+            self.download_and_replace(download_url, new_version)
+        else:
+            messagebox.showinfo("Update Available", 
+                              f"Version {new_version} is available when you're ready.\n\n"
+                              f"After this update, all future updates will be automatic!")
+        
+        root.destroy()
     
     def is_newer_version(self, latest, current):
         """Compare version strings properly (e.g., 1.1.1 > 1.0.5)"""
