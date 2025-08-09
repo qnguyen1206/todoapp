@@ -556,48 +556,10 @@ class TodoApp(metaclass=SingletonMeta):
         """Check for updates using the appropriate updater"""
         try:
             if MODULAR_UPDATER_AVAILABLE:
-                # Use the new modular updater
-                updater = ModularUpdater()
-                
-                # Check for modular updates first
-                if updater.check_modular_updates():
-                    result = messagebox.askyesno(
-                        "Updates Available", 
-                        "Modular updates are available. Would you like to download and install them?\n\n"
-                        "This will only update the changed components and is faster than a full update."
-                    )
-                    if result:
-                        self.root.config(cursor="wait")
-                        try:
-                            updater.download_modular_updates()
-                            messagebox.showinfo("Update Complete", 
-                                              "Modular updates have been installed successfully.\n"
-                                              "Some changes may require a restart to take full effect.")
-                        except Exception as e:
-                            messagebox.showerror("Update Error", f"Failed to install modular updates: {e}")
-                        finally:
-                            self.root.config(cursor="")
-                else:
-                    # Check for full updates if no modular updates
-                    if updater.check_for_updates():
-                        result = messagebox.askyesno(
-                            "Updates Available", 
-                            "A full application update is available. Would you like to download and install it?\n\n"
-                            "This will download the complete application."
-                        )
-                        if result:
-                            self.root.config(cursor="wait")
-                            try:
-                                updater.download_and_replace()
-                                messagebox.showinfo("Update Complete", 
-                                                  "Update has been downloaded and installed successfully.\n"
-                                                  "Please restart the application to use the new version.")
-                            except Exception as e:
-                                messagebox.showerror("Update Error", f"Failed to install update: {e}")
-                            finally:
-                                self.root.config(cursor="")
-                    else:
-                        messagebox.showinfo("No Updates", "You are running the latest version of the application.")
+                # Create a fresh updater instance for manual check
+                updater = ModularUpdater(auto_check=False)
+                # Manually trigger the update check
+                updater.check_for_updates()
             else:
                 # Fall back to the simple updater
                 updater = Updater()
@@ -633,12 +595,8 @@ if __name__ == "__main__":
     try:
         if MODULAR_UPDATER_AVAILABLE:
             # Use modular updater for better update experience
-            updater = ModularUpdater()
-            # Silently check for modular updates on startup
-            if updater.check_modular_updates():
-                print("Modular updates available. Use Help -> Check for Updates to install.")
-            elif updater.check_for_updates():
-                print("Full update available. Use Help -> Check for Updates to install.")
+            updater = ModularUpdater(auto_check=True)
+            # Update check is done automatically in constructor
         else:
             # Fall back to simple updater
             import todo_updater

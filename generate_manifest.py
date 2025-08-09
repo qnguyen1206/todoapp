@@ -122,7 +122,7 @@ class ManifestGenerator:
         return issues
     
     def create_release_package(self, manifest, package_name=None):
-        """Create a zip package for release"""
+        """Create a zip package for GitHub release"""
         import zipfile
         
         if package_name is None:
@@ -132,16 +132,38 @@ class ManifestGenerator:
         
         with zipfile.ZipFile(package_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # Add manifest
-            zipf.write(os.path.join(self.app_dir, "manifest.json"), "manifest.json")
+            manifest_path = os.path.join(self.app_dir, "manifest.json")
+            if os.path.exists(manifest_path):
+                zipf.write(manifest_path, "manifest.json")
             
-            # Add all modules
-            for module_name in manifest["modules"]:
-                file_path = os.path.join(self.app_dir, module_name)
+            # For executable distribution, prioritize the .exe file
+            exe_path = os.path.join(self.app_dir, "todo.exe")
+            if os.path.exists(exe_path):
+                zipf.write(exe_path, "todo.exe")
+                print(f"Added to package: todo.exe (main executable)")
+            
+            # Add essential assets
+            essential_files = ["clipboard.png", "version.txt"]
+            for file_name in essential_files:
+                file_path = os.path.join(self.app_dir, file_name)
                 if os.path.exists(file_path):
-                    zipf.write(file_path, module_name)
-                    print(f"Added to package: {module_name}")
+                    zipf.write(file_path, file_name)
+                    print(f"Added to package: {file_name}")
+            
+            # Only add source files if they exist and user wants them
+            # (For executable distribution, usually skip source files)
+            source_files = ["todo.py", "ai_assistant.py", "mysql_lan_manager.py", 
+                          "daily_todo_manager.py", "todo_list_manager.py", "modular_updater.py"]
+            
+            print("\nOptional source files (usually not needed for executable distribution):")
+            for file_name in source_files:
+                file_path = os.path.join(self.app_dir, file_name)
+                if os.path.exists(file_path):
+                    zipf.write(file_path, file_name)
+                    print(f"Added to package: {file_name} (source)")
         
-        print(f"\nRelease package created: {os.path.abspath(package_path)}")
+        print(f"\n📦 Release package created: {os.path.abspath(package_path)}")
+        print(f"💾 Package size: {os.path.getsize(package_path) / (1024*1024):.1f} MB")
         return package_path
 
 def main():

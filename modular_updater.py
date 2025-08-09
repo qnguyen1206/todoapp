@@ -10,13 +10,21 @@ import hashlib
 import importlib
 
 class ModularUpdater:
-    def __init__(self):
+    def __init__(self, auto_check=False):
         self.version_file = str(Path.home()) + "/TODOapp/version.txt"
         self.manifest_file = str(Path.home()) + "/TODOapp/manifest.json"
         self.current_version = self.get_current_version()
         self.current_manifest = self.load_local_manifest()
+        self.is_executable_mode = getattr(sys, 'frozen', False)  # Detect if running as executable
         print(f"Current version: {self.current_version}")
-        self.check_for_updates()
+        print(f"Running as executable: {self.is_executable_mode}")
+        if not self.is_executable_mode:
+            print("Source code mode - full modular updates available")
+        else:
+            print("Executable mode - full updates only")
+        
+        if auto_check:
+            self.check_for_updates()
     
     def get_current_version(self):
         try:
@@ -89,31 +97,67 @@ class ModularUpdater:
                 latest_version = latest_release["tag_name"].lstrip("v")
                 
                 if self.is_newer_version(latest_version, self.current_version):
-                    # Get the manifest from the release
-                    manifest_url = None
-                    download_assets = {}
-                    
-                    for asset in latest_release["assets"]:
-                        if asset["name"] == "manifest.json":
-                            manifest_url = asset["browser_download_url"]
+                    # In executable mode, look for zip file containing executable
+                    if self.is_executable_mode:
+                        zip_asset = None
+                        exe_asset = None
+                        
+                        # Look for zip files first (preferred for GitHub releases)
+                        for asset in latest_release["assets"]:
+                            if asset["name"].endswith(".zip"):
+                                zip_asset = asset
+                                break
+                            elif asset["name"].endswith(".exe"):
+                                exe_asset = asset
+                        
+                        if zip_asset:
+                            self.prompt_full_update(latest_version, zip_asset["browser_download_url"])
+                        elif exe_asset:
+                            self.prompt_full_update(latest_version, exe_asset["browser_download_url"])
                         else:
-                            download_assets[asset["name"]] = asset["browser_download_url"]
-                    
-                    if manifest_url:
-                        self.check_modular_updates(manifest_url, download_assets, latest_version)
+                            print("No executable or zip package found in release for executable mode")
                     else:
-                        # Fallback to full update if no manifest
-                        self.prompt_full_update(latest_version, latest_release["assets"][0]["browser_download_url"])
+                        # Source code mode - check for modular updates
+                        manifest_url = None
+                        download_assets = {}
+                        
+                        for asset in latest_release["assets"]:
+                            if asset["name"] == "manifest.json":
+                                manifest_url = asset["browser_download_url"]
+                            else:
+                                download_assets[asset["name"]] = asset["browser_download_url"]
+                        
+                        if manifest_url:
+                            modular_updates = self.check_modular_updates(manifest_url, download_assets, latest_version)
+                            if not modular_updates:
+                                # No modular updates, check for full update
+                                zip_asset = None
+                                for asset in latest_release["assets"]:
+                                    if asset["name"].endswith(".zip"):
+                                        zip_asset = asset
+                                        break
+                                if zip_asset:
+                                    self.prompt_full_update(latest_version, zip_asset["browser_download_url"])
+                        else:
+                            # Fallback to full update if no manifest
+                            self.prompt_full_update(latest_version, latest_release["assets"][0]["browser_download_url"])
+                else:
+                    print("No updates available - you have the latest version")
         except Exception as e:
             print(f"Update check failed: {e}")
     
     def check_modular_updates(self, manifest_url, download_assets, new_version):
         """Check which modules need updating based on manifest"""
+        # Skip modular updates if running as executable (source code not available)
+        if self.is_executable_mode:
+            print("Executable mode: Skipping modular updates, only full updates available")
+            return False
+            
         try:
             # Download remote manifest
             response = requests.get(manifest_url)
             if response.status_code != 200:
-                return
+                return False
             
             remote_manifest = json.loads(response.text)
             updates_needed = []
@@ -137,11 +181,14 @@ class ModularUpdater:
             
             if updates_needed:
                 self.prompt_modular_update(updates_needed, remote_manifest, new_version)
+                return True
             else:
-                print("No updates needed - all modules are up to date")
+                print("No modular updates needed - all modules are up to date")
+                return False
         
         except Exception as e:
             print(f"Modular update check failed: {e}")
+            return False
     
     def prompt_modular_update(self, updates_needed, remote_manifest, new_version):
         """Show update dialog with details of what will be updated"""
@@ -363,8 +410,18 @@ class ModularUpdater:
         root = tk.Tk()
         root.withdraw()
         
-        if messagebox.askyesno("Update Available", 
-                              f"Version {new_version} is available (full update required). Update now?"):
+        # In executable mode, provide a more user-friendly message
+        if self.is_executable_mode:
+            message = (f"TODO App version {new_version} is available!\n\n"
+                      f"Current version: {self.current_version}\n"
+                      f"New version: {new_version}\n\n"
+                      f"The update will download and install automatically.\n"
+                      f"Your data and settings will be preserved.\n\n"
+                      f"Update now?")
+        else:
+            message = f"Version {new_version} is available (full update required). Update now?"
+        
+        if messagebox.askyesno("Update Available", message):
             self.download_and_install_full(download_url, new_version)
         
         root.destroy()
@@ -477,4 +534,4 @@ except Exception as e:
 Updater = ModularUpdater
 
 if __name__ == "__main__":
-    updater = ModularUpdater()
+    updater = ModularUpdater(auto_check=True)
