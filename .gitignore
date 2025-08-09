@@ -3,6 +3,7 @@ character.txt
 dailytask.txt
 storage_pref.txt
 config.txt
+time_format_pref.txt
 
 mysql_config.json
 
@@ -11,3 +12,6 @@ todo.exe
 build/
 dist/
 uploads/
+
+todo_new.py
+todo_backup.py

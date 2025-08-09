@@ -20,6 +20,11 @@ a = Analysis(
         'keyring',
         'keyring.backends.Windows',
         'todo_updater',
+        # Add our custom modules
+        'ai_assistant',
+        'mysql_lan_manager',
+        'daily_todo_manager',
+        'todo_list_manager',
     ],
     hookspath=[],
     hooksconfig={},
