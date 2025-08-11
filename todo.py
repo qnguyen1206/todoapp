@@ -459,6 +459,12 @@ class TodoApp(metaclass=SingletonMeta):
         # 2. Or if there are tasks in the list (to update overdue status)
         if (current_date != self.last_refresh_date or 
             (hasattr(self, 'todo_list_manager') and len(self.todo_list_manager.tree.get_children()) > 0)):
+            
+            # Check for daily task reset if date changed
+            if current_date != self.last_refresh_date and hasattr(self, 'daily_todo_manager'):
+                self.daily_todo_manager.check_and_reset_daily_tasks()
+                self.daily_todo_manager.load_daily_tasks()
+            
             self.refresh_task_list()
             self.last_refresh_date = current_date
 

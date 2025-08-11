@@ -19,6 +19,7 @@ class DailyToDoManager:
         
         # Daily task file path
         self.DAILY_TASK_FILE = str(Path.home()) + "/TODOapp/dailytask.txt"
+        self.DAILY_DATE_FILE = str(Path.home()) + "/TODOapp/daily_date.txt"
         
         # Task storage
         self.tasks = []
@@ -29,8 +30,58 @@ class DailyToDoManager:
         # Create daily todo widgets
         self.create_daily_todo_widgets()
         
+        # Check if we need to reset for a new day
+        self.check_and_reset_daily_tasks()
+        
         # Load existing tasks
         self.load_daily_tasks()
+
+    def check_and_reset_daily_tasks(self):
+        """Check if it's a new day and reset daily task completion status if needed"""
+        current_date = datetime.now().date().strftime("%Y-%m-%d")
+        
+        try:
+            # Read the last stored date
+            with open(self.DAILY_DATE_FILE, "r") as f:
+                stored_date = f.read().strip()
+        except FileNotFoundError:
+            # First time running or file doesn't exist
+            stored_date = ""
+        
+        if stored_date != current_date:
+            # It's a new day - reset completion status of daily tasks
+            print(f"New day detected ({current_date}). Resetting daily task completion status.")
+            
+            if os.path.exists(self.DAILY_TASK_FILE):
+                # Read existing tasks
+                with open(self.DAILY_TASK_FILE, "r") as f:
+                    tasks = f.readlines()
+                
+                # Reset completion status (remove [COMPLETED] prefix)
+                reset_tasks = []
+                for task in tasks:
+                    task = task.strip()
+                    if task.startswith("[COMPLETED] "):
+                        # Remove completion status but keep the task
+                        task = task.replace("[COMPLETED] ", "")
+                    reset_tasks.append(task)
+                
+                # Write back the reset tasks
+                with open(self.DAILY_TASK_FILE, "w") as f:
+                    for task in reset_tasks:
+                        if task:  # Only write non-empty tasks
+                            f.write(task + "\n")
+                
+                print(f"Reset completion status for {len(reset_tasks)} daily tasks.")
+            
+            # Update the stored date
+            os.makedirs(os.path.dirname(self.DAILY_DATE_FILE), exist_ok=True)
+            with open(self.DAILY_DATE_FILE, "w") as f:
+                f.write(current_date)
+            
+            print("Daily task completion status has been reset for the new day.")
+        else:
+            print(f"Same day ({current_date}). Keeping existing daily task status.")
 
     def create_daily_todo_widgets(self):
         """Create the Daily To Do List interface"""
@@ -192,7 +243,7 @@ class DailyToDoManager:
         self.edit_daily_task()
 
     def load_daily_tasks(self):
-        """Load daily tasks into the Treeview"""
+        """Load daily tasks into the Treeview, sorted by time"""
         # Clear existing items
         if hasattr(self, 'daily_tree'):
             self.daily_tree.delete(*self.daily_tree.get_children())
@@ -202,11 +253,92 @@ class DailyToDoManager:
                 pass
             return
 
+        # Read all tasks and sort them by time
+        tasks = []
         with open(self.DAILY_TASK_FILE, "r") as file:
             for line in file:
                 task_text = line.strip()
                 if task_text:
-                    self.add_daily_task_to_tree(task_text)
+                    tasks.append(task_text)
+        
+        # Sort tasks by time
+        sorted_tasks = self.sort_tasks_by_time(tasks)
+        
+        # Add sorted tasks to tree
+        for task_text in sorted_tasks:
+            self.add_daily_task_to_tree(task_text)
+
+    def sort_tasks_by_time(self, tasks):
+        """Sort tasks by their time component"""
+        def extract_time_for_sorting(task_text):
+            # Remove completion status for parsing
+            clean_task = task_text.replace("[COMPLETED] ", "")
+            
+            # Parse task to extract time
+            time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
+            match = re.match(time_pattern, clean_task)
+            
+            if match:
+                time_str = match.group(1)
+                # Convert to minutes for easy sorting (HH:MM -> total minutes)
+                hour, minute = map(int, time_str.split(':'))
+                return hour * 60 + minute
+            else:
+                # Tasks without time default to 00:00 (0 minutes)
+                return 0
+        
+        # Sort tasks by their time value
+        return sorted(tasks, key=extract_time_for_sorting)
+
+    def sort_tree_by_time(self):
+        """Sort the daily tasks tree view by chronological order"""
+        # Get all items from the tree
+        items = []
+        for item_id in self.daily_tree.get_children():
+            values = self.daily_tree.item(item_id, 'values')
+            items.append((item_id, values))
+        
+        # Sort items by time
+        def extract_time_for_tree_sorting(item_data):
+            values = item_data[1]
+            if len(values) >= 7:
+                original_text = values[6]  # Original column
+                # Remove completion status for parsing
+                clean_task = original_text.replace("[COMPLETED] ", "")
+                
+                # Parse task to extract time
+                time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
+                match = re.match(time_pattern, clean_task)
+                
+                if match:
+                    time_str = match.group(1)
+                    # Convert to minutes for easy sorting (HH:MM -> total minutes)
+                    hour, minute = map(int, time_str.split(':'))
+                    return hour * 60 + minute
+                else:
+                    # Tasks without time default to 00:00 (0 minutes)
+                    return 0
+            return 0
+        
+        # Sort items by time
+        sorted_items = sorted(items, key=extract_time_for_tree_sorting)
+        
+        # Clear tree and re-insert in sorted order
+        for item_id, _ in items:
+            self.daily_tree.delete(item_id)
+        
+        # Re-insert items in sorted order
+        for _, values in sorted_items:
+            # Determine the appropriate tag based on status
+            status = values[2] if len(values) > 2 else "Pending"
+            if status == "Completed":
+                tag = "completed"
+            elif status == "Overdue":
+                tag = "overdue"
+            else:
+                tag = "pending"
+            
+            self.daily_tree.insert("", tk.END, values=values, tags=(tag,))
 
     def add_daily_task_to_tree(self, task_text):
         """Add a single daily task to the Treeview"""
@@ -513,6 +645,8 @@ class DailyToDoManager:
             self.daily_tree.delete(selected[0])
             self.add_daily_task_to_tree(result["task"])
             self.save_daily_tasks()
+            # Re-sort tasks after editing to maintain chronological order
+            self.sort_tree_by_time()
 
     def delete_daily_task(self):
         """Delete selected daily task"""
@@ -525,6 +659,8 @@ class DailyToDoManager:
         if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this task?"):
             self.daily_tree.delete(selected[0])
             self.save_daily_tasks()
+            # Re-sort tasks after deleting to maintain chronological order
+            self.sort_tree_by_time()
             messagebox.showinfo("Success", "Task deleted!")
 
     def add_daily_task(self):
@@ -638,9 +774,11 @@ class DailyToDoManager:
         if result["task"]:
             self.add_daily_task_to_tree(result["task"])
             self.save_daily_tasks()
+            # Re-sort tasks after adding to maintain chronological order
+            self.sort_tree_by_time()
 
     def save_daily_tasks(self):
-        """Save daily tasks from Treeview to file"""
+        """Save daily tasks from Treeview to file in chronological order"""
         if self.parent_app.store_tasks.get():
             tasks = []
             # Get all items from the Treeview
@@ -651,9 +789,12 @@ class DailyToDoManager:
                     original_text = values[6]  # Original column is now index 6
                     if original_text:
                         tasks.append(original_text)
+            
+            # Sort tasks by time before saving
+            sorted_tasks = self.sort_tasks_by_time(tasks)
     
             with open(self.DAILY_TASK_FILE, "w") as file:
-                for task in tasks:
+                for task in sorted_tasks:
                     file.write(task + "\n")
 
     def refresh_daily_task_display(self):

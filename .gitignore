@@ -4,6 +4,7 @@ dailytask.txt
 storage_pref.txt
 config.txt
 time_format_pref.txt
+daily_date.txt
 
 mysql_config.json
 
@@ -15,3 +16,4 @@ uploads/
 
 todo_new.py
 todo_backup.py
+generate_manifest.py
