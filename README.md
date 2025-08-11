@@ -1,8 +1,5 @@
 **GAMIFY TO-DO APP WITH LOCAL AI INTEGRATED**
 
-![todo_app_screenshot](https://github.com/user-attachments/assets/d5f753cc-e73a-4689-91d6-2174f9b166cb)
-
-
 ________________________________
 **REQUIREMENTS TO RUN THE APP:**
 ________________________________
@@ -66,10 +63,14 @@ _________________________
 - Able to start on window startup
 - Share tasks on LAN through MySQL
 - Auto update
-
+  
 _________________________________
 
 WHAT CAN THE APP DO IN THE FUTURE:
 __________________________________
 
 - Please let me know! For now the app is at its finest.
+
+<img width="1918" height="1017" alt="image" src="https://github.com/user-attachments/assets/3e84bfce-c935-4df7-9a82-e2f62e20a4a6" />
+
+<img width="1918" height="1017" alt="image" src="https://github.com/user-attachments/assets/b3403f0c-00ac-453d-9ab7-045ccb77ddba" />
