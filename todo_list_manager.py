@@ -8,7 +8,7 @@ import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkcalendar import DateEntry
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 
@@ -23,9 +23,6 @@ class ToDoListManager:
         
         # Task data storage for notes and extended information
         self.task_data = {}
-        
-        # Track open notes dialogs to prevent multiple windows
-        self.open_notes_dialogs = {}
         
         # Create todo list widgets
         self.create_todo_widgets()
@@ -54,6 +51,7 @@ class ToDoListManager:
         control_frame = ttk.Frame(self.todo_frame)
         control_frame.pack(pady=5, padx=10, fill=tk.X)
         ttk.Button(control_frame, text="+ Add Task", command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="+ Add Multiple Tasks", command=self.add_multiple_tasks_dialog).pack(side=tk.LEFT, padx=5)
 
     def on_tree_click(self, event):
         """Handle clicks on main task action buttons"""
@@ -79,17 +77,9 @@ class ToDoListManager:
     def show_task_notes(self, item):
         """Show notes/details for the selected task"""
         try:
-            # Check if a dialog is already open for this task
-            if item in self.open_notes_dialogs:
-                # Bring existing dialog to front
-                existing_dialog = self.open_notes_dialogs[item]
-                if existing_dialog.winfo_exists():
-                    existing_dialog.lift()
-                    existing_dialog.focus_force()
-                    return
-                else:
-                    # Clean up stale reference
-                    del self.open_notes_dialogs[item]
+            # Check if any dialog is already open
+            if self.parent_app.check_existing_dialog():
+                return
             
             # Get the full task data from our dictionary
             if item not in self.task_data:
@@ -106,16 +96,8 @@ class ToDoListManager:
             notes_dialog.geometry("450x350")
             notes_dialog.resizable(True, True)
             
-            # Register this dialog as open for this task
-            self.open_notes_dialogs[item] = notes_dialog
-            
-            # Clean up when dialog is closed
-            def on_close():
-                if item in self.open_notes_dialogs:
-                    del self.open_notes_dialogs[item]
-                notes_dialog.destroy()
-            
-            notes_dialog.protocol("WM_DELETE_WINDOW", on_close)
+            # Register this dialog globally
+            self.parent_app.register_dialog(notes_dialog)
             
             # Task name label
             ttk.Label(notes_dialog, text=f"Task: {task_name}", font=('Helvetica', 12, 'bold')).pack(pady=10)
@@ -144,7 +126,7 @@ class ToDoListManager:
             ttk.Button(button_frame, text="✎ Edit Task", command=lambda: self.edit_task_from_notes(notes_dialog, item)).pack(side=tk.LEFT, padx=5)
             
             # Close button
-            ttk.Button(button_frame, text="Close", command=on_close).pack(side=tk.RIGHT, padx=5)
+            ttk.Button(button_frame, text="Close", command=notes_dialog.destroy).pack(side=tk.RIGHT, padx=5)
             
         except Exception as e:
             messagebox.showerror("Error", f"Could not display task notes: {str(e)}")
@@ -195,9 +177,16 @@ class ToDoListManager:
 
     def add_task_dialog(self):
         """Show dialog to add a new task"""
+        # Check if any dialog is already open
+        if self.parent_app.check_existing_dialog():
+            return
+            
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add New Task")
         dialog.geometry("450x300")
+        
+        # Register this dialog globally
+        self.parent_app.register_dialog(dialog)
         
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=5, sticky="nw")
         task_entry = ttk.Entry(dialog, width=40)
@@ -250,6 +239,484 @@ class ToDoListManager:
         self.save_tasks(tasks)
         self.refresh_task_list()
 
+    def add_multiple_tasks_dialog(self):
+        """Show dialog to add multiple tasks at once"""
+        # Check if any dialog is already open
+        if self.parent_app.check_existing_dialog():
+            return
+            
+        dialog = tk.Toplevel(self.parent_app.root)
+        dialog.title("Add Multiple Tasks")
+        dialog.geometry("700x700")  # Even larger to ensure buttons show
+        dialog.minsize(600, 600)    # Larger minimum size
+        dialog.resizable(True, True)
+        
+        # Register this dialog globally
+        self.parent_app.register_dialog(dialog)
+        
+        # Create buttons FIRST at the bottom to ensure they're always visible
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        
+        def add_all_tasks():
+            """Parse and add all tasks"""
+            try:
+                content = tasks_text.get("1.0", tk.END).strip()
+                if not content:
+                    messagebox.showwarning("Warning", "Please enter some tasks first")
+                    return
+                
+                lines = [line.strip() for line in content.split('\n') if line.strip()]
+                added_count = 0
+                errors = []
+                
+                for line in lines:
+                    try:
+                        task_info = self.parse_bulk_task_line(line)
+                        self.add_task(task_info['task'], task_info['date'], task_info['priority'], task_info['notes'])
+                        added_count += 1
+                    except Exception as e:
+                        errors.append(f"'{line}': {str(e)}")
+                
+                if errors:
+                    error_msg = f"Added {added_count} tasks successfully.\n\nErrors:\n" + '\n'.join(errors[:5])
+                    if len(errors) > 5:
+                        error_msg += f"\n... and {len(errors) - 5} more errors"
+                    messagebox.showwarning("Partial Success", error_msg)
+                else:
+                    messagebox.showinfo("Success", f"Successfully added {added_count} tasks!")
+                
+                if added_count > 0:
+                    dialog.destroy()
+                    
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to add tasks: {str(e)}")
+        
+        # Create prominent buttons at the bottom
+        add_button = ttk.Button(button_frame, text="✓ Add All Tasks", command=add_all_tasks)
+        add_button.pack(side=tk.LEFT, padx=10, pady=5)
+        
+        cancel_button = ttk.Button(button_frame, text="✗ Cancel", command=dialog.destroy)
+        cancel_button.pack(side=tk.RIGHT, padx=10, pady=5)
+        
+        # Now create the main content frame ABOVE the buttons
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Instructions
+        instructions = ttk.Label(main_frame, text="Enter multiple tasks (one per line). Use keywords for dates and priorities:", font=('Helvetica', 10, 'bold'))
+        instructions.pack(anchor='w', pady=(0, 5))
+        
+        # Format help
+        help_text = """Examples:
+• Buy groceries due tomorrow - priority 3 - Need milk and bread
+• Call dentist due at 2:30 PM (time goes to notes, "due at" removed)
+• Meeting due on next Friday 14:30 priority 1
+• Submit report due by 09/20/2025 | urgent | Check formatting
+
+Supported date formats: today, tomorrow, next monday, 09/15/2025, in 3 days
+Time formats: 2:30 PM, 14:30, 10 AM, 1430 (automatically moved to notes)
+Due phrases: "due at", "due on", "due by" are automatically removed from task names
+Priority: 1=urgent/highest, 2=high, 3=medium, 4=low, 5=lowest (default)
+Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/minor (=4)"""
+        
+        help_label = ttk.Label(main_frame, text=help_text, font=('Helvetica', 8), foreground="gray")
+        help_label.pack(anchor='w', pady=(0, 10))
+        
+        # Input area
+        ttk.Label(main_frame, text="Tasks:", font=('Helvetica', 10, 'bold')).pack(anchor='w')
+        
+        # Text input with scrollbar
+        text_frame = ttk.Frame(main_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        tasks_text = tk.Text(text_frame, wrap=tk.WORD, height=15, font=('Helvetica', 10))
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=tasks_text.yview)
+        tasks_text.configure(yscrollcommand=scrollbar.set)
+        
+        tasks_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Preview area
+        ttk.Label(main_frame, text="Preview (parsed tasks):", font=('Helvetica', 10, 'bold')).pack(anchor='w', pady=(10, 5))
+        
+        preview_frame = ttk.Frame(main_frame)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        preview_text = tk.Text(preview_frame, wrap=tk.WORD, height=6, font=('Helvetica', 9), state='disabled')  # Reduced height
+        preview_scrollbar = ttk.Scrollbar(preview_frame, orient="vertical", command=preview_text.yview)
+        preview_text.configure(yscrollcommand=preview_scrollbar.set)
+        
+        preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Function to update preview
+        def update_preview():
+            """Update the preview with parsed tasks"""
+            try:
+                content = tasks_text.get("1.0", tk.END).strip()
+                if not content:
+                    preview_text.config(state='normal')
+                    preview_text.delete("1.0", tk.END)
+                    preview_text.insert("1.0", "No tasks entered yet...")
+                    preview_text.config(state='disabled')
+                    return
+                
+                lines = [line.strip() for line in content.split('\n') if line.strip()]
+                parsed_tasks = []
+                
+                for i, line in enumerate(lines, 1):
+                    try:
+                        task_info = self.parse_bulk_task_line(line)
+                        parsed_tasks.append(f"{i}. {task_info['task']} | {task_info['date']} | Priority {task_info['priority']}")
+                        if task_info['notes']:
+                            parsed_tasks.append(f"   Notes: {task_info['notes']}")
+                    except Exception as e:
+                        parsed_tasks.append(f"{i}. ERROR: {line} - {str(e)}")
+                
+                preview_text.config(state='normal')
+                preview_text.delete("1.0", tk.END)
+                preview_text.insert("1.0", '\n'.join(parsed_tasks))
+                preview_text.config(state='disabled')
+                
+            except Exception as e:
+                preview_text.config(state='normal')
+                preview_text.delete("1.0", tk.END)
+                preview_text.insert("1.0", f"Preview error: {str(e)}")
+                preview_text.config(state='disabled')
+        
+        # Bind text change to update preview
+        def on_text_change(event=None):
+            dialog.after_idle(update_preview)
+        
+        tasks_text.bind('<KeyRelease>', on_text_change)
+        tasks_text.bind('<Button-1>', on_text_change)
+        tasks_text.bind('<FocusOut>', on_text_change)
+        
+        # Initial preview
+        update_preview()
+
+    def parse_bulk_task_line(self, line):
+        """Parse a single line from bulk task input into task components"""
+        if not line.strip():
+            raise ValueError("Empty line")
+        
+        # Default values
+        today = datetime.now()
+        task_info = {
+            'task': line.strip(),
+            'date': today.strftime("%m-%d-%Y"),
+            'priority': 5,  # Default to lowest priority (5)
+            'notes': ""
+        }
+        
+        # Split by common delimiters to extract components
+        delimiters = [' - ', ' | ', ' :: ', ' // ']
+        parts = [line]
+        
+        for delimiter in delimiters:
+            if delimiter in line:
+                parts = [part.strip() for part in line.split(delimiter)]
+                break
+        
+        # Extract task name (first part, will be refined)
+        task_name = parts[0].strip()
+        remaining_parts = parts[1:] if len(parts) > 1 else []
+        
+        # Clean up "due at" and "due on" phrases from task name and remaining parts
+        task_name = self.clean_due_phrases(task_name)
+        remaining_parts = [self.clean_due_phrases(part) for part in remaining_parts]
+        
+        # Process all parts to extract date, priority, time, and notes
+        processed_parts = []
+        
+        for part in remaining_parts:
+            if not part.strip():
+                continue
+                
+            # Try to extract date
+            date_result = self.extract_date_from_text(part)
+            if date_result:
+                task_info['date'] = date_result
+                continue
+            
+            # Try to extract priority
+            priority_result = self.extract_priority_from_text(part)
+            if priority_result:
+                task_info['priority'] = priority_result
+                continue
+            
+            # Try to extract time
+            time_result = self.extract_time_from_text(part)
+            if time_result:
+                # Add time to notes
+                if task_info['notes']:
+                    task_info['notes'] += f" | Time: {time_result}"
+                else:
+                    task_info['notes'] = f"Time: {time_result}"
+                continue
+            
+            # If it's not a date, priority, or time, it's probably notes
+            processed_parts.append(part)
+        
+        # Also check the task name itself for embedded date/priority/time info, but be more careful
+        task_words = task_name.split()
+        clean_task_words = []
+        
+        i = 0
+        while i < len(task_words):
+            word = task_words[i]
+            
+            # Check for multi-word date patterns first (like "next friday")
+            if i < len(task_words) - 1:
+                two_word = f"{word} {task_words[i + 1]}"
+                date_result = self.extract_date_from_text(two_word)
+                if date_result:
+                    task_info['date'] = date_result
+                    i += 2  # Skip both words
+                    continue
+            
+            # Check for single word date
+            date_result = self.extract_date_from_text(word)
+            if date_result and len(word) > 2:  # Avoid single letters/numbers being treated as dates
+                task_info['date'] = date_result
+                i += 1
+                continue
+            
+            # Check for time patterns
+            time_result = self.extract_time_from_text(word)
+            if time_result:
+                # Add time to notes
+                if task_info['notes']:
+                    task_info['notes'] += f" | Time: {time_result}"
+                else:
+                    task_info['notes'] = f"Time: {time_result}"
+                i += 1
+                continue
+            
+            # Check for priority keywords in task name, but only if it looks like priority
+            if any(priority_word in word.lower() for priority_word in ['priority', 'urgent', 'high', 'low', 'medium']):
+                priority_result = self.extract_priority_from_text(word)
+                if priority_result:
+                    task_info['priority'] = priority_result
+                    i += 1
+                    continue
+            
+            # Keep the word in the task name
+            clean_task_words.append(word)
+            i += 1
+        
+        # Reconstruct clean task name and apply final cleaning
+        task_info['task'] = ' '.join(clean_task_words).strip()
+        task_info['task'] = self.clean_due_phrases(task_info['task'])
+        
+        # Join remaining parts as notes
+        if processed_parts:
+            additional_notes = ' '.join(processed_parts).strip()
+            if task_info['notes']:
+                task_info['notes'] += f" | {additional_notes}"
+            else:
+                task_info['notes'] = additional_notes
+        
+        # Validation
+        if not task_info['task']:
+            raise ValueError("No task name found")
+        
+        return task_info
+
+    def extract_date_from_text(self, text):
+        """Extract date from text and return formatted date string"""
+        text = text.lower().strip()
+        today = datetime.now()
+        
+        # Handle relative dates
+        if text in ['today']:
+            return today.strftime("%m-%d-%Y")
+        elif text in ['tomorrow']:
+            return (today + timedelta(days=1)).strftime("%m-%d-%Y")
+        elif text in ['yesterday']:
+            return (today - timedelta(days=1)).strftime("%m-%d-%Y")
+        elif 'next week' in text:
+            return (today + timedelta(days=7)).strftime("%m-%d-%Y")
+        elif text.startswith('in ') and text.endswith(' days'):
+            try:
+                days = int(text.split()[1])
+                return (today + timedelta(days=days)).strftime("%m-%d-%Y")
+            except:
+                pass
+        elif text.startswith('next '):
+            # Handle "next monday", "next friday", etc.
+            day_name = text.replace('next ', '')
+            weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+            if day_name in weekdays:
+                target_weekday = weekdays.index(day_name)
+                days_ahead = target_weekday - today.weekday()
+                if days_ahead <= 0:  # Target day already happened this week
+                    days_ahead += 7
+                return (today + timedelta(days=days_ahead)).strftime("%m-%d-%Y")
+        elif text.startswith('this '):
+            # Handle "this friday", etc.
+            day_name = text.replace('this ', '')
+            weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+            if day_name in weekdays:
+                target_weekday = weekdays.index(day_name)
+                days_ahead = target_weekday - today.weekday()
+                if days_ahead < 0:  # If the day has passed this week, get next week's
+                    days_ahead += 7
+                return (today + timedelta(days=days_ahead)).strftime("%m-%d-%Y")
+        
+        # Handle absolute dates - improved patterns
+        date_patterns = [
+            r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})',  # MM/DD/YYYY or MM-DD-YYYY
+            r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # YYYY/MM/DD or YYYY-MM-DD
+            r'(\d{1,2})[/-](\d{1,2})[/-](\d{2})',  # MM/DD/YY or MM-DD-YY
+            r'(\d{1,2})\.(\d{1,2})\.(\d{4})',      # MM.DD.YYYY
+            r'(\d{1,2})\.(\d{1,2})\.(\d{2})',      # MM.DD.YY
+        ]
+        
+        for i, pattern in enumerate(date_patterns):
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    groups = match.groups()
+                    if i == 0 or i == 2 or i == 3 or i == 4:  # MM/DD/YYYY, MM/DD/YY, MM.DD.YYYY, MM.DD.YY
+                        month, day, year = groups
+                        if len(year) == 2:
+                            year = f"20{year}" if int(year) < 50 else f"19{year}"
+                    elif i == 1:  # YYYY/MM/DD or YYYY-MM-DD
+                        year, month, day = groups
+                    
+                    # Validate and format
+                    month, day, year = int(month), int(day), int(year)
+                    if 1 <= month <= 12 and 1 <= day <= 31:
+                        date_obj = datetime(year, month, day)
+                        return date_obj.strftime("%m-%d-%Y")
+                except Exception as e:
+                    continue
+        
+        return None
+
+    def extract_priority_from_text(self, text):
+        """Extract priority from text and return priority number"""
+        text = text.lower().strip()
+        
+        # Direct priority numbers (case insensitive)
+        priority_patterns = [
+            r'priority\s*(\d)',
+            r'pri\s*(\d)',
+            r'p\s*(\d)'
+        ]
+        
+        for pattern in priority_patterns:
+            priority_match = re.search(pattern, text)
+            if priority_match:
+                priority = int(priority_match.group(1))
+                return priority if 1 <= priority <= 5 else 1
+        
+        # Priority keywords - corrected mapping (1 = highest, 5 = lowest)
+        if any(word in text for word in ['urgent', 'critical', 'asap']):
+            return 1  # Highest priority
+        elif any(word in text for word in ['high', 'important']):
+            return 2  # High priority
+        elif any(word in text for word in ['medium', 'normal']):
+            return 3  # Medium priority
+        elif any(word in text for word in ['low', 'minor']):
+            return 4  # Low priority
+        
+        # Check for standalone numbers that might be priority
+        if text.isdigit():
+            priority = int(text)
+            return priority if 1 <= priority <= 5 else 1
+        
+        return None
+
+    def extract_time_from_text(self, text):
+        """Extract time from text and return formatted time string"""
+        text = text.strip()
+        
+        # Time patterns to match
+        time_patterns = [
+            r'(\d{1,2}):(\d{2})\s*(am|pm|AM|PM)',  # 12:30 PM, 2:15 am
+            r'(\d{1,2}):(\d{2})',                  # 14:30, 09:15 (24-hour)
+            r'(\d{1,2})\s*(am|pm|AM|PM)',          # 2 PM, 9 am
+            r'(\d{1,2})(\d{2})\s*(am|pm|AM|PM)',   # 230 PM, 915 am
+            r'(\d{1,2})(\d{2})',                   # 1430, 0915 (24-hour without colon)
+        ]
+        
+        for i, pattern in enumerate(time_patterns):
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    groups = match.groups()
+                    
+                    if i == 0:  # HH:MM AM/PM
+                        hour, minute, ampm = groups
+                        hour, minute = int(hour), int(minute)
+                        if ampm.lower() == 'pm' and hour != 12:
+                            hour += 12
+                        elif ampm.lower() == 'am' and hour == 12:
+                            hour = 0
+                        return f"{hour:02d}:{minute:02d}"
+                        
+                    elif i == 1:  # HH:MM (24-hour)
+                        hour, minute = int(groups[0]), int(groups[1])
+                        if 0 <= hour <= 23 and 0 <= minute <= 59:
+                            return f"{hour:02d}:{minute:02d}"
+                            
+                    elif i == 2:  # H AM/PM
+                        hour, ampm = int(groups[0]), groups[1]
+                        if ampm.lower() == 'pm' and hour != 12:
+                            hour += 12
+                        elif ampm.lower() == 'am' and hour == 12:
+                            hour = 0
+                        return f"{hour:02d}:00"
+                        
+                    elif i == 3:  # HHMM AM/PM
+                        hour, minute, ampm = int(groups[0]), int(groups[1]), groups[2]
+                        if ampm.lower() == 'pm' and hour != 12:
+                            hour += 12
+                        elif ampm.lower() == 'am' and hour == 12:
+                            hour = 0
+                        if 0 <= hour <= 23 and 0 <= minute <= 59:
+                            return f"{hour:02d}:{minute:02d}"
+                            
+                    elif i == 4:  # HHMM (24-hour)
+                        if len(groups[0] + groups[1]) == 4:
+                            hour, minute = int(groups[0]), int(groups[1])
+                        elif len(groups[0] + groups[1]) == 3:
+                            hour, minute = int(groups[0][0]), int(groups[0][1:] + groups[1])
+                        else:
+                            continue
+                        if 0 <= hour <= 23 and 0 <= minute <= 59:
+                            return f"{hour:02d}:{minute:02d}"
+                            
+                except (ValueError, IndexError):
+                    continue
+        
+        return None
+
+    def clean_due_phrases(self, text):
+        """Remove 'due at', 'due on', etc. phrases from text"""
+        if not text or not text.strip():
+            return text
+            
+        # Patterns to remove (case insensitive)
+        due_patterns = [
+            r'\bdue\s+at\b',
+            r'\bdue\s+on\b',
+            r'\bdue\s+by\b',
+            r'\bdue\b(?=\s+\d)',  # "due" followed by date/time
+        ]
+        
+        cleaned_text = text
+        for pattern in due_patterns:
+            cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE)
+        
+        # Clean up extra whitespace
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        return cleaned_text
+
     def remove_task(self):
         """Remove/Complete selected task"""
         selected = self.tree.selection()
@@ -286,6 +753,10 @@ class ToDoListManager:
         
     def edit_task(self):
         """Edit selected task"""
+        # Check if any dialog is already open
+        if self.parent_app.check_existing_dialog():
+            return
+            
         selected = self.tree.selection()
         if not selected:
             messagebox.showwarning("Warning", "Please select a task to edit")
@@ -312,6 +783,9 @@ class ToDoListManager:
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Edit Task")
         dialog.geometry("450x350")
+        
+        # Register this dialog globally
+        self.parent_app.register_dialog(dialog)
         
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=5, sticky="nw")
         task_entry = ttk.Entry(dialog, width=40)

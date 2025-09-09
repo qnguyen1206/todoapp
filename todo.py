@@ -66,6 +66,9 @@ class TodoApp(metaclass=SingletonMeta):
         self.level = 0
         self.tasks_completed = 0
         
+        # Global dialog management - only allow one dialog at a time across the entire app
+        self.current_dialog = None
+        
         # Add startup check before creating widgets
         self.startup_enabled = self.check_startup_status()
         
@@ -595,6 +598,58 @@ A comprehensive task management application with:
 Built with Python and Tkinter"""
         
         messagebox.showinfo("About TODO App", about_text)
+
+    def check_existing_dialog(self):
+        """Check if a dialog is already open and bring it to front if so"""
+        if self.current_dialog and self.current_dialog.winfo_exists():
+            # Bring dialog to front and ensure it stays on top
+            self.current_dialog.lift()
+            self.current_dialog.attributes('-topmost', True)
+            self.current_dialog.focus_force()
+            # Remove topmost after a brief moment to allow normal window behavior
+            self.current_dialog.after(100, lambda: self.current_dialog.attributes('-topmost', False))
+            return True
+        # Clean up stale reference
+        self.current_dialog = None
+        return False
+    
+    def register_dialog(self, dialog):
+        """Register a new dialog and set up cleanup"""
+        self.current_dialog = dialog
+        
+        # Make dialog modal and ensure it stays in front
+        dialog.transient(self.root)  # Make dialog transient to main window
+        dialog.grab_set()  # Make dialog modal
+        dialog.lift()  # Bring to front
+        dialog.attributes('-topmost', True)  # Ensure it's on top
+        dialog.focus_force()  # Give it focus
+        
+        # Remove topmost after a brief moment to allow normal window behavior
+        dialog.after(100, lambda: dialog.attributes('-topmost', False))
+        
+        # Center dialog on main window
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Store original destroy method
+        original_destroy = dialog.destroy
+        
+        def cleanup_and_destroy():
+            if self.current_dialog == dialog:
+                self.current_dialog = None
+            try:
+                dialog.grab_release()  # Release modal grab
+            except:
+                pass  # Dialog might already be destroyed
+            original_destroy()
+        
+        # Override destroy method
+        dialog.destroy = cleanup_and_destroy
+        
+        # Also handle window close event
+        dialog.protocol("WM_DELETE_WINDOW", cleanup_and_destroy)
 
 if __name__ == "__main__":
     # Check for updates before launching the main app

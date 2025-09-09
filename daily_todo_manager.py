@@ -24,9 +24,6 @@ class DailyToDoManager:
         # Task storage
         self.tasks = []
         
-        # Track open notes dialogs
-        self.open_notes_dialogs = {}
-        
         # Create daily todo widgets
         self.create_daily_todo_widgets()
         
@@ -140,18 +137,9 @@ class DailyToDoManager:
     def show_daily_task_notes(self, item):
         """Show details for the selected daily task"""
         try:
-            # Check if a dialog is already open for this daily task
-            daily_key = f"daily_{item}"
-            if daily_key in self.open_notes_dialogs:
-                # Bring existing dialog to front
-                existing_dialog = self.open_notes_dialogs[daily_key]
-                if existing_dialog.winfo_exists():
-                    existing_dialog.lift()
-                    existing_dialog.focus_force()
-                    return
-                else:
-                    # Clean up stale reference
-                    del self.open_notes_dialogs[daily_key]
+            # Check if any dialog is already open
+            if self.parent_app.check_existing_dialog():
+                return
             
             # Get task details from the Treeview
             values = self.daily_tree.item(item, 'values')
@@ -170,16 +158,8 @@ class DailyToDoManager:
             notes_dialog.geometry("450x300")
             notes_dialog.resizable(True, True)
             
-            # Register this dialog as open for this daily task
-            self.open_notes_dialogs[daily_key] = notes_dialog
-            
-            # Clean up when dialog is closed
-            def on_close():
-                if daily_key in self.open_notes_dialogs:
-                    del self.open_notes_dialogs[daily_key]
-                notes_dialog.destroy()
-            
-            notes_dialog.protocol("WM_DELETE_WINDOW", on_close)
+            # Register this dialog globally
+            self.parent_app.register_dialog(notes_dialog)
             
             # Task details
             details_frame = ttk.Frame(notes_dialog)
@@ -230,7 +210,7 @@ class DailyToDoManager:
             ttk.Button(button_frame, text="✎ Edit Task", command=lambda: self.edit_daily_task_from_notes(notes_dialog, item)).pack(side=tk.LEFT, padx=5)
             
             # Close button
-            ttk.Button(button_frame, text="Close", command=on_close).pack(side=tk.RIGHT, padx=5)
+            ttk.Button(button_frame, text="Close", command=notes_dialog.destroy).pack(side=tk.RIGHT, padx=5)
             
         except Exception as e:
             messagebox.showerror("Error", f"Could not display task details: {str(e)}")
@@ -492,6 +472,10 @@ class DailyToDoManager:
 
     def edit_daily_task(self):
         """Edit selected daily task"""
+        # Check if any dialog is already open
+        if self.parent_app.check_existing_dialog():
+            return
+            
         selected = self.daily_tree.selection()
         if not selected:
             messagebox.showwarning("Warning", "Please select a task to edit")
@@ -525,6 +509,9 @@ class DailyToDoManager:
         dialog.title("Edit Daily Task")
         dialog.geometry("400x200")
         dialog.resizable(False, False)
+        
+        # Register this dialog globally
+        self.parent_app.register_dialog(dialog)
         
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
@@ -665,11 +652,18 @@ class DailyToDoManager:
 
     def add_daily_task(self):
         """Add a new daily task"""
+        # Check if any dialog is already open
+        if self.parent_app.check_existing_dialog():
+            return
+            
         # Create a custom dialog for task with time
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add Daily Task")
         dialog.geometry("400x200")
         dialog.resizable(False, False)
+        
+        # Register this dialog globally
+        self.parent_app.register_dialog(dialog)
         
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
