@@ -980,5 +980,12 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 f.write(task_line + "\n")
     
         # Sync to MySQL if enabled and not skipping
-        if hasattr(self.parent_app, 'mysql_lan_manager') and self.parent_app.mysql_lan_manager.mysql_enabled.get() and not skip_mysql:
-            self.parent_app.mysql_lan_manager.sync_tasks_to_mysql()
+        if (hasattr(self.parent_app, 'mysql_lan_manager') and 
+            self.parent_app.mysql_lan_manager and 
+            hasattr(self.parent_app.mysql_lan_manager, 'mysql_enabled') and
+            self.parent_app.mysql_lan_manager.mysql_enabled.get() and 
+            not skip_mysql):
+            try:
+                self.parent_app.mysql_lan_manager.sync_tasks_to_mysql()
+            except Exception as e:
+                print(f"Failed to sync to MySQL: {e}")

@@ -7,21 +7,41 @@ import json
 import os
 import re
 import tkinter as tk
-import requests
 import threading
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
 from pathlib import Path
-from PIL import Image, ImageTk
 import shutil
 import mimetypes
+
+# Handle missing dependencies gracefully
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    print("requests not available. AI features will be limited.")
+    REQUESTS_AVAILABLE = False
+    requests = None
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    print("PIL/Pillow not available. Image display in AI chat will be disabled.")
+    PIL_AVAILABLE = False
+    Image = None
+    ImageTk = None
 
 
 class AIAssistant:
     def __init__(self, parent_app, ai_frame):
         self.parent_app = parent_app
         self.ai_frame = ai_frame
+        
+        # Check if required dependencies are available
+        if not REQUESTS_AVAILABLE:
+            raise ImportError("requests library is required for AI functionality")
         
         # AI model configuration
         self.current_ai_model = "deepseek-r1:14b"  # Default model
@@ -287,13 +307,17 @@ class AIAssistant:
             # Handle different file types
             mime_type = mimetypes.guess_type(file_path)[0]
             
-            if mime_type and mime_type.startswith('image/'):
+            if mime_type and mime_type.startswith('image/') and PIL_AVAILABLE:
                 self.display_image(new_path)
             else:
                 self.display_file_link(new_filename)
 
     def display_image(self, image_path):
         """Display uploaded image in chat"""
+        if not PIL_AVAILABLE:
+            self.display_file_link(Path(image_path).name)
+            return
+            
         try:
             # Open and resize image
             image = Image.open(image_path)

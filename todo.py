@@ -13,9 +13,23 @@ from pathlib import Path
 import sys
 import win32com.client
 
-# Import our custom modules
-from ai_assistant import AIAssistant
-from mysql_lan_manager import MySQLLANManager
+# Import our custom modules with error handling
+try:
+    from ai_assistant import AIAssistant
+    AI_ASSISTANT_AVAILABLE = True
+except ImportError as e:
+    print(f"AI Assistant not available: {e}")
+    AI_ASSISTANT_AVAILABLE = False
+    AIAssistant = None
+
+try:
+    from mysql_lan_manager import MySQLLANManager
+    MYSQL_LAN_AVAILABLE = True
+except ImportError as e:
+    print(f"MySQL LAN Manager not available: {e}")
+    MYSQL_LAN_AVAILABLE = False
+    MySQLLANManager = None
+
 from daily_todo_manager import DailyToDoManager
 from todo_list_manager import ToDoListManager
 
@@ -124,13 +138,109 @@ class TodoApp(metaclass=SingletonMeta):
     def initialize_managers(self):
         """Initialize all the manager modules"""
         # Initialize MySQL LAN Manager
-        self.mysql_lan_manager = MySQLLANManager(self)
+        if MYSQL_LAN_AVAILABLE and MySQLLANManager:
+            try:
+                self.mysql_lan_manager = MySQLLANManager(self)
+                self.mysql_available = True
+            except Exception as e:
+                print(f"Failed to initialize MySQL LAN Manager: {e}")
+                self.mysql_lan_manager = None
+                self.mysql_available = False
+        else:
+            print("MySQL LAN Manager not available - MySQL sharing features will be disabled")
+            self.mysql_lan_manager = None
+            self.mysql_available = False
         
         # Initialize AI Assistant
-        self.ai_assistant = AIAssistant(self, self.ai_frame)
+        if AI_ASSISTANT_AVAILABLE and AIAssistant:
+            try:
+                self.ai_assistant = AIAssistant(self, self.ai_frame)
+                self.ai_available = True
+            except Exception as e:
+                print(f"Failed to initialize AI Assistant: {e}")
+                self.ai_assistant = None
+                self.ai_available = False
+                # Create fallback AI interface
+                self.create_fallback_ai_interface()
+        else:
+            print("AI Assistant not available - AI features will be disabled")
+            self.ai_assistant = None
+            self.ai_available = False
+            # Create fallback AI interface
+            self.create_fallback_ai_interface()
         
         # Initialize Daily Todo Manager (will be created when task manager widgets are made)
         # Initialize Todo List Manager (will be created when task manager widgets are made)
+
+    def create_fallback_ai_interface(self):
+        """Create a fallback interface when AI is not available"""
+        # Clear the AI frame
+        for widget in self.ai_frame.winfo_children():
+            widget.destroy()
+            
+        # Create informational message
+        info_frame = ttk.Frame(self.ai_frame)
+        info_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = ttk.Label(info_frame, text="AI Assistant Not Available", 
+                               font=('Helvetica', 16, 'bold'))
+        title_label.pack(pady=10)
+        
+        # Information text
+        info_text = tk.Text(info_frame, wrap=tk.WORD, height=10, state='disabled', 
+                           background=self.ai_frame.cget('background'))
+        info_text.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Add informational content
+        info_text.config(state='normal')
+        info_content = """The AI Assistant requires additional dependencies to function:
+
+Required packages:
+• requests - for communicating with Ollama
+• Pillow (PIL) - for image handling
+• Ollama - Local LLM runtime
+
+To enable AI features:
+1. Install the required packages:
+   pip install requests pillow
+
+2. Install Ollama:
+   Download from: https://ollama.ai
+
+3. Start Ollama and download a model:
+   ollama pull deepseek-r1:14b
+
+4. Restart the TODO app
+
+The app will continue to work normally for task management without AI features."""
+        
+        info_text.insert(tk.END, info_content)
+        info_text.config(state='disabled')
+        
+        # Add a button to check dependencies again
+        check_button = ttk.Button(info_frame, text="Check Dependencies Again", 
+                                 command=self.check_ai_dependencies)
+        check_button.pack(pady=10)
+
+    def check_ai_dependencies(self):
+        """Check if AI dependencies are now available and reinitialize if possible"""
+        try:
+            # Try to reimport the modules
+            import importlib
+            if 'ai_assistant' in globals():
+                importlib.reload(globals()['ai_assistant'])
+            
+            from ai_assistant import AIAssistant
+            
+            # Try to initialize AI assistant
+            self.ai_assistant = AIAssistant(self, self.ai_frame)
+            self.ai_available = True
+            messagebox.showinfo("Success", "AI Assistant is now available!")
+            
+        except Exception as e:
+            messagebox.showerror("Dependencies Missing", 
+                               f"AI dependencies are still not available:\n{str(e)}")
 
     def create_task_manager_widgets(self, parent):
         """Create the main task management interface"""
@@ -514,18 +624,23 @@ class TodoApp(metaclass=SingletonMeta):
         # Create Share menu with all sharing options
         self.share_menu = tk.Menu(menubar, tearoff=0)
         
-        # LAN sharing section
-        self.share_menu.add_command(label="Share Tasks on LAN", command=self.mysql_lan_manager.share_tasks_on_lan)
-        self.share_menu.add_command(label="Import Tasks from LAN", command=self.mysql_lan_manager.import_tasks_from_lan)
-        
-        # MySQL sharing section
-        self.share_menu.add_separator()
-        self.mysql_menu_index = self.share_menu.index(tk.END) + 1  # Store the index of the MySQL menu item
-        self.share_menu.add_command(
-            label="Enable MySQL Sharing",
-            command=self.mysql_lan_manager.toggle_mysql
-        )
-        self.share_menu.add_command(label="Configure MySQL Connection", command=self.mysql_lan_manager.configure_mysql)
+        # MySQL/LAN sharing section - only add if MySQL is available
+        if self.mysql_available and hasattr(self, 'mysql_lan_manager') and self.mysql_lan_manager:
+            self.share_menu.add_command(label="Share Tasks on LAN", command=self.mysql_lan_manager.share_tasks_on_lan)
+            self.share_menu.add_command(label="Import Tasks from LAN", command=self.mysql_lan_manager.import_tasks_from_lan)
+            
+            # MySQL sharing section
+            self.share_menu.add_separator()
+            self.mysql_menu_index = self.share_menu.index(tk.END) + 1  # Store the index of the MySQL menu item
+            self.share_menu.add_command(
+                label="Enable MySQL Sharing",
+                command=self.mysql_lan_manager.toggle_mysql
+            )
+            self.share_menu.add_command(label="Configure MySQL Connection", command=self.mysql_lan_manager.configure_mysql)
+        else:
+            # Add a disabled menu item to show MySQL is not available
+            self.share_menu.add_command(label="MySQL/LAN Sharing (Not Available)", state=tk.DISABLED)
+            self.share_menu.add_command(label="Install mysql-connector-python to enable", state=tk.DISABLED)
         
         # Create Help menu with updates
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -544,6 +659,10 @@ class TodoApp(metaclass=SingletonMeta):
 
     def update_share_menu_state(self):
         """Update menu items based on MySQL enabled status"""
+        # Only update if MySQL is available
+        if not self.mysql_available or not hasattr(self, 'mysql_lan_manager') or not self.mysql_lan_manager:
+            return
+            
         # Enable/disable LAN sharing options based on MySQL status
         if self.mysql_lan_manager.mysql_enabled.get():
             # Enable LAN sharing options when MySQL is enabled

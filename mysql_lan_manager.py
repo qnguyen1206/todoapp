@@ -7,18 +7,37 @@ import json
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox
-import mysql.connector
 import socket
 import base64
-import keyring
 import threading
 import webbrowser
 from pathlib import Path
+
+# Handle missing dependencies gracefully
+try:
+    import mysql.connector
+    MYSQL_CONNECTOR_AVAILABLE = True
+except ImportError:
+    print("mysql-connector-python not available. MySQL features will be disabled.")
+    MYSQL_CONNECTOR_AVAILABLE = False
+    mysql = None
+
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    print("keyring not available. Passwords will be stored encoded instead.")
+    KEYRING_AVAILABLE = False
+    keyring = None
 
 
 class MySQLLANManager:
     def __init__(self, parent_app):
         self.parent_app = parent_app
+        
+        # Check if MySQL connector is available
+        if not MYSQL_CONNECTOR_AVAILABLE:
+            raise ImportError("mysql-connector-python is required for MySQL functionality")
         
         # MySQL configuration file path
         self.MYSQL_CONFIG_FILE = str(Path.home()) + "/TODOapp/mysql_config.json"
@@ -50,19 +69,27 @@ class MySQLLANManager:
                     }
                     
                     # Get password from system keyring if available
-                    try:
-                        password = keyring.get_password("todoapp_mysql", self.mysql_config['user'])
-                        if password:
-                            self.mysql_config['password'] = password
-                        else:
-                            # Fall back to encoded password from file
+                    if KEYRING_AVAILABLE:
+                        try:
+                            password = keyring.get_password("todoapp_mysql", self.mysql_config['user'])
+                            if password:
+                                self.mysql_config['password'] = password
+                            else:
+                                # Fall back to encoded password from file
+                                encoded_pw = config['config'].get('encoded_password', '')
+                                if encoded_pw:
+                                    self.mysql_config['password'] = base64.b64decode(encoded_pw).decode('utf-8')
+                                else:
+                                    self.mysql_config['password'] = ''
+                        except:
+                            # If keyring fails, use encoded password from file
                             encoded_pw = config['config'].get('encoded_password', '')
                             if encoded_pw:
                                 self.mysql_config['password'] = base64.b64decode(encoded_pw).decode('utf-8')
                             else:
                                 self.mysql_config['password'] = ''
-                    except:
-                        # If keyring fails, use encoded password from file
+                    else:
+                        # Keyring not available, use encoded password from file
                         encoded_pw = config['config'].get('encoded_password', '')
                         if encoded_pw:
                             self.mysql_config['password'] = base64.b64decode(encoded_pw).decode('utf-8')
@@ -82,17 +109,26 @@ class MySQLLANManager:
     def save_mysql_config(self):
         """Save MySQL configuration to file with better security"""
         try:
-            # Try to store password in system keyring
-            try:
-                keyring.set_password("todoapp_mysql", self.mysql_config['user'], self.mysql_config['password'])
-                # If successful, don't store password in file
-                config_to_save = {
-                    'host': self.mysql_config['host'],
-                    'user': self.mysql_config['user'],
-                    'database': self.mysql_config['database']
-                }
-            except:
-                # If keyring fails, encode password for file storage
+            # Try to store password in system keyring if available
+            if KEYRING_AVAILABLE:
+                try:
+                    keyring.set_password("todoapp_mysql", self.mysql_config['user'], self.mysql_config['password'])
+                    # If successful, don't store password in file
+                    config_to_save = {
+                        'host': self.mysql_config['host'],
+                        'user': self.mysql_config['user'],
+                        'database': self.mysql_config['database']
+                    }
+                except:
+                    # If keyring fails, encode password for file storage
+                    config_to_save = {
+                        'host': self.mysql_config['host'],
+                        'user': self.mysql_config['user'],
+                        'database': self.mysql_config['database'],
+                        'encoded_password': base64.b64encode(self.mysql_config['password'].encode('utf-8')).decode('utf-8')
+                    }
+            else:
+                # Keyring not available, encode password for file storage
                 config_to_save = {
                     'host': self.mysql_config['host'],
                     'user': self.mysql_config['user'],
