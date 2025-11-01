@@ -662,7 +662,7 @@ class DailyToDoManager:
         dialog.geometry("400x200")
         dialog.resizable(False, False)
         
-        # Register this dialog globally
+        # Important: Register dialog BEFORE any other setup
         self.parent_app.register_dialog(dialog)
         
         # Task name
@@ -759,9 +759,10 @@ class DailyToDoManager:
         # Focus on task entry
         task_entry.focus()
         
+        # Bind the Return key to the validate_and_add function
+        dialog.bind('<Return>', lambda e: validate_and_add())
+        
         # Wait for dialog to close
-        dialog.transient(self.parent_app.root)
-        dialog.grab_set()
         self.parent_app.root.wait_window(dialog)
         
         # Add the task if one was created
@@ -798,40 +799,3 @@ class DailyToDoManager:
             
         # Reload all tasks to update time format display
         self.load_daily_tasks()
-
-    # Legacy methods for backward compatibility with old checkbox-based system
-    def add_daily_task_from_file(self, task_text):
-        """Legacy method - now delegates to add_daily_task_to_tree"""
-        self.add_daily_task_to_tree(task_text)
-
-    def configure_drag_drop(self, task_frame, drag_handle, checkbox):
-        """Legacy drag and drop configuration - not used in Treeview implementation"""
-        pass
-
-    def on_drag_start(self, event, frame):
-        """Legacy drag start handler - not used in Treeview implementation"""
-        pass
-
-    def on_drag_motion(self, event, frame):
-        """Legacy drag motion handler - not used in Treeview implementation"""
-        pass
-
-    def on_drag_stop(self, event, frame, checkbox):
-        """Legacy drag stop handler - not used in Treeview implementation"""
-        pass
-
-    def edit_specific_task(self, checkbox):
-        """Legacy edit method - not used in Treeview implementation"""
-        pass
-
-    def remove_specific_task(self, frame, checkbox):
-        """Legacy remove method - not used in Treeview implementation"""
-        pass
-
-    def update_task_color(self, checkbox, time_str):
-        """Legacy color update method - not used in Treeview implementation"""
-        pass
-
-    def toggle_strikethrough(self, var, checkbox):
-        """Legacy strikethrough method - not used in Treeview implementation"""
-        pass

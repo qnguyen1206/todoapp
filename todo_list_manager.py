@@ -18,8 +18,8 @@ class ToDoListManager:
         self.parent_app = parent_app
         self.todo_frame = todo_frame
         
-        # TODO file path - Use current working directory
-        self.TODO_FILE = os.path.join(os.getcwd(), "todo.txt")
+        # TODO file path - Use home directory
+        self.TODO_FILE = str(Path.home()) + "/TODOapp/todo.txt"
         
         # Task data storage for notes and extended information
         self.task_data = {}
