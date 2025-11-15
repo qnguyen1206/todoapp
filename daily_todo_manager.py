@@ -83,22 +83,24 @@ class DailyToDoManager:
     def create_daily_todo_widgets(self):
         """Create the Daily To Do List interface"""
         # Create Treeview for daily tasks with action columns
-        self.daily_tree = ttk.Treeview(self.daily_todo_frame, columns=("Time", "Task", "Status", "Complete", "Edit", "Delete", "Original"), show="headings", height=6)
+        self.daily_tree = ttk.Treeview(self.daily_todo_frame, columns=("Days", "Time", "Task", "Status", "Complete", "Edit", "Delete", "Original"), show="headings", height=6)
+        self.daily_tree.heading("Days", text="Days")
         self.daily_tree.heading("Time", text="Time")
         self.daily_tree.heading("Task", text="Task")
         self.daily_tree.heading("Status", text="Status")
         self.daily_tree.heading("Complete", text="Complete")
         self.daily_tree.heading("Edit", text="Edit")
         self.daily_tree.heading("Delete", text="Delete")
-        
+
         # Set column widths
+        self.daily_tree.column("Days", width=120, minwidth=100)
         self.daily_tree.column("Time", width=100, minwidth=80)
-        self.daily_tree.column("Task", width=250, minwidth=200, stretch=True)
+        self.daily_tree.column("Task", width=200, minwidth=150, stretch=True)
         self.daily_tree.column("Status", width=80, minwidth=60)
         self.daily_tree.column("Complete", width=70, minwidth=60, stretch=False, anchor='center')
         self.daily_tree.column("Edit", width=50, minwidth=40, stretch=False, anchor='center')
         self.daily_tree.column("Delete", width=60, minwidth=50, stretch=False, anchor='center')
-        
+
         # Hide the Original column (used for storing original task text)
         self.daily_tree.column("Original", width=0, minwidth=0, stretch=False)
         self.daily_tree.heading("Original", text="")
@@ -117,21 +119,21 @@ class DailyToDoManager:
         """Handle clicks on daily task action buttons"""
         item = self.daily_tree.identify('item', event.x, event.y)
         column = self.daily_tree.identify('column', event.x, event.y)
-        
+
         if item and column:
             # Convert column ID to column name
             col_name = self.daily_tree.heading(column)['text']
-            
+
             # Select the item first
             self.daily_tree.selection_set(item)
-            
+
             if col_name == "Complete":  # Complete button
                 self.complete_daily_task()
             elif col_name == "Edit":  # Edit button
                 self.edit_daily_task()
             elif col_name == "Delete":  # Delete button
                 self.delete_daily_task()
-            elif col_name == "Task":  # Task name clicked - show notes for daily tasks
+            elif col_name in ["Days", "Time", "Task", "Status"]:  # Any info column clicked - show notes
                 self.show_daily_task_notes(item)
 
     def show_daily_task_notes(self, item):
@@ -140,17 +142,18 @@ class DailyToDoManager:
             # Check if any dialog is already open
             if self.parent_app.check_existing_dialog():
                 return
-            
+
             # Get task details from the Treeview
             values = self.daily_tree.item(item, 'values')
-            if len(values) < 7:
+            if len(values) < 8:
                 messagebox.showerror("Error", "Task data incomplete")
                 return
-                
-            time_str = values[0]
-            task_name = values[1]
-            status = values[2]
-            original_text = values[6]  # Original column
+
+            days_str = values[0]
+            time_str = values[1]
+            task_name = values[2]
+            status = values[3]
+            original_text = values[7]  # Original column
             
             # Create notes display dialog
             notes_dialog = tk.Toplevel(self.parent_app.root)
@@ -166,13 +169,19 @@ class DailyToDoManager:
             details_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
             
             ttk.Label(details_frame, text="Daily Task Details", font=('Helvetica', 12, 'bold')).pack(pady=(0, 10))
-            
+
+            # Days
+            days_frame = ttk.Frame(details_frame)
+            days_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(days_frame, text="Days:", font=('Helvetica', 10, 'bold')).pack(side=tk.LEFT)
+            ttk.Label(days_frame, text=days_str).pack(side=tk.LEFT, padx=(10, 0))
+
             # Time
             time_frame = ttk.Frame(details_frame)
             time_frame.pack(fill=tk.X, pady=2)
             ttk.Label(time_frame, text="Time:", font=('Helvetica', 10, 'bold')).pack(side=tk.LEFT)
             ttk.Label(time_frame, text=time_str).pack(side=tk.LEFT, padx=(10, 0))
-            
+
             # Task
             task_frame = ttk.Frame(details_frame)
             task_frame.pack(fill=tk.X, pady=2)
@@ -222,28 +231,57 @@ class DailyToDoManager:
         self.daily_tree.selection_set(item)
         self.edit_daily_task()
 
+    def get_current_day_abbr(self):
+        """Get current day abbreviation (Mon, Tue, etc.)"""
+        day_map = {
+            0: "Mon",
+            1: "Tue",
+            2: "Wed",
+            3: "Thu",
+            4: "Fri",
+            5: "Sat",
+            6: "Sun"
+        }
+        return day_map[datetime.now().weekday()]
+
     def load_daily_tasks(self):
-        """Load daily tasks into the Treeview, sorted by time"""
+        """Load daily tasks into the Treeview, sorted by time, filtered by current day"""
         # Clear existing items
         if hasattr(self, 'daily_tree'):
             self.daily_tree.delete(*self.daily_tree.get_children())
-        
+
         if not os.path.exists(self.DAILY_TASK_FILE):
             with open(self.DAILY_TASK_FILE, "w") as f:
                 pass
             return
 
-        # Read all tasks and sort them by time
+        # Get current day abbreviation
+        current_day = self.get_current_day_abbr()
+
+        # Read all tasks and filter by current day
         tasks = []
         with open(self.DAILY_TASK_FILE, "r") as file:
             for line in file:
                 task_text = line.strip()
                 if task_text:
-                    tasks.append(task_text)
-        
+                    # Check if task is scheduled for today
+                    clean_task = task_text.replace("[COMPLETED] ", "")
+                    days_time_pattern = r"^([A-Za-z,]+)\s+(\d{2}:\d{2}) - (.+)$"
+                    match = re.match(days_time_pattern, clean_task)
+
+                    if match:
+                        days_str = match.group(1)
+                        scheduled_days = days_str.split(',')
+                        # Only add if scheduled for current day
+                        if current_day in scheduled_days:
+                            tasks.append(task_text)
+                    else:
+                        # Old format without days - show every day
+                        tasks.append(task_text)
+
         # Sort tasks by time
         sorted_tasks = self.sort_tasks_by_time(tasks)
-        
+
         # Add sorted tasks to tree
         for task_text in sorted_tasks:
             self.add_daily_task_to_tree(task_text)
@@ -253,20 +291,28 @@ class DailyToDoManager:
         def extract_time_for_sorting(task_text):
             # Remove completion status for parsing
             clean_task = task_text.replace("[COMPLETED] ", "")
-            
-            # Parse task to extract time
+
+            # Parse task to extract time (try new format first, then old format)
+            days_time_pattern = r"^([A-Za-z,]+)\s+(\d{2}:\d{2}) - (.+)$"
             time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
-            match = re.match(time_pattern, clean_task)
-            
-            if match:
-                time_str = match.group(1)
+
+            match_with_days = re.match(days_time_pattern, clean_task)
+            match_without_days = re.match(time_pattern, clean_task)
+
+            if match_with_days:
+                time_str = match_with_days.group(2)
+                # Convert to minutes for easy sorting (HH:MM -> total minutes)
+                hour, minute = map(int, time_str.split(':'))
+                return hour * 60 + minute
+            elif match_without_days:
+                time_str = match_without_days.group(1)
                 # Convert to minutes for easy sorting (HH:MM -> total minutes)
                 hour, minute = map(int, time_str.split(':'))
                 return hour * 60 + minute
             else:
                 # Tasks without time default to 00:00 (0 minutes)
                 return 0
-        
+
         # Sort tasks by their time value
         return sorted(tasks, key=extract_time_for_sorting)
 
@@ -277,21 +323,29 @@ class DailyToDoManager:
         for item_id in self.daily_tree.get_children():
             values = self.daily_tree.item(item_id, 'values')
             items.append((item_id, values))
-        
+
         # Sort items by time
         def extract_time_for_tree_sorting(item_data):
             values = item_data[1]
-            if len(values) >= 7:
-                original_text = values[6]  # Original column
+            if len(values) >= 8:
+                original_text = values[7]  # Original column (now index 7)
                 # Remove completion status for parsing
                 clean_task = original_text.replace("[COMPLETED] ", "")
-                
-                # Parse task to extract time
+
+                # Parse task to extract time (try new format first, then old format)
+                days_time_pattern = r"^([A-Za-z,]+)\s+(\d{2}:\d{2}) - (.+)$"
                 time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
-                match = re.match(time_pattern, clean_task)
-                
-                if match:
-                    time_str = match.group(1)
+
+                match_with_days = re.match(days_time_pattern, clean_task)
+                match_without_days = re.match(time_pattern, clean_task)
+
+                if match_with_days:
+                    time_str = match_with_days.group(2)
+                    # Convert to minutes for easy sorting (HH:MM -> total minutes)
+                    hour, minute = map(int, time_str.split(':'))
+                    return hour * 60 + minute
+                elif match_without_days:
+                    time_str = match_without_days.group(1)
                     # Convert to minutes for easy sorting (HH:MM -> total minutes)
                     hour, minute = map(int, time_str.split(':'))
                     return hour * 60 + minute
@@ -299,25 +353,25 @@ class DailyToDoManager:
                     # Tasks without time default to 00:00 (0 minutes)
                     return 0
             return 0
-        
+
         # Sort items by time
         sorted_items = sorted(items, key=extract_time_for_tree_sorting)
-        
+
         # Clear tree and re-insert in sorted order
         for item_id, _ in items:
             self.daily_tree.delete(item_id)
-        
+
         # Re-insert items in sorted order
         for _, values in sorted_items:
-            # Determine the appropriate tag based on status
-            status = values[2] if len(values) > 2 else "Pending"
+            # Determine the appropriate tag based on status (now index 3)
+            status = values[3] if len(values) > 3 else "Pending"
             if status == "Completed":
                 tag = "completed"
             elif status == "Overdue":
                 tag = "overdue"
             else:
                 tag = "pending"
-            
+
             self.daily_tree.insert("", tk.END, values=values, tags=(tag,))
 
     def add_daily_task_to_tree(self, task_text):
@@ -326,39 +380,46 @@ class DailyToDoManager:
         is_completed = task_text.startswith("[COMPLETED] ")
         if is_completed:
             task_text = task_text.replace("[COMPLETED] ", "")
-        
-        # Parse task to extract time and task parts
+
+        # Parse task to extract days, time and task parts
+        # New format: Days HH:MM - Task (e.g., "Mon,Wed,Fri 09:00 - Meeting")
+        # Old format: HH:MM - Task (for backward compatibility)
+        days_time_pattern = r"^([A-Za-z,]+)\s+(\d{2}:\d{2}) - (.+)$"
         time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
-        match = re.match(time_pattern, task_text)
-        
-        if match:
-            time_str = match.group(1)  # Always stored in 24-hour format
-            task_only = match.group(2)
-            
-            # Format time for display based on user preference
-            hour_24, minute = map(int, time_str.split(':'))
-            if self.parent_app.use_24_hour.get():
-                display_time = f"{hour_24:02d}:{minute:02d}"
-            else:
-                # Convert to 12-hour format for display
-                if hour_24 == 0:
-                    display_time = f"12:{minute:02d} AM"
-                elif hour_24 < 12:
-                    display_time = f"{hour_24}:{minute:02d} AM"
-                elif hour_24 == 12:
-                    display_time = f"12:{minute:02d} PM"
-                else:
-                    display_time = f"{hour_24-12}:{minute:02d} PM"
+
+        match_with_days = re.match(days_time_pattern, task_text)
+        match_without_days = re.match(time_pattern, task_text)
+
+        if match_with_days:
+            # New format with days
+            days_str = match_with_days.group(1)
+            time_str = match_with_days.group(2)
+            task_only = match_with_days.group(3)
+        elif match_without_days:
+            # Old format without days - default to all days
+            days_str = "Mon,Tue,Wed,Thu,Fri,Sat,Sun"
+            time_str = match_without_days.group(1)
+            task_only = match_without_days.group(2)
         else:
-            # Task without time - default to 00:00
+            # Task without proper format - default to all days and 00:00
+            days_str = "Mon,Tue,Wed,Thu,Fri,Sat,Sun"
             time_str = "00:00"
             task_only = task_text
-            
-            # Format default time for display
-            if self.parent_app.use_24_hour.get():
-                display_time = "00:00"
+
+        # Format time for display based on user preference
+        hour_24, minute = map(int, time_str.split(':'))
+        if self.parent_app.use_24_hour.get():
+            display_time = f"{hour_24:02d}:{minute:02d}"
+        else:
+            # Convert to 12-hour format for display
+            if hour_24 == 0:
+                display_time = f"12:{minute:02d} AM"
+            elif hour_24 < 12:
+                display_time = f"{hour_24}:{minute:02d} AM"
+            elif hour_24 == 12:
+                display_time = f"12:{minute:02d} PM"
             else:
-                display_time = "12:00 AM"
+                display_time = f"{hour_24-12}:{minute:02d} PM"
         
         # Determine status
         if is_completed:
@@ -370,23 +431,23 @@ class DailyToDoManager:
             current_hour = current_time.hour
             current_minute = current_time.minute
             current_time_minutes = current_hour * 60 + current_minute
-            
+
             # Parse task time
             task_hour, task_minute = map(int, time_str.split(':'))
             task_time_minutes = task_hour * 60 + task_minute
-            
+
             if current_time_minutes > task_time_minutes:
                 status = "Overdue"
                 tag = "overdue"
             else:
                 status = "Pending"
                 tag = "pending"
-        
+
         # Store original task text (with completion marker if applicable)
         original_with_completion = f"[COMPLETED] {task_text}" if is_completed else task_text
-        
-        # Insert into Treeview with action buttons
-        item = self.daily_tree.insert("", tk.END, values=(display_time, task_only, status, "✓", "✎", "✗", original_with_completion), tags=(tag,))
+
+        # Insert into Treeview with action buttons (now includes Days column)
+        item = self.daily_tree.insert("", tk.END, values=(days_str, display_time, task_only, status, "✓", "✎", "✗", original_with_completion), tags=(tag,))
         
         # Configure colors
         self.daily_tree.tag_configure("overdue", foreground="red")
@@ -397,46 +458,55 @@ class DailyToDoManager:
         """Update colors of daily tasks based on current time"""
         if not hasattr(self, 'daily_tree'):
             return
-            
+
         current_time = datetime.now()
         current_hour = current_time.hour
         current_minute = current_time.minute
         current_time_minutes = current_hour * 60 + current_minute
-        
+
         # Update each item in the Treeview
         for item in self.daily_tree.get_children():
-            # Get original task text from the "Original" column (now index 6)
+            # Get original task text from the "Original" column (now index 7)
             values = self.daily_tree.item(item, 'values')
-            if len(values) >= 7:  # Make sure we have the Original column
-                original_text = values[6]  # Original column is now index 6
-                
+            if len(values) >= 8:  # Make sure we have the Original column
+                original_text = values[7]  # Original column is now index 7
+
                 # Skip updating if task is completed - preserve completed styling
-                if original_text.startswith("[COMPLETED] ") or values[2] == "Completed":
+                if original_text.startswith("[COMPLETED] ") or values[3] == "Completed":
                     # Ensure completed tasks maintain their styling
                     self.daily_tree.item(item, tags=("completed",))
                     continue
-                
+
                 # Remove any completion marker for parsing
                 clean_text = original_text.replace("[COMPLETED] ", "")
+                # Try new format first (with days), then old format
+                days_time_pattern = r"^([A-Za-z,]+)\s+(\d{2}:\d{2}) - (.+)$"
                 time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
-                match = re.match(time_pattern, clean_text)
-                
-                if match:
-                    time_str = match.group(1)
-                    task_hour, task_minute = map(int, time_str.split(':'))
-                    task_time_minutes = task_hour * 60 + task_minute
-                    
-                    # Get current values
-                    current_values = list(values)
-                    
-                    if current_time_minutes > task_time_minutes:
-                        # Time has passed - update status and color
-                        current_values[2] = "Overdue"  # Update status column
-                        self.daily_tree.item(item, values=current_values, tags=("overdue",))
-                    else:
-                        # Time hasn't passed - update status and color
-                        current_values[2] = "Pending"  # Update status column
-                        self.daily_tree.item(item, values=current_values, tags=("pending",))
+
+                match_with_days = re.match(days_time_pattern, clean_text)
+                match_without_days = re.match(time_pattern, clean_text)
+
+                if match_with_days:
+                    time_str = match_with_days.group(2)
+                elif match_without_days:
+                    time_str = match_without_days.group(1)
+                else:
+                    continue
+
+                task_hour, task_minute = map(int, time_str.split(':'))
+                task_time_minutes = task_hour * 60 + task_minute
+
+                # Get current values
+                current_values = list(values)
+
+                if current_time_minutes > task_time_minutes:
+                    # Time has passed - update status and color
+                    current_values[3] = "Overdue"  # Update status column (now index 3)
+                    self.daily_tree.item(item, values=current_values, tags=("overdue",))
+                else:
+                    # Time hasn't passed - update status and color
+                    current_values[3] = "Pending"  # Update status column (now index 3)
+                    self.daily_tree.item(item, values=current_values, tags=("pending",))
 
     def complete_daily_task(self):
         """Mark selected daily task as completed and cross it out"""
@@ -444,28 +514,28 @@ class DailyToDoManager:
         if not selected:
             messagebox.showwarning("Warning", "Please select a task to complete")
             return
-        
+
         # Get current values
         values = list(self.daily_tree.item(selected[0], 'values'))
-        original_text = values[6]  # Original column
-        
+        original_text = values[7]  # Original column (now index 7)
+
         # Skip if already completed
-        if original_text.startswith("[COMPLETED] ") or values[2] == "Completed":
+        if original_text.startswith("[COMPLETED] ") or values[3] == "Completed":
             messagebox.showinfo("Info", "Task is already completed!")
             return
-        
+
         # Update status to "Completed"
-        values[2] = "Completed"  # Status column
-        
+        values[3] = "Completed"  # Status column (now index 3)
+
         # Mark original text as completed
-        values[6] = f"[COMPLETED] {original_text}"
-        
+        values[7] = f"[COMPLETED] {original_text}"
+
         # Update the item with new values and apply completed tag
         self.daily_tree.item(selected[0], values=values, tags=("completed",))
-        
+
         # Configure strikethrough style for completed tasks
         self.daily_tree.tag_configure("completed", foreground="gray", font=('Helvetica', 10, 'overstrike'))
-        
+
         # Save to file with completion marker
         self.save_daily_tasks()
         messagebox.showinfo("Success", "Task completed!")
@@ -475,30 +545,40 @@ class DailyToDoManager:
         # Check if any dialog is already open
         if self.parent_app.check_existing_dialog():
             return
-            
+
         selected = self.daily_tree.selection()
         if not selected:
             messagebox.showwarning("Warning", "Please select a task to edit")
             return
-        
-        # Get original task text from the "Original" column (now index 6)
+
+        # Get original task text from the "Original" column (now index 7)
         values = self.daily_tree.item(selected[0], 'values')
-        if len(values) >= 7:  # Make sure we have the Original column
-            original_text = values[6]  # Original column is now index 6
+        if len(values) >= 8:  # Make sure we have the Original column
+            original_text = values[7]  # Original column is now index 7
         else:
             messagebox.showerror("Error", "Unable to retrieve task data")
             return
-        
-        # Parse current task to extract time and task parts
+
+        # Parse current task to extract days, time and task parts
+        days_time_pattern = r"^([A-Za-z,]+)\s+(\d{2}:\d{2}) - (.+)$"
         time_pattern = r"^(\d{2}:\d{2}) - (.+)$"
-        match = re.match(time_pattern, original_text)
-        
-        if match:
-            current_time = match.group(1)
-            current_task = match.group(2)
+
+        match_with_days = re.match(days_time_pattern, original_text)
+        match_without_days = re.match(time_pattern, original_text)
+
+        if match_with_days:
+            current_days = match_with_days.group(1).split(',')
+            current_time = match_with_days.group(2)
+            current_task = match_with_days.group(3)
+            current_hour, current_minute = current_time.split(":")
+        elif match_without_days:
+            current_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            current_time = match_without_days.group(1)
+            current_task = match_without_days.group(2)
             current_hour, current_minute = current_time.split(":")
         else:
-            # Task without proper time format - default to 00:00
+            # Task without proper format - default to all days and 00:00
+            current_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             current_time = "00:00"
             current_task = original_text
             current_hour = "00"
@@ -507,34 +587,49 @@ class DailyToDoManager:
         # Create edit dialog (similar to add dialog)
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Edit Daily Task")
-        dialog.geometry("400x200")
+        dialog.geometry("500x350")
         dialog.resizable(False, False)
-        
+
         # Register this dialog globally
         self.parent_app.register_dialog(dialog)
-        
+
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
-        task_entry = ttk.Entry(dialog, width=30)
-        task_entry.grid(row=0, column=1, padx=5, pady=10, columnspan=2)
+        task_entry = ttk.Entry(dialog, width=40)
+        task_entry.grid(row=0, column=1, padx=5, pady=10, columnspan=3)
         task_entry.insert(0, current_task)
+
+        # Days of week selection
+        ttk.Label(dialog, text="Days:").grid(row=1, column=0, padx=5, pady=10, sticky="nw")
+        days_frame = ttk.Frame(dialog)
+        days_frame.grid(row=1, column=1, padx=5, pady=10, columnspan=3, sticky="w")
+
+        day_vars = {}
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+        for i, (day, label) in enumerate(zip(day_names, day_labels)):
+            var = tk.BooleanVar(value=(day in current_days))
+            day_vars[day] = var
+            cb = ttk.Checkbutton(days_frame, text=label, variable=var)
+            cb.grid(row=i//2, column=i%2, sticky="w", padx=5, pady=2)
         
         # Time (required)
-        ttk.Label(dialog, text="Time (required):").grid(row=1, column=0, padx=5, pady=10, sticky="w")
-        
+        ttk.Label(dialog, text="Time (required):").grid(row=2, column=0, padx=5, pady=10, sticky="w")
+
         if self.parent_app.use_24_hour.get():
             # 24-hour format
             hour_var = tk.StringVar(value=current_hour)
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i:02d}" for i in range(24)]
-            hour_combo.grid(row=1, column=1, padx=(5, 2), pady=10, sticky="w")
-            
-            ttk.Label(dialog, text=":").grid(row=1, column=1, padx=(65, 0), pady=10, sticky="w")
-            
+            hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
+
+            ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
+
             minute_var = tk.StringVar(value=current_minute)
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
-            minute_combo.grid(row=1, column=1, padx=(80, 0), pady=10, sticky="w")
+            minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
         else:
             # 12-hour format - convert current 24-hour time to 12-hour
             hour_24 = int(current_hour)
@@ -550,32 +645,43 @@ class DailyToDoManager:
             else:
                 display_hour = str(hour_24 - 12)
                 period = "PM"
-            
+
             hour_var = tk.StringVar(value=display_hour)
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i}" for i in range(1, 13)]
-            hour_combo.grid(row=1, column=1, padx=(5, 2), pady=10, sticky="w")
-            
-            ttk.Label(dialog, text=":").grid(row=1, column=1, padx=(65, 0), pady=10, sticky="w")
-            
+            hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
+
+            ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
+
             minute_var = tk.StringVar(value=current_minute)
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
-            minute_combo.grid(row=1, column=1, padx=(80, 0), pady=10, sticky="w")
-            
+            minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
+
             period_var = tk.StringVar(value=period)
             period_combo = ttk.Combobox(dialog, textvariable=period_var, width=6, state="readonly")
             period_combo['values'] = ["AM", "PM"]
-            period_combo.grid(row=1, column=1, padx=(145, 0), pady=10, sticky="w")
+            period_combo.grid(row=2, column=1, padx=(145, 0), pady=10, sticky="w")
         
         result = {"task": None}
-        
+
         def validate_and_save():
             task_text = task_entry.get().strip()
             if not task_text:
                 messagebox.showerror("Error", "Please enter a task name")
                 return
-            
+
+            # Get selected days
+            selected_days = [day for day, var in day_vars.items() if var.get()]
+            if not selected_days:
+                messagebox.showerror("Error", "Please select at least one day")
+                return
+
+            # Sort days in week order
+            day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            selected_days.sort(key=lambda x: day_order.index(x))
+            days_str = ",".join(selected_days)
+
             # Format time based on selected format
             if self.parent_app.use_24_hour.get():
                 # 24-hour format
@@ -588,32 +694,32 @@ class DailyToDoManager:
                 if not hour_var.get() or not minute_var.get() or not period_var.get():
                     messagebox.showerror("Error", "Please select hour, minute, and AM/PM")
                     return
-                
+
                 hour = int(hour_var.get())
                 minute = minute_var.get()
                 period = period_var.get()
-                
+
                 if period == "AM":
                     if hour == 12:
                         hour = 0
                 else:  # PM
                     if hour != 12:
                         hour += 12
-                
+
                 time_str = f"{hour:02d}:{minute}"
-            
-            # Combine time and task in new format: TIME - TASK
-            full_task = f"{time_str} - {task_text}"
-                
+
+            # Combine days, time and task in new format: DAYS TIME - TASK
+            full_task = f"{days_str} {time_str} - {task_text}"
+
             result["task"] = full_task
             dialog.destroy()
         
         def cancel():
             dialog.destroy()
-            
+
         # Buttons
         button_frame = ttk.Frame(dialog)
-        button_frame.grid(row=3, column=0, columnspan=3, pady=20)
+        button_frame.grid(row=4, column=0, columnspan=4, pady=20)
         
         ttk.Button(button_frame, text="Save", command=validate_and_save).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=5)
@@ -655,64 +761,91 @@ class DailyToDoManager:
         # Check if any dialog is already open
         if self.parent_app.check_existing_dialog():
             return
-            
+
         # Create a custom dialog for task with time
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add Daily Task")
-        dialog.geometry("400x200")
+        dialog.geometry("500x350")
         dialog.resizable(False, False)
-        
+
         # Important: Register dialog BEFORE any other setup
         self.parent_app.register_dialog(dialog)
-        
+
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
-        task_entry = ttk.Entry(dialog, width=30)
-        task_entry.grid(row=0, column=1, padx=5, pady=10, columnspan=2)
+        task_entry = ttk.Entry(dialog, width=40)
+        task_entry.grid(row=0, column=1, padx=5, pady=10, columnspan=3)
+
+        # Days of week selection
+        ttk.Label(dialog, text="Days:").grid(row=1, column=0, padx=5, pady=10, sticky="nw")
+        days_frame = ttk.Frame(dialog)
+        days_frame.grid(row=1, column=1, padx=5, pady=10, columnspan=3, sticky="w")
+
+        day_vars = {}
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+        # Default to all days selected
+        for i, (day, label) in enumerate(zip(day_names, day_labels)):
+            var = tk.BooleanVar(value=True)
+            day_vars[day] = var
+            cb = ttk.Checkbutton(days_frame, text=label, variable=var)
+            cb.grid(row=i//2, column=i%2, sticky="w", padx=5, pady=2)
         
         # Time (required)
-        ttk.Label(dialog, text="Time (required):").grid(row=1, column=0, padx=5, pady=10, sticky="w")
-        
+        ttk.Label(dialog, text="Time (required):").grid(row=2, column=0, padx=5, pady=10, sticky="w")
+
         if self.parent_app.use_24_hour.get():
             # 24-hour format
             hour_var = tk.StringVar(value="00")
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i:02d}" for i in range(24)]
-            hour_combo.grid(row=1, column=1, padx=(5, 2), pady=10, sticky="w")
-            
-            ttk.Label(dialog, text=":").grid(row=1, column=1, padx=(65, 0), pady=10, sticky="w")
-            
+            hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
+
+            ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
+
             minute_var = tk.StringVar(value="00")
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
-            minute_combo.grid(row=1, column=1, padx=(80, 0), pady=10, sticky="w")
+            minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
         else:
             # 12-hour format
             hour_var = tk.StringVar(value="12")
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i}" for i in range(1, 13)]
-            hour_combo.grid(row=1, column=1, padx=(5, 2), pady=10, sticky="w")
-            
-            ttk.Label(dialog, text=":").grid(row=1, column=1, padx=(65, 0), pady=10, sticky="w")
-            
+            hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
+
+            ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
+
             minute_var = tk.StringVar(value="00")
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
-            minute_combo.grid(row=1, column=1, padx=(80, 0), pady=10, sticky="w")
-            
+            minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
+
             period_var = tk.StringVar(value="AM")
             period_combo = ttk.Combobox(dialog, textvariable=period_var, width=6, state="readonly")
             period_combo['values'] = ["AM", "PM"]
-            period_combo.grid(row=1, column=1, padx=(145, 0), pady=10, sticky="w")
+            period_combo.grid(row=2, column=1, padx=(145, 0), pady=10, sticky="w")
         
         result = {"task": None, "time": None}
-        
+
         def validate_and_add():
             task_text = task_entry.get().strip()
             if not task_text:
                 messagebox.showerror("Error", "Please enter a task name")
                 return
-            
+
+            # Get selected days
+            selected_days = [day for day, var in day_vars.items() if var.get()]
+            if not selected_days:
+                messagebox.showerror("Error", "Please select at least one day")
+                return
+
+            # Sort days in week order
+            day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            selected_days.sort(key=lambda x: day_order.index(x))
+            days_str = ",".join(selected_days)
+
             # Format time based on selected format
             if self.parent_app.use_24_hour.get():
                 # 24-hour format
@@ -725,33 +858,33 @@ class DailyToDoManager:
                 if not hour_var.get() or not minute_var.get() or not period_var.get():
                     messagebox.showerror("Error", "Please select hour, minute, and AM/PM")
                     return
-                
+
                 hour = int(hour_var.get())
                 minute = minute_var.get()
                 period = period_var.get()
-                
+
                 if period == "AM":
                     if hour == 12:
                         hour = 0
                 else:  # PM
                     if hour != 12:
                         hour += 12
-                
+
                 time_str = f"{hour:02d}:{minute}"
-            
-            # Combine time and task in new format: TIME - TASK
-            full_task = f"{time_str} - {task_text}"
-                
+
+            # Combine days, time and task in new format: DAYS TIME - TASK
+            full_task = f"{days_str} {time_str} - {task_text}"
+
             result["task"] = full_task
             result["time"] = time_str
             dialog.destroy()
         
         def cancel():
             dialog.destroy()
-            
+
         # Buttons
         button_frame = ttk.Frame(dialog)
-        button_frame.grid(row=3, column=0, columnspan=3, pady=20)
+        button_frame.grid(row=4, column=0, columnspan=4, pady=20)
         
         ttk.Button(button_frame, text="Add", command=validate_and_add).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=5)
@@ -778,16 +911,16 @@ class DailyToDoManager:
             tasks = []
             # Get all items from the Treeview
             for item in self.daily_tree.get_children():
-                # Get the original task text stored in the "Original" column (now index 6)
+                # Get the original task text stored in the "Original" column (now index 7)
                 values = self.daily_tree.item(item, 'values')
-                if len(values) >= 7:  # Make sure we have the Original column
-                    original_text = values[6]  # Original column is now index 6
+                if len(values) >= 8:  # Make sure we have the Original column
+                    original_text = values[7]  # Original column is now index 7
                     if original_text:
                         tasks.append(original_text)
-            
+
             # Sort tasks by time before saving
             sorted_tasks = self.sort_tasks_by_time(tasks)
-    
+
             with open(self.DAILY_TASK_FILE, "w") as file:
                 for task in sorted_tasks:
                     file.write(task + "\n")

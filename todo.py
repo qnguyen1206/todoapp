@@ -75,6 +75,12 @@ class TodoApp(metaclass=SingletonMeta):
         self.style = ttk.Style()
         self.style.configure("Treeview.Heading", font=('Helvetica', 10, 'bold'))
         self.style.configure("Treeview", rowheight=25)
+
+        # Remove selection highlight by making it transparent/same as background
+        self.style.map("Treeview",
+            background=[('selected', 'white')],
+            foreground=[('selected', 'black')]
+        )
         
         # Character stats
         self.level = 0
