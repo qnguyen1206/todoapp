@@ -726,10 +726,11 @@ class DailyToDoManager:
         
         # Focus on task entry
         task_entry.focus()
-        
+
+        # Bind the Return key to the validate_and_save function
+        dialog.bind('<Return>', lambda e: validate_and_save())
+
         # Wait for dialog to close
-        dialog.transient(self.parent_app.root)
-        dialog.grab_set()
         self.parent_app.root.wait_window(dialog)
         
         # Update the task if changes were made
