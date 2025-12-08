@@ -593,17 +593,29 @@ The app will continue to work normally for task management without AI features."
         self.options_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
 
         # AI Model submenu
-        if hasattr(self, 'ai_assistant'):
+        if hasattr(self, 'ai_assistant') and self.ai_assistant:
             ai_model_menu = tk.Menu(self.options_menu, tearoff=0)
             self.selected_model = tk.StringVar(value=self.ai_assistant.current_ai_model)
-            for model in self.ai_assistant.available_models:
-                ai_model_menu.add_radiobutton(
-                    label=model,
-                    value=model,
-                    variable=self.selected_model,
-                    command=lambda m=model: self.ai_assistant.change_ai_model(m)
-                )
-            self.options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
+            
+            # Use installed models if available, otherwise show configured models
+            models_to_show = self.ai_assistant.installed_models if self.ai_assistant.installed_models else self.ai_assistant.available_models
+            
+            if models_to_show:
+                for model in models_to_show:
+                    ai_model_menu.add_radiobutton(
+                        label=model,
+                        value=model,
+                        variable=self.selected_model,
+                        command=lambda m=model: self.ai_assistant.change_ai_model(m)
+                    )
+                self.options_menu.add_cascade(label="AI Model", menu=ai_model_menu)
+            else:
+                # No models available - show disabled menu
+                ai_model_menu.add_command(label="No models installed", state=tk.DISABLED)
+                ai_model_menu.add_separator()
+                ai_model_menu.add_command(label="Install a model:", state=tk.DISABLED)
+                ai_model_menu.add_command(label="ollama pull deepseek-r1:14b", state=tk.DISABLED)
+                self.options_menu.add_cascade(label="AI Model (No Models)", menu=ai_model_menu)
 
         # Startup checkbox
         self.startup_var = tk.BooleanVar(value=self.startup_enabled)
@@ -776,22 +788,106 @@ Built with Python and Tkinter"""
         # Also handle window close event
         dialog.protocol("WM_DELETE_WINDOW", cleanup_and_destroy)
 
-if __name__ == "__main__":
-    # Check for updates before launching the main app
-    try:
-        if MODULAR_UPDATER_AVAILABLE:
-            # Use modular updater for better update experience
-            updater = ModularUpdater(auto_check=True)
-            # Update check is done automatically in constructor
-        else:
-            # Fall back to simple updater
-            import todo_updater
-            todo_updater.Updater()
-    except Exception as e:
-        print(f"Update check failed: {e}")
+class LoadingScreen:
+    """Loading screen to show startup progress"""
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Loading TODO App...")
+        self.root.geometry("400x200")
+        self.root.resizable(False, False)
         
-    # Continue with normal app startup
-    root = tk.Tk()
-    app = TodoApp(root)
-    app.root.iconphoto(True, tk.PhotoImage(file=ICON_PATH))
-    root.mainloop()
+        # Center the window
+        self.root.update_idletasks()
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 200) // 2
+        self.root.geometry(f"400x200+{x}+{y}")
+        
+        # Set icon if available
+        try:
+            self.root.iconphoto(True, tk.PhotoImage(file=ICON_PATH))
+        except:
+            pass
+        
+        # Create UI
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="TODO App", font=('Helvetica', 16, 'bold'))
+        title_label.pack(pady=(10, 20))
+        
+        # Status label
+        self.status_label = ttk.Label(main_frame, text="Initializing...", font=('Helvetica', 10))
+        self.status_label.pack(pady=10)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(main_frame, length=300, mode='indeterminate')
+        self.progress.pack(pady=10)
+        self.progress.start(10)
+        
+        # Detail label for sub-tasks
+        self.detail_label = ttk.Label(main_frame, text="", font=('Helvetica', 8), foreground='gray')
+        self.detail_label.pack(pady=5)
+        
+        self.root.update()
+    
+    def update_status(self, status, detail=""):
+        """Update the loading status"""
+        self.status_label.config(text=status)
+        self.detail_label.config(text=detail)
+        self.root.update()
+    
+    def close(self):
+        """Close the loading screen"""
+        self.progress.stop()
+        self.root.destroy()
+
+if __name__ == "__main__":
+    # Show loading screen immediately
+    loading = LoadingScreen()
+    
+    try:
+        # Check for updates
+        loading.update_status("Checking for updates...", "Connecting to GitHub")
+        try:
+            if MODULAR_UPDATER_AVAILABLE:
+                updater = ModularUpdater(auto_check=True)
+            else:
+                import todo_updater
+                todo_updater.Updater()
+            loading.update_status("Checking for updates...", "Up to date")
+        except Exception as e:
+            print(f"Update check failed: {e}")
+            loading.update_status("Checking for updates...", "Check failed, continuing")
+        
+        # Initialize main app
+        loading.update_status("Loading application...", "Initializing components")
+        root = tk.Tk()
+        root.withdraw()  # Hide main window temporarily
+        
+        # Set icon before creating app
+        try:
+            root.iconphoto(True, tk.PhotoImage(file=ICON_PATH))
+        except:
+            pass
+        
+        loading.update_status("Loading application...", "Setting up interface")
+        app = TodoApp(root)
+        
+        loading.update_status("Loading application...", "Loading tasks")
+        
+        # Close loading screen and show main app
+        loading.close()
+        root.deiconify()  # Show main window
+        root.mainloop()
+        
+    except Exception as e:
+        loading.close()
+        # Show error and exit
+        error_root = tk.Tk()
+        error_root.withdraw()
+        messagebox.showerror("Startup Error", f"Failed to start TODO App:\n{str(e)}")
+        error_root.destroy()
+        raise

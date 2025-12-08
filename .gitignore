@@ -16,4 +16,8 @@ uploads/
 
 todo_new.py
 todo_backup.py
+todo_updater.py
+cleanup.py
+update.zip
+*.zip
 generate_manifest.py

@@ -53,6 +53,12 @@ class MySQLLANManager:
         
         # Load existing configuration
         self.load_mysql_config()
+    
+    def _get_password_from_encoded(self, encoded_pw):
+        """Helper to decode password from base64"""
+        if encoded_pw:
+            return base64.b64decode(encoded_pw).decode('utf-8')
+        return ''
 
     def load_mysql_config(self):
         """Load MySQL configuration from file with better security"""
@@ -75,30 +81,14 @@ class MySQLLANManager:
                             if password:
                                 self.mysql_config['password'] = password
                             else:
-                                # Fall back to encoded password from file
-                                encoded_pw = config['config'].get('encoded_password', '')
-                                if encoded_pw:
-                                    self.mysql_config['password'] = base64.b64decode(encoded_pw).decode('utf-8')
-                                else:
-                                    self.mysql_config['password'] = ''
+                                self.mysql_config['password'] = self._get_password_from_encoded(config['config'].get('encoded_password', ''))
                         except:
-                            # If keyring fails, use encoded password from file
-                            encoded_pw = config['config'].get('encoded_password', '')
-                            if encoded_pw:
-                                self.mysql_config['password'] = base64.b64decode(encoded_pw).decode('utf-8')
-                            else:
-                                self.mysql_config['password'] = ''
+                            self.mysql_config['password'] = self._get_password_from_encoded(config['config'].get('encoded_password', ''))
                     else:
-                        # Keyring not available, use encoded password from file
-                        encoded_pw = config['config'].get('encoded_password', '')
-                        if encoded_pw:
-                            self.mysql_config['password'] = base64.b64decode(encoded_pw).decode('utf-8')
-                        else:
-                            self.mysql_config['password'] = ''
+                        self.mysql_config['password'] = self._get_password_from_encoded(config['config'].get('encoded_password', ''))
                     
                     self.mysql_enabled.set(config['enabled'])
-        except Exception as e:
-            print(f"Error loading MySQL config: {e}")
+        except Exception:
             self.mysql_config = {
                 'host': 'localhost',
                 'user': 'root',
@@ -143,8 +133,8 @@ class MySQLLANManager:
             
             with open(self.MYSQL_CONFIG_FILE, 'w') as f:
                 json.dump(config, f)
-        except Exception as e:
-            print(f"Error saving MySQL config: {e}")
+        except Exception:
+            pass
 
     def check_mysql_status(self):
         """Check MySQL status and return a status code

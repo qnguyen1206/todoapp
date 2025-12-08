@@ -47,8 +47,6 @@ class DailyToDoManager:
         
         if stored_date != current_date:
             # It's a new day - reset completion status of daily tasks
-            print(f"New day detected ({current_date}). Resetting daily task completion status.")
-            
             if os.path.exists(self.DAILY_TASK_FILE):
                 # Read existing tasks
                 with open(self.DAILY_TASK_FILE, "r") as f:
@@ -68,17 +66,11 @@ class DailyToDoManager:
                     for task in reset_tasks:
                         if task:  # Only write non-empty tasks
                             f.write(task + "\n")
-                
-                print(f"Reset completion status for {len(reset_tasks)} daily tasks.")
             
             # Update the stored date
             os.makedirs(os.path.dirname(self.DAILY_DATE_FILE), exist_ok=True)
             with open(self.DAILY_DATE_FILE, "w") as f:
                 f.write(current_date)
-            
-            print("Daily task completion status has been reset for the new day.")
-        else:
-            print(f"Same day ({current_date}). Keeping existing daily task status.")
 
     def create_daily_todo_widgets(self):
         """Create the Daily To Do List interface"""

@@ -44,14 +44,17 @@ class AIAssistant:
             raise ImportError("requests library is required for AI functionality")
         
         # AI model configuration
-        self.current_ai_model = "deepseek-r1:14b"  # Default model
-        self.available_models = [
-            "deepseek-r1:14b",
-        ]
+        self.current_ai_model = ""  # Default model
+        self.available_models = []
         
         # Upload folder setup
         self.upload_folder = str(Path.home()) + "/TODOapp/uploads/"
         Path(self.upload_folder).mkdir(parents=True, exist_ok=True)
+        
+        # Check Ollama availability and models
+        self.ollama_available = False
+        self.installed_models = []
+        self.check_ollama_status()
         
         # Create AI widgets
         self.create_ai_widgets()
@@ -84,8 +87,44 @@ class AIAssistant:
         ]:
             self.chat_history.tag_config(tag, **cfg)
 
-        # Initial greeting
-        self.update_chat_history("AI: Hello! I'm your personal task assistant. How can I help you today?\n")
+        # Initial greeting and status check
+        self.display_initial_greeting()
+
+    def check_ollama_status(self):
+        """Check if Ollama is running and what models are installed"""
+        try:
+            response = requests.get('http://localhost:11434/api/tags', timeout=2)
+            if response.status_code == 200:
+                self.ollama_available = True
+                data = response.json()
+                self.installed_models = [model['name'] for model in data.get('models', [])]
+            else:
+                self.ollama_available = False
+        except requests.exceptions.RequestException:
+            self.ollama_available = False
+    
+    def display_initial_greeting(self):
+        """Display greeting with status information"""
+        greeting = "AI: Hello! I'm your personal task assistant.\n\n"
+        
+        if not self.ollama_available:
+            greeting += "⚠️ Status: Ollama is not running\n"
+            greeting += "Please start Ollama to use AI features.\n"
+            greeting += "Download from: https://ollama.ai\n"
+        elif not self.installed_models:
+            greeting += "⚠️ Status: No models installed\n"
+            greeting += "Please install a model using:\n"
+            greeting += "  ollama pull deepseek-r1:14b\n"
+        elif self.current_ai_model not in self.installed_models:
+            greeting += f"⚠️ Status: Model '{self.current_ai_model}' not found\n"
+            greeting += f"Installed models: {', '.join(self.installed_models)}\n"
+            greeting += f"Please install it using:\n"
+            greeting += f"  ollama pull {self.current_ai_model}\n"
+        else:
+            greeting += f"✓ Status: Ready (using {self.current_ai_model})\n"
+            greeting += "How can I help you today?\n"
+        
+        self.update_chat_history(greeting)
 
     def update_chat_history(self, message):
         """Update chat history with new message"""
@@ -98,6 +137,17 @@ class AIAssistant:
         """Send user input to AI and handle response"""
         user_text = self.user_input.get()
         if not user_text:
+            return
+        
+        # Check if Ollama is available before sending
+        if not self.ollama_available:
+            self.update_chat_history(f"User: {user_text}")
+            self.update_chat_history("AI: Error - Ollama is not running. Please start Ollama first.")
+            return
+        
+        if self.current_ai_model not in self.installed_models:
+            self.update_chat_history(f"User: {user_text}")
+            self.update_chat_history(f"AI: Error - Model '{self.current_ai_model}' is not installed.\nRun: ollama pull {self.current_ai_model}")
             return
         
         self.update_chat_history(f"User: {user_text}")
@@ -281,7 +331,15 @@ class AIAssistant:
     def change_ai_model(self, model_name):
         """Change the AI model"""
         self.current_ai_model = model_name
-        self.update_chat_history(f"System: Switched to {model_name} model\n")
+        
+        # Check if the new model is installed
+        self.check_ollama_status()
+        if model_name in self.installed_models:
+            self.update_chat_history(f"System: Switched to {model_name} model ✓\n")
+        else:
+            self.update_chat_history(f"System: Switched to {model_name} model\n")
+            self.update_chat_history(f"⚠️ Warning: Model '{model_name}' is not installed.\n")
+            self.update_chat_history(f"Install it using: ollama pull {model_name}\n")
 
     def upload_file(self):
         """Handle file upload for AI assistant"""
