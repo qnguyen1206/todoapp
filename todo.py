@@ -43,6 +43,15 @@ except ImportError:
 
 if getattr(sys, "frozen", False):
     base_path = sys._MEIPASS
+    # Register cleanup for MEI folder on exit
+    import atexit
+    import shutil
+    def cleanup_mei():
+        try:
+            shutil.rmtree(sys._MEIPASS, ignore_errors=True)
+        except:
+            pass
+    atexit.register(cleanup_mei)
 else:
     base_path = os.path.dirname(__file__)
 

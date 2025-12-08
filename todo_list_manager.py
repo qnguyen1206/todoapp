@@ -43,13 +43,13 @@ class ToDoListManager:
             self.tree.column(col, width=60, minwidth=50, stretch=False, anchor='center')
         
         # Bind click events for action buttons
-        self.tree.bind(\"<Button-1>\", self.on_tree_click)
+        self.tree.bind("<Button-1>", self.on_tree_click)
         
         self.tree.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
         
         # Configure row colors once at initialization
-        self.tree.tag_configure(\"overdue\", foreground=\"red\")
-        self.tree.tag_configure(\"today\", foreground=\"orange\")
+        self.tree.tag_configure("overdue", foreground="red")
+        self.tree.tag_configure("today", foreground="orange")
 
         # Add button at bottom left
         control_frame = ttk.Frame(self.todo_frame)
@@ -910,8 +910,8 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             item = self.tree.insert("", tk.END, values=display_values, tags=("today",), text=task[0])
             self.task_data[item] = task
         for task in upcoming_tasks:
-            display_values = task[:3] + (\"✓\", \"✎\", \"✗\")
-            item = self.tree.insert(\"\", tk.END, values=display_values, text=task[0])
+            display_values = task[:3] + ("✓", "✎", "✗")
+            item = self.tree.insert("", tk.END, values=display_values, text=task[0])
             self.task_data[item] = task
 
         # Update the remaining tasks count in parent app
