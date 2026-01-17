@@ -88,9 +88,9 @@ class ModularUpdater:
             github_username = "Kairu1206"
             repo_name = "todoapp"
             
-            # Check for latest release
+            # Check for latest release with timeout
             api_url = f"https://api.github.com/repos/{github_username}/{repo_name}/releases/latest"
-            response = requests.get(api_url)
+            response = requests.get(api_url, timeout=5)  # Add 5s timeout
             
             if response.status_code == 200:
                 latest_release = json.loads(response.text)

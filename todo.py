@@ -33,6 +33,15 @@ except ImportError as e:
 from daily_todo_manager import DailyToDoManager
 from todo_list_manager import ToDoListManager
 
+# Import calendar view
+try:
+    from calendar_view import CalendarView
+    CALENDAR_VIEW_AVAILABLE = True
+except ImportError as e:
+    print(f"Calendar View not available: {e}")
+    CALENDAR_VIEW_AVAILABLE = False
+    CalendarView = None
+
 # Import updater system
 try:
     from modular_updater import ModularUpdater
@@ -151,22 +160,46 @@ class TodoApp(metaclass=SingletonMeta):
         self.create_task_manager_widgets(self.task_frame)
 
     def initialize_managers(self):
-        """Initialize all the manager modules"""
-        # Initialize MySQL LAN Manager
-        if MYSQL_LAN_AVAILABLE and MySQLLANManager:
-            try:
-                self.mysql_lan_manager = MySQLLANManager(self)
-                self.mysql_available = True
-            except Exception as e:
-                print(f"Failed to initialize MySQL LAN Manager: {e}")
-                self.mysql_lan_manager = None
-                self.mysql_available = False
-        else:
-            print("MySQL LAN Manager not available - MySQL sharing features will be disabled")
-            self.mysql_lan_manager = None
-            self.mysql_available = False
+        """Initialize all the manager modules - deferred for fast startup"""
+        # Set initial states - actual initialization will be deferred
+        self.mysql_lan_manager = None
+        self.mysql_available = False
+        self.ai_assistant = None
+        self.ai_available = False
         
-        # Initialize AI Assistant
+        # Create fallback AI interface immediately (fast)
+        if not AI_ASSISTANT_AVAILABLE:
+            self.create_fallback_ai_interface()
+        
+        # Defer heavy initialization to after UI is shown
+        self.root.after(100, self._deferred_manager_init)
+        
+        # Initialize Daily Todo Manager (will be created when task manager widgets are made)
+        # Initialize Todo List Manager (will be created when task manager widgets are made)
+    
+    def _deferred_manager_init(self):
+        """Initialize managers after UI is displayed for faster startup"""
+        import threading
+        
+        def init_managers_background():
+            # Initialize MySQL LAN Manager in background
+            if MYSQL_LAN_AVAILABLE and MySQLLANManager:
+                try:
+                    self.mysql_lan_manager = MySQLLANManager(self)
+                    self.mysql_available = True
+                except Exception as e:
+                    print(f"Failed to initialize MySQL LAN Manager: {e}")
+            
+            # Initialize AI Assistant in background
+            if AI_ASSISTANT_AVAILABLE and AIAssistant:
+                # Schedule AI init on main thread (requires Tkinter)
+                self.root.after(0, self._init_ai_assistant)
+        
+        # Run in background thread
+        threading.Thread(target=init_managers_background, daemon=True).start()
+    
+    def _init_ai_assistant(self):
+        """Initialize AI assistant on main thread"""
         if AI_ASSISTANT_AVAILABLE and AIAssistant:
             try:
                 self.ai_assistant = AIAssistant(self, self.ai_frame)
@@ -175,17 +208,7 @@ class TodoApp(metaclass=SingletonMeta):
                 print(f"Failed to initialize AI Assistant: {e}")
                 self.ai_assistant = None
                 self.ai_available = False
-                # Create fallback AI interface
                 self.create_fallback_ai_interface()
-        else:
-            print("AI Assistant not available - AI features will be disabled")
-            self.ai_assistant = None
-            self.ai_available = False
-            # Create fallback AI interface
-            self.create_fallback_ai_interface()
-        
-        # Initialize Daily Todo Manager (will be created when task manager widgets are made)
-        # Initialize Todo List Manager (will be created when task manager widgets are made)
 
     def create_fallback_ai_interface(self):
         """Create a fallback interface when AI is not available"""
@@ -290,21 +313,55 @@ The app will continue to work normally for task management without AI features."
         self.remaining_label = ttk.Label(remaining_frame, text="0", font=('Helvetica', 12))
         self.remaining_label.pack(side=tk.LEFT, padx=5)
 
-        # Daily To Do List Panel
-        self.daily_todo_frame = tk.LabelFrame(self.task_frame, text="Daily To Do List", font=("Helvetica", 10, "bold"), bg="#f0f0f0")
-        self.daily_todo_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
+        # Create a PanedWindow for resizable Daily/Todo split (40/60)
+        self.task_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
+        self.task_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+
+        # Daily To Do List Panel (40% height)
+        self.daily_todo_frame = tk.LabelFrame(self.task_pane, text="Daily To Do List",
+                                              font=("Helvetica", 10, "bold"), bg="#f0f0f0")
 
         # Initialize Daily Todo Manager
         self.daily_todo_manager = DailyToDoManager(self, self.daily_todo_frame)
+        
+        # Add daily frame to pane (weight=2 for 40%)
+        self.task_pane.add(self.daily_todo_frame, weight=2)
 
-        # Task list
-        self.todo_frame = tk.LabelFrame(parent, text="To Do List",
-                                       font=("Helvetica", 10, "bold"),
-                                       bg="#f0f0f0")
-        self.todo_frame.pack(fill=tk.BOTH, padx=10, pady=(10, 0), expand=True)
+        # Create notebook for view switching (List View / Calendar View) - 60% height
+        self.view_notebook = ttk.Notebook(self.task_pane)
+        
+        # Tab 1: List View (existing todo list)
+        self.todo_frame = tk.Frame(self.view_notebook, bg="#f0f0f0")
+        self.view_notebook.add(self.todo_frame, text="📋 List View")
+        
+        # Add a label frame inside for consistent styling
+        list_label_frame = tk.LabelFrame(self.todo_frame, text="To Do List",
+                                         font=("Helvetica", 10, "bold"), bg="#f0f0f0")
+        list_label_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Initialize Todo List Manager
-        self.todo_list_manager = ToDoListManager(self, self.todo_frame)
+        # Initialize Todo List Manager with the label frame
+        self.todo_list_manager = ToDoListManager(self, list_label_frame)
+        
+        # Tab 2: Calendar View
+        self.calendar_tab_frame = tk.Frame(self.view_notebook, bg="#f0f0f0")
+        self.view_notebook.add(self.calendar_tab_frame, text="📅 Calendar View")
+        
+        # Initialize Calendar View
+        if CALENDAR_VIEW_AVAILABLE and CalendarView:
+            calendar_label_frame = tk.LabelFrame(self.calendar_tab_frame, text="Calendar View",
+                                                 font=("Helvetica", 10, "bold"), bg="#f0f0f0")
+            calendar_label_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            self.calendar_view = CalendarView(self, calendar_label_frame)
+        else:
+            self.calendar_view = None
+            ttk.Label(self.calendar_tab_frame, text="Calendar View not available", 
+                     font=('Helvetica', 12)).pack(pady=50)
+        
+        # Bind tab change event to refresh calendar when switching to it
+        self.view_notebook.bind('<<NotebookTabChanged>>', self.on_view_tab_changed)
+        
+        # Add view notebook to pane (weight=3 for 60%)
+        self.task_pane.add(self.view_notebook, weight=3)
         
         # Load and display tasks immediately after initialization
         self.todo_list_manager.refresh_task_list()
@@ -343,6 +400,12 @@ The app will continue to work normally for task management without AI features."
                 return f.read().strip()
         except FileNotFoundError:
             return "0.0.0 (dev)"
+
+    def on_view_tab_changed(self, event):
+        """Handle tab change between List View and Calendar View"""
+        selected_tab = self.view_notebook.index(self.view_notebook.select())
+        if selected_tab == 1 and self.calendar_view:  # Calendar View tab
+            self.calendar_view.refresh()
 
     def toggle_chatbot(self):
         """Toggle the visibility of the AI assistant panel"""
@@ -858,21 +921,10 @@ if __name__ == "__main__":
     loading = LoadingScreen()
     
     try:
-        # Check for updates
-        loading.update_status("Checking for updates...", "Connecting to GitHub")
-        try:
-            if MODULAR_UPDATER_AVAILABLE:
-                updater = ModularUpdater(auto_check=True)
-            else:
-                import todo_updater
-                todo_updater.Updater()
-            loading.update_status("Checking for updates...", "Up to date")
-        except Exception as e:
-            print(f"Update check failed: {e}")
-            loading.update_status("Checking for updates...", "Check failed, continuing")
-        
-        # Initialize main app
+        # Skip update check on startup - defer to background
         loading.update_status("Loading application...", "Initializing components")
+        
+        # Initialize main app immediately
         root = tk.Tk()
         root.withdraw()  # Hide main window temporarily
         
@@ -890,6 +942,19 @@ if __name__ == "__main__":
         # Close loading screen and show main app
         loading.close()
         root.deiconify()  # Show main window
+        
+        # Check for updates in background AFTER app is visible
+        def background_update_check():
+            try:
+                if MODULAR_UPDATER_AVAILABLE:
+                    ModularUpdater(auto_check=True)
+            except Exception as e:
+                print(f"Background update check failed: {e}")
+        
+        import threading
+        update_thread = threading.Thread(target=background_update_check, daemon=True)
+        update_thread.start()
+        
         root.mainloop()
         
     except Exception as e:

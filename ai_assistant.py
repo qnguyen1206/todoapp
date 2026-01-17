@@ -51,13 +51,16 @@ class AIAssistant:
         self.upload_folder = str(Path.home()) + "/TODOapp/uploads/"
         Path(self.upload_folder).mkdir(parents=True, exist_ok=True)
         
-        # Check Ollama availability and models
+        # Check Ollama availability and models - defer to background
         self.ollama_available = False
         self.installed_models = []
-        self.check_ollama_status()
         
-        # Create AI widgets
+        # Create AI widgets first (fast)
         self.create_ai_widgets()
+        
+        # Check Ollama status in background thread (don't block UI)
+        import threading
+        threading.Thread(target=self._check_ollama_and_greet, daemon=True).start()
         
     def create_ai_widgets(self):
         """Create the AI assistant interface"""
@@ -87,13 +90,12 @@ class AIAssistant:
         ]:
             self.chat_history.tag_config(tag, **cfg)
 
-        # Initial greeting and status check
-        self.display_initial_greeting()
+        # Skip initial greeting - will be shown after background Ollama check
 
     def check_ollama_status(self):
         """Check if Ollama is running and what models are installed"""
         try:
-            response = requests.get('http://localhost:11434/api/tags', timeout=2)
+            response = requests.get('http://localhost:11434/api/tags', timeout=1)  # Reduced timeout
             if response.status_code == 200:
                 self.ollama_available = True
                 data = response.json()
@@ -102,6 +104,12 @@ class AIAssistant:
                 self.ollama_available = False
         except requests.exceptions.RequestException:
             self.ollama_available = False
+    
+    def _check_ollama_and_greet(self):
+        """Background check for Ollama status then display greeting"""
+        self.check_ollama_status()
+        # Schedule greeting on main thread
+        self.ai_frame.after(0, self.display_initial_greeting)
     
     def display_initial_greeting(self):
         """Display greeting with status information"""

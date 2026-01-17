@@ -917,6 +917,10 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         # Update the remaining tasks count in parent app
         if hasattr(self.parent_app, 'remaining_label'):
             self.parent_app.remaining_label.config(text=str(len(self.tree.get_children())))
+        
+        # Refresh calendar view if it exists
+        if hasattr(self.parent_app, 'calendar_view') and self.parent_app.calendar_view:
+            self.parent_app.calendar_view.refresh()
 
     def load_tasks(self):
         """Load tasks from file"""
