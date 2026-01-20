@@ -6,78 +6,78 @@
       "required": false,
       "size": 3467,
       "type": "docs",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "ai_assistant.py": {
       "hash": "ce3f32dc10263c2ddbadfe65db474de4696cb0950114b09e921aa401264965cf",
       "required": true,
       "size": 18007,
       "type": "module",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "clipboard.png": {
       "hash": "1846afeff4e214c218c75b0d2ee637e88c3c6c6e76732ac65fbbe35eec1cd14c",
       "required": true,
       "size": 20986,
       "type": "asset",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "daily_todo_manager.py": {
-      "hash": "11c2747f84fd757408563571f46643fed96185c7424e3adbba88d691feb5c524",
+      "hash": "aacf3662aca20bac8ed1fc39e035f2252527958f7defd4c01e23c855611008bd",
       "required": true,
-      "size": 41162,
+      "size": 41525,
       "type": "module",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "modular_updater.py": {
       "hash": "c14c28d46892e17db220af065acd6e1e9403ce8802e702756724500715dcd90f",
       "required": false,
       "size": 23776,
       "type": "system",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "mysql_lan_manager.py": {
       "hash": "0df4065d434c3fa3af1ee24101fca677fe28c43db9e94624b04b47916a99ad7a",
       "required": true,
       "size": 37023,
       "type": "module",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "todo.exe": {
       "hash": "5d5f0e4c8086610ebe572644f551dcec0466348c964473060ed63cd0cfa79323",
       "required": true,
       "size": 50595077,
       "type": "core",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "todo.py": {
-      "hash": "2e32d14601a7ccd10df35eab095582d513d4e8b88196b8f3a3b143d5d5311b84",
+      "hash": "d1e2ea6d78005af74e3caaf566176a5f2ffcc85223b30671c5037708215f7351",
       "required": true,
-      "size": 40282,
+      "size": 40039,
       "type": "core",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "todo.spec": {
-      "hash": "781c9acf0a26fdb65f216cf093970fe5f8ace864fa8ac1533fc5bac5c4d503eb",
+      "hash": "9b4edbd6ff8561be77f3e215e21e3750a60cf013a1a4a896113ac46d5eb15484",
       "required": false,
-      "size": 1562,
+      "size": 1529,
       "type": "build",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "todo_list_manager.py": {
       "hash": "dad651de77b8e4edd2d046f8aea443f7a4a2a47483be1f865239a43c0beaa28f",
       "required": true,
       "size": 43785,
       "type": "module",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     "version.txt": {
-      "hash": "74b860b3270666137a4d543c3e3d1e4e473d54636f7593d1c17bf693e6540bbe",
+      "hash": "8ec5a17af8275faf8adc4a9ef9a201cd68d26fe6216e78450e871070a46bbd50",
       "required": true,
       "size": 5,
       "type": "config",
-      "version": "1.4.0"
+      "version": "1.4.2"
     }
   },
-  "version": "1.4.0"
+  "version": "1.4.2"
 }

@@ -313,9 +313,34 @@ The app will continue to work normally for task management without AI features."
         self.remaining_label = ttk.Label(remaining_frame, text="0", font=('Helvetica', 12))
         self.remaining_label.pack(side=tk.LEFT, padx=5)
 
+        # Version and controls frame - PACK BOTTOM FIRST before expanding content
+        version_frame = ttk.Frame(parent)
+        version_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
+        
+        # Chatbot toggle button on the left side of version frame
+        self.chatbot_toggle_btn = ttk.Button(
+            version_frame,
+            text="Hide AI Assistant" if self.chatbot_visible.get() else "Show AI Assistant",
+            command=self.toggle_chatbot
+        )
+        self.chatbot_toggle_btn.pack(side=tk.LEFT)
+        
+        # Version label on the right
+        ttk.Label(
+            version_frame,
+            text=f"v {self.load_app_version()}",
+            font=('Helvetica', 8),
+            foreground="gray50",
+        ).pack(side=tk.RIGHT, padx=5)
+        
+        # Clock on the right (before version)
+        self.time_label = ttk.Label(version_frame, font=('Helvetica', 10, 'bold'))
+        self.time_label.pack(side=tk.RIGHT, padx=10)
+        self.update_time()  # start the clock
+
         # Create a PanedWindow for resizable Daily/Todo split (40/60)
         self.task_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
-        self.task_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+        self.task_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
 
         # Daily To Do List Panel (40% height)
         self.daily_todo_frame = tk.LabelFrame(self.task_pane, text="Daily To Do List",
@@ -365,33 +390,6 @@ The app will continue to work normally for task management without AI features."
         
         # Load and display tasks immediately after initialization
         self.todo_list_manager.refresh_task_list()
-
-        # Version and controls frame
-        version_frame = ttk.Frame(parent)
-        version_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
-        
-        # Chatbot toggle button on the left side of version frame
-        self.chatbot_toggle_btn = ttk.Button(
-            version_frame,
-            text="Hide AI Assistant" if self.chatbot_visible.get() else "Show AI Assistant",
-            command=self.toggle_chatbot
-        )
-        self.chatbot_toggle_btn.pack(side=tk.LEFT)
-        
-        ttk.Label(
-            version_frame,
-            text=f"v {self.load_app_version()}",
-            font=('Helvetica', 8),
-            foreground="gray50",
-            anchor="e"
-        ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
-
-        # Time display aligned to the right
-        time_frame = ttk.Frame(parent)
-        time_frame.pack(side=tk.RIGHT, padx=10)
-        self.time_label = ttk.Label(time_frame, font=('Helvetica', 12, 'bold'))
-        self.time_label.pack(side=tk.RIGHT, padx=10)
-        self.update_time()  # start the clock
 
     def load_app_version(self):
         """Load application version from file"""
@@ -826,21 +824,19 @@ Built with Python and Tkinter"""
         """Register a new dialog and set up cleanup"""
         self.current_dialog = dialog
         
-        # Make dialog modal and ensure it stays in front
-        dialog.transient(self.root)  # Make dialog transient to main window
-        dialog.grab_set()  # Make dialog modal
+        # Make dialog transient to main window (keeps it on top of main window)
+        dialog.transient(self.root)
         dialog.lift()  # Bring to front
-        dialog.attributes('-topmost', True)  # Ensure it's on top
         dialog.focus_force()  # Give it focus
-        
-        # Remove topmost after a brief moment to allow normal window behavior
-        dialog.after(100, lambda: dialog.attributes('-topmost', False))
         
         # Center dialog on main window
         dialog.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
+        
+        # Now make it modal after positioning
+        dialog.grab_set()
         
         # Store original destroy method
         original_destroy = dialog.destroy

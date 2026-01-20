@@ -74,6 +74,11 @@ class DailyToDoManager:
 
     def create_daily_todo_widgets(self):
         """Create the Daily To Do List interface"""
+        # Add button at bottom left - PACK THIS FIRST with side=BOTTOM so it's always visible
+        daily_add_frame = ttk.Frame(self.daily_todo_frame)
+        daily_add_frame.pack(side=tk.BOTTOM, pady=5, padx=10, fill=tk.X)
+        ttk.Button(daily_add_frame, text="+ Add", command=self.add_daily_task).pack(side=tk.LEFT, padx=5)
+        
         # Create Treeview for daily tasks with action columns
         self.daily_tree = ttk.Treeview(self.daily_todo_frame, columns=("Days", "Time", "Task", "Status", "Complete", "Edit", "Delete", "Original"), show="headings", height=6)
         self.daily_tree.heading("Days", text="Days")
@@ -100,12 +105,8 @@ class DailyToDoManager:
         # Bind click events for action buttons
         self.daily_tree.bind("<Button-1>", self.on_daily_tree_click)
         
-        self.daily_tree.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Add button at bottom left
-        daily_add_frame = ttk.Frame(self.daily_todo_frame)
-        daily_add_frame.pack(pady=5, padx=10, fill=tk.X)
-        ttk.Button(daily_add_frame, text="+ Add", command=self.add_daily_task).pack(side=tk.LEFT, padx=5)
+        # Pack treeview to fill remaining space
+        self.daily_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     def on_daily_tree_click(self, event):
         """Handle clicks on daily task action buttons"""
@@ -152,9 +153,6 @@ class DailyToDoManager:
             notes_dialog.title(f"Daily Task Details: {task_name}")
             notes_dialog.geometry("450x300")
             notes_dialog.resizable(True, True)
-            
-            # Register this dialog globally
-            self.parent_app.register_dialog(notes_dialog)
             
             # Task details
             details_frame = ttk.Frame(notes_dialog)
@@ -212,6 +210,9 @@ class DailyToDoManager:
             
             # Close button
             ttk.Button(button_frame, text="Close", command=notes_dialog.destroy).pack(side=tk.RIGHT, padx=5)
+            
+            # Register dialog AFTER all widgets are created
+            self.parent_app.register_dialog(notes_dialog)
             
         except Exception as e:
             messagebox.showerror("Error", f"Could not display task details: {str(e)}")
@@ -582,9 +583,6 @@ class DailyToDoManager:
         dialog.geometry("500x350")
         dialog.resizable(False, False)
 
-        # Register this dialog globally
-        self.parent_app.register_dialog(dialog)
-
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
         task_entry = ttk.Entry(dialog, width=40)
@@ -601,7 +599,7 @@ class DailyToDoManager:
         day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
         for i, (day, label) in enumerate(zip(day_names, day_labels)):
-            var = tk.BooleanVar(value=(day in current_days))
+            var = tk.BooleanVar(master=dialog, value=(day in current_days))
             day_vars[day] = var
             cb = ttk.Checkbutton(days_frame, text=label, variable=var)
             cb.grid(row=i//2, column=i%2, sticky="w", padx=5, pady=2)
@@ -611,14 +609,14 @@ class DailyToDoManager:
 
         if self.parent_app.use_24_hour.get():
             # 24-hour format
-            hour_var = tk.StringVar(value=current_hour)
+            hour_var = tk.StringVar(master=dialog, value=current_hour)
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i:02d}" for i in range(24)]
             hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
 
             ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
 
-            minute_var = tk.StringVar(value=current_minute)
+            minute_var = tk.StringVar(master=dialog, value=current_minute)
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
             minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
@@ -638,19 +636,19 @@ class DailyToDoManager:
                 display_hour = str(hour_24 - 12)
                 period = "PM"
 
-            hour_var = tk.StringVar(value=display_hour)
+            hour_var = tk.StringVar(master=dialog, value=display_hour)
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i}" for i in range(1, 13)]
             hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
 
             ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
 
-            minute_var = tk.StringVar(value=current_minute)
+            minute_var = tk.StringVar(master=dialog, value=current_minute)
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
             minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
 
-            period_var = tk.StringVar(value=period)
+            period_var = tk.StringVar(master=dialog, value=period)
             period_combo = ttk.Combobox(dialog, textvariable=period_var, width=6, state="readonly")
             period_combo['values'] = ["AM", "PM"]
             period_combo.grid(row=2, column=1, padx=(145, 0), pady=10, sticky="w")
@@ -716,6 +714,9 @@ class DailyToDoManager:
         ttk.Button(button_frame, text="Save", command=validate_and_save).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=5)
         
+        # Register dialog AFTER all widgets are created
+        self.parent_app.register_dialog(dialog)
+        
         # Focus on task entry
         task_entry.focus()
 
@@ -761,9 +762,6 @@ class DailyToDoManager:
         dialog.geometry("500x350")
         dialog.resizable(False, False)
 
-        # Important: Register dialog BEFORE any other setup
-        self.parent_app.register_dialog(dialog)
-
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
         task_entry = ttk.Entry(dialog, width=40)
@@ -780,7 +778,7 @@ class DailyToDoManager:
 
         # Default to all days selected
         for i, (day, label) in enumerate(zip(day_names, day_labels)):
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(master=dialog, value=True)
             day_vars[day] = var
             cb = ttk.Checkbutton(days_frame, text=label, variable=var)
             cb.grid(row=i//2, column=i%2, sticky="w", padx=5, pady=2)
@@ -790,32 +788,32 @@ class DailyToDoManager:
 
         if self.parent_app.use_24_hour.get():
             # 24-hour format
-            hour_var = tk.StringVar(value="00")
+            hour_var = tk.StringVar(master=dialog, value="00")
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i:02d}" for i in range(24)]
             hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
 
             ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
 
-            minute_var = tk.StringVar(value="00")
+            minute_var = tk.StringVar(master=dialog, value="00")
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
             minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
         else:
             # 12-hour format
-            hour_var = tk.StringVar(value="12")
+            hour_var = tk.StringVar(master=dialog, value="12")
             hour_combo = ttk.Combobox(dialog, textvariable=hour_var, width=6, state="readonly")
             hour_combo['values'] = [f"{i}" for i in range(1, 13)]
             hour_combo.grid(row=2, column=1, padx=(5, 2), pady=10, sticky="w")
 
             ttk.Label(dialog, text=":").grid(row=2, column=1, padx=(65, 0), pady=10, sticky="w")
 
-            minute_var = tk.StringVar(value="00")
+            minute_var = tk.StringVar(master=dialog, value="00")
             minute_combo = ttk.Combobox(dialog, textvariable=minute_var, width=6, state="readonly")
             minute_combo['values'] = [f"{i:02d}" for i in range(0, 60, 15)]
             minute_combo.grid(row=2, column=1, padx=(80, 0), pady=10, sticky="w")
 
-            period_var = tk.StringVar(value="AM")
+            period_var = tk.StringVar(master=dialog, value="AM")
             period_combo = ttk.Combobox(dialog, textvariable=period_var, width=6, state="readonly")
             period_combo['values'] = ["AM", "PM"]
             period_combo.grid(row=2, column=1, padx=(145, 0), pady=10, sticky="w")
@@ -881,6 +879,9 @@ class DailyToDoManager:
         
         ttk.Button(button_frame, text="Add", command=validate_and_add).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=5)
+        
+        # Register dialog AFTER all widgets are created
+        self.parent_app.register_dialog(dialog)
         
         # Focus on task entry
         task_entry.focus()
