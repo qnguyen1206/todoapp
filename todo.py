@@ -111,11 +111,11 @@ class TodoApp(metaclass=SingletonMeta):
         self.startup_enabled = self.check_startup_status()
         
         # Add storage preference configuration - default to False
-        self.store_tasks = tk.BooleanVar(value=False)  # Default to NOT storing tasks
+        self.store_tasks = tk.BooleanVar(master=self.root, value=False)  # Default to NOT storing tasks
         self.load_storage_preference()
         
         # Time format preference - default to 24-hour
-        self.use_24_hour = tk.BooleanVar(value=True)  # Default to 24-hour format
+        self.use_24_hour = tk.BooleanVar(master=self.root, value=True)  # Default to 24-hour format
         self.load_time_format_preference()
         
         # Add chatbot visibility state - default to hidden
@@ -179,24 +179,17 @@ class TodoApp(metaclass=SingletonMeta):
     
     def _deferred_manager_init(self):
         """Initialize managers after UI is displayed for faster startup"""
-        import threading
+        # Initialize MySQL LAN Manager on main thread (it may create Tkinter widgets)
+        if MYSQL_LAN_AVAILABLE and MySQLLANManager:
+            try:
+                self.mysql_lan_manager = MySQLLANManager(self)
+                self.mysql_available = True
+            except Exception as e:
+                print(f"Failed to initialize MySQL LAN Manager: {e}")
         
-        def init_managers_background():
-            # Initialize MySQL LAN Manager in background
-            if MYSQL_LAN_AVAILABLE and MySQLLANManager:
-                try:
-                    self.mysql_lan_manager = MySQLLANManager(self)
-                    self.mysql_available = True
-                except Exception as e:
-                    print(f"Failed to initialize MySQL LAN Manager: {e}")
-            
-            # Initialize AI Assistant in background
-            if AI_ASSISTANT_AVAILABLE and AIAssistant:
-                # Schedule AI init on main thread (requires Tkinter)
-                self.root.after(0, self._init_ai_assistant)
-        
-        # Run in background thread
-        threading.Thread(target=init_managers_background, daemon=True).start()
+        # Initialize AI Assistant on main thread (requires Tkinter)
+        if AI_ASSISTANT_AVAILABLE and AIAssistant:
+            self._init_ai_assistant()
     
     def _init_ai_assistant(self):
         """Initialize AI assistant on main thread"""
@@ -478,10 +471,10 @@ The app will continue to work normally for task management without AI features."
         except ValueError:
             return None
 
-    def add_task(self, task, date, priority, notes=""):
+    def add_task(self, task, date, due_time="", priority=5, notes=""):
         """Add a task using the todo list manager"""
         if hasattr(self, 'todo_list_manager'):
-            self.todo_list_manager.add_task(task, date, priority, notes)
+            self.todo_list_manager.add_task(task, date, due_time, priority, notes)
 
     def load_tasks(self):
         """Load tasks using the todo list manager"""
@@ -546,10 +539,18 @@ The app will continue to work normally for task management without AI features."
         if hasattr(self, 'daily_todo_manager'):
             self.daily_todo_manager.refresh_daily_task_display()
         
+        # Refresh main todo list to show new time format
+        if hasattr(self, 'todo_list_manager'):
+            self.todo_list_manager.refresh_task_list()
+        
+        # Refresh calendar view to show new time format
+        if hasattr(self, 'calendar_view') and self.calendar_view:
+            self.calendar_view.refresh()
+        
         messagebox.showinfo(
             "Time Format Changed", 
             f"Time format has been changed to {format_type}.\n"
-            "This will apply to new tasks and task editing."
+            "This will apply to all task displays."
         )
 
     def toggle_storage(self):

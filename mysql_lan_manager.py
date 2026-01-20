@@ -43,7 +43,7 @@ class MySQLLANManager:
         self.MYSQL_CONFIG_FILE = str(Path.home()) + "/TODOapp/mysql_config.json"
         
         # MySQL sharing configuration
-        self.mysql_enabled = tk.BooleanVar(value=False)
+        self.mysql_enabled = tk.BooleanVar(master=parent_app.root, value=False)
         self.mysql_config = {
             'host': 'localhost',
             'user': 'root',

@@ -37,6 +37,29 @@ class CalendarView:
         
         # Create the calendar interface
         self.create_calendar_widgets()
+    
+    def format_time(self, time_str):
+        """Format time string according to user's preference (12-hour or 24-hour)"""
+        if not time_str or not time_str.strip():
+            return ""
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            # Check user's time format preference
+            if hasattr(self.parent_app, 'use_24_hour') and not self.parent_app.use_24_hour.get():
+                # 12-hour format
+                if hour == 0:
+                    return f"12:{minute:02d} AM"
+                elif hour < 12:
+                    return f"{hour}:{minute:02d} AM"
+                elif hour == 12:
+                    return f"12:{minute:02d} PM"
+                else:
+                    return f"{hour-12}:{minute:02d} PM"
+            else:
+                # 24-hour format
+                return f"{hour:02d}:{minute:02d}"
+        except:
+            return time_str
         
     def create_calendar_widgets(self):
         """Create the calendar view interface"""
@@ -217,14 +240,17 @@ class CalendarView:
             
         # Show only the first task
         task = tasks[0]
-        task_name, due_date, priority, *_ = task
+        task_name = task[0]
+        due_date = task[1]
+        due_time = task[2] if len(task) > 2 else ""
+        priority = task[3] if len(task) > 3 else task[2]  # Handle old format
         
         # Determine color based on priority and overdue status
         # Priority 1 = most urgent (red), Priority 5 = least urgent (green)
         if cell_date < today:
             color = '#FF0000'  # Red for overdue
         else:
-            priority_num = int(priority) if priority.isdigit() else 3
+            priority_num = int(priority) if str(priority).isdigit() else 3
             if priority_num <= 2:
                 color = '#FF6B6B'  # Red - Urgent (1-2)
             elif priority_num == 3:
@@ -313,9 +339,11 @@ class CalendarView:
         
         for task in tasks:
             if task[1] == date_str:
-                task_name, due_date, priority, *rest = task
-                notes = rest[0] if rest else "No notes"
-                display = f"[P{priority}] {task_name}"
+                task_name = task[0]
+                due_time = task[2] if len(task) > 2 else ""
+                priority = task[3] if len(task) > 3 else task[2]  # Handle old format
+                time_display = f" @ {self.format_time(due_time)}" if due_time else ""
+                display = f"[P{priority}]{time_display} {task_name}"
                 self.task_listbox.insert(tk.END, display)
                 self.current_day_tasks.append(task)
         
@@ -406,11 +434,14 @@ class CalendarView:
             
             # Add each task as a clickable card
             for i, task in enumerate(day_tasks):
-                task_name, due_date, priority, *rest = task
-                notes = rest[0] if rest else "No notes"
+                task_name = task[0]
+                due_date = task[1]
+                due_time = task[2] if len(task) > 2 else ""
+                priority = task[3] if len(task) > 3 else task[2]  # Handle old format
+                notes = task[4] if len(task) > 4 else (task[3] if len(task) > 3 else "No notes")
                 
                 # Determine priority color
-                priority_num = int(priority) if priority.isdigit() else 3
+                priority_num = int(priority) if str(priority).isdigit() else 3
                 if priority_num <= 2:
                     color = '#FF6B6B'  # Urgent
                 elif priority_num == 3:
@@ -431,10 +462,11 @@ class CalendarView:
                                      bg=color, fg='black', anchor='w')
                 name_label.pack(fill=tk.X)
                 
-                # Priority
-                priority_label = tk.Label(content_frame, text=f"Priority: {priority}", 
+                # Due time and Priority on same line
+                time_display = f"Time: {self.format_time(due_time)} | " if due_time else ""
+                info_label = tk.Label(content_frame, text=f"{time_display}Priority: {priority}", 
                                          font=('Helvetica', 9), bg=color, fg='#333', anchor='w')
-                priority_label.pack(fill=tk.X)
+                info_label.pack(fill=tk.X)
                 
                 # Notes preview (truncated)
                 if notes and notes != "No notes":
@@ -478,13 +510,14 @@ class CalendarView:
             
             task_name = task[0]
             due_date = task[1]
-            priority = task[2]
-            notes = task[3] if len(task) > 3 else "No notes"
+            due_time = task[2] if len(task) > 2 else ""
+            priority = task[3] if len(task) > 3 else task[2]  # Handle old format
+            notes = task[4] if len(task) > 4 else (task[3] if len(task) > 3 else "No notes")
             
             # Create details dialog
             details_dialog = tk.Toplevel(self.parent_app.root)
             details_dialog.title(f"Task Details: {task_name}")
-            details_dialog.geometry("450x400")
+            details_dialog.geometry("450x420")
             details_dialog.resizable(True, True)
             
             # Register this dialog globally
@@ -499,6 +532,8 @@ class CalendarView:
             info_frame.pack(fill=tk.X, padx=10, pady=5)
             
             ttk.Label(info_frame, text=f"Due Date: {due_date}", font=('Helvetica', 10)).pack(anchor='w')
+            if due_time:
+                ttk.Label(info_frame, text=f"Due Time: {self.format_time(due_time)}", font=('Helvetica', 10)).pack(anchor='w')
             ttk.Label(info_frame, text=f"Priority: {priority}", font=('Helvetica', 10)).pack(anchor='w')
             
             # Notes display

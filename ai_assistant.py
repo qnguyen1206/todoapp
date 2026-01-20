@@ -269,7 +269,7 @@ class AIAssistant:
         except (IndexError, ValueError) as e:
             self.update_chat_history(f"AI: Error processing command: {str(e)}")
 
-    def add_task_programmatically(self, task, date_str, priority_str):
+    def add_task_programmatically(self, task, date_str, priority_str, time_str=""):
         """Add task programmatically via AI command"""
         date = self.parent_app.parse_date(date_str)
         if not date:
@@ -282,7 +282,7 @@ class AIAssistant:
         except ValueError:
             raise ValueError("Priority must be 1-5")
 
-        self.parent_app.add_task(task, date, priority)
+        self.parent_app.add_task(task, date, time_str, priority)
         self.update_chat_history(f"AI: Task '{task}' added successfully!")
 
     def complete_task_by_name(self, task_name):
@@ -329,7 +329,10 @@ class AIAssistant:
         tasks = self.parent_app.load_tasks()
         for i, t in enumerate(tasks):
             if t[0] == old_task_name:
-                tasks[i] = (new_task_name, new_date, new_priority)
+                # Preserve existing time and notes if present
+                existing_time = t[2] if len(t) > 2 else ""
+                existing_notes = t[4] if len(t) > 4 else (t[3] if len(t) > 3 else "No notes")
+                tasks[i] = (new_task_name, new_date, existing_time, new_priority, existing_notes)
                 self.parent_app.save_tasks(tasks)
                 self.parent_app.refresh_task_list()
                 self.update_chat_history(f"AI: Task updated successfully!")
