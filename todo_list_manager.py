@@ -351,7 +351,7 @@ class ToDoListManager:
 
         ttk.Button(dialog, text="Add", command=validate_and_add).grid(row=5, columnspan=2, pady=10)
 
-    def add_task(self, task, date, due_time, priority, notes=""):
+    def add_task(self, task, date, due_time, priority, notes="", check_duplicate=True):
         """Add a new task to the list"""
         tasks = self.load_tasks()
         # Ensure notes has a proper default value
@@ -360,10 +360,145 @@ class ToDoListManager:
         # Ensure due_time has a proper default value
         if not due_time or due_time.strip() == "":
             due_time = ""
+        
+        # Check for duplicate task names
+        if check_duplicate:
+            duplicate_index = self.find_duplicate_task(tasks, task)
+            if duplicate_index is not None:
+                # Found a duplicate - ask user what to do
+                result = self.show_duplicate_dialog(task, tasks[duplicate_index])
+                if result == "overwrite":
+                    # Remove the old task and add the new one
+                    tasks.pop(duplicate_index)
+                elif result == "skip":
+                    # Don't add the task
+                    return False
+                # If result == "create_new", just continue to add the task
+        
         tasks.append((task, date, due_time, priority, notes))
         tasks = sorted(tasks, key=lambda x: self._task_sort_key(x))
         self.save_tasks(tasks)
         self.refresh_task_list()
+        return True
+    
+    def find_duplicate_task(self, tasks, task_name):
+        """Find if a task with the same name already exists. Returns index or None."""
+        task_name_lower = task_name.lower().strip()
+        for i, existing_task in enumerate(tasks):
+            if existing_task[0].lower().strip() == task_name_lower:
+                return i
+        return None
+    
+    def show_duplicate_dialog(self, new_task_name, existing_task):
+        """Show dialog when a duplicate task is found. Returns 'overwrite', 'create_new', or 'skip'."""
+        existing_name, existing_date, existing_time, existing_priority, existing_notes = existing_task
+        
+        # Format existing task info for display
+        time_display = f" at {existing_time}" if existing_time else ""
+        existing_info = f"'{existing_name}'\nDue: {existing_date}{time_display}\nPriority: {existing_priority}"
+        
+        message = f"A task with the same name already exists:\n\n{existing_info}\n\nWhat would you like to do?"
+        
+        # Create a custom dialog with 3 options
+        dialog = tk.Toplevel(self.parent_app.root)
+        dialog.title("Duplicate Task Found")
+        dialog.geometry("400x200")
+        dialog.resizable(False, False)
+        dialog.transient(self.parent_app.root)
+        dialog.grab_set()
+        
+        result = {"value": "skip"}  # Default to skip
+        
+        # Message
+        ttk.Label(dialog, text=message, wraplength=380, justify=tk.LEFT).pack(padx=20, pady=15)
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def set_overwrite():
+            result["value"] = "overwrite"
+            dialog.destroy()
+        
+        def set_create_new():
+            result["value"] = "create_new"
+            dialog.destroy()
+        
+        def set_skip():
+            result["value"] = "skip"
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Overwrite Existing", command=set_overwrite).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Create New Anyway", command=set_create_new).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Skip", command=set_skip).pack(side=tk.LEFT, padx=5)
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Wait for dialog to close
+        self.parent_app.root.wait_window(dialog)
+        
+        return result["value"]
+    
+    def show_bulk_duplicate_dialog(self, duplicates):
+        """Show dialog when multiple duplicates are found during bulk add.
+        Returns: 'overwrite_all', 'skip_all', 'create_all', 'ask', or 'cancel'"""
+        
+        dup_count = len(duplicates)
+        dup_names = [d[0]['task'] for d in duplicates[:5]]  # Show first 5
+        names_display = '\n'.join(f"• {name}" for name in dup_names)
+        if dup_count > 5:
+            names_display += f"\n... and {dup_count - 5} more"
+        
+        message = f"Found {dup_count} duplicate task(s):\n\n{names_display}\n\nHow would you like to handle these duplicates?"
+        
+        # Create a custom dialog
+        dialog = tk.Toplevel(self.parent_app.root)
+        dialog.title("Duplicate Tasks Found")
+        dialog.geometry("450x280")
+        dialog.resizable(False, False)
+        dialog.transient(self.parent_app.root)
+        dialog.grab_set()
+        
+        result = {"value": "cancel"}  # Default to cancel
+        
+        # Message
+        ttk.Label(dialog, text=message, wraplength=420, justify=tk.LEFT).pack(padx=20, pady=15)
+        
+        # Buttons frame
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10, fill=tk.X, padx=20)
+        
+        def set_result(val):
+            result["value"] = val
+            dialog.destroy()
+        
+        # Row 1: Main actions
+        row1 = ttk.Frame(button_frame)
+        row1.pack(fill=tk.X, pady=3)
+        ttk.Button(row1, text="Overwrite All", command=lambda: set_result("overwrite_all"), width=15).pack(side=tk.LEFT, padx=3)
+        ttk.Button(row1, text="Skip All Duplicates", command=lambda: set_result("skip_all"), width=15).pack(side=tk.LEFT, padx=3)
+        ttk.Button(row1, text="Create All Anyway", command=lambda: set_result("create_all"), width=15).pack(side=tk.LEFT, padx=3)
+        
+        # Row 2: Other options
+        row2 = ttk.Frame(button_frame)
+        row2.pack(fill=tk.X, pady=3)
+        ttk.Button(row2, text="Ask For Each", command=lambda: set_result("ask"), width=15).pack(side=tk.LEFT, padx=3)
+        ttk.Button(row2, text="Cancel", command=lambda: set_result("cancel"), width=15).pack(side=tk.RIGHT, padx=3)
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Wait for dialog to close
+        self.parent_app.root.wait_window(dialog)
+        
+        return result["value"]
     
     def _task_sort_key(self, task):
         """Generate sort key for a task (date, time, inverse priority)"""
@@ -405,7 +540,7 @@ class ToDoListManager:
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
         
         def add_all_tasks():
-            """Parse and add all tasks"""
+            """Parse and add all tasks with duplicate detection"""
             try:
                 content = tasks_text.get("1.0", tk.END).strip()
                 if not content:
@@ -413,24 +548,95 @@ class ToDoListManager:
                     return
                 
                 lines = [line.strip() for line in content.split('\n') if line.strip()]
-                added_count = 0
-                errors = []
+                
+                # First pass: parse all tasks and check for duplicates
+                parsed_tasks = []
+                parse_errors = []
+                existing_tasks = self.load_tasks()
+                duplicates = []
                 
                 for line in lines:
                     try:
                         task_info = self.parse_bulk_task_line(line)
-                        self.add_task(task_info['task'], task_info['date'], task_info.get('due_time', ''), task_info['priority'], task_info['notes'])
-                        added_count += 1
+                        dup_index = self.find_duplicate_task(existing_tasks, task_info['task'])
+                        if dup_index is not None:
+                            duplicates.append((task_info, existing_tasks[dup_index]))
+                        parsed_tasks.append(task_info)
                     except Exception as e:
-                        errors.append(f"'{line}': {str(e)}")
+                        parse_errors.append(f"'{line}': {str(e)}")
                 
-                if errors:
-                    error_msg = f"Added {added_count} tasks successfully.\n\nErrors:\n" + '\n'.join(errors[:5])
-                    if len(errors) > 5:
-                        error_msg += f"\n... and {len(errors) - 5} more errors"
+                # If there are duplicates, ask user how to handle them
+                duplicate_action = "ask"  # Default: ask for each
+                if duplicates:
+                    duplicate_action = self.show_bulk_duplicate_dialog(duplicates)
+                    if duplicate_action == "cancel":
+                        return  # User cancelled the whole operation
+                
+                # Second pass: add tasks based on duplicate handling preference
+                added_count = 0
+                skipped_count = 0
+                overwritten_count = 0
+                
+                for task_info in parsed_tasks:
+                    try:
+                        # Check for duplicate
+                        dup_index = self.find_duplicate_task(self.load_tasks(), task_info['task'])
+                        
+                        if dup_index is not None:
+                            if duplicate_action == "skip_all":
+                                skipped_count += 1
+                                continue
+                            elif duplicate_action == "overwrite_all":
+                                # Remove old task first, then add new (skip duplicate check)
+                                tasks = self.load_tasks()
+                                tasks.pop(dup_index)
+                                self.save_tasks(tasks)
+                                self.add_task(task_info['task'], task_info['date'], 
+                                            task_info.get('due_time', ''), task_info['priority'], 
+                                            task_info['notes'], check_duplicate=False)
+                                overwritten_count += 1
+                                added_count += 1
+                            elif duplicate_action == "create_all":
+                                # Add without checking duplicates
+                                self.add_task(task_info['task'], task_info['date'], 
+                                            task_info.get('due_time', ''), task_info['priority'], 
+                                            task_info['notes'], check_duplicate=False)
+                                added_count += 1
+                            else:  # "ask" - ask for each individual duplicate
+                                result = self.add_task(task_info['task'], task_info['date'], 
+                                                      task_info.get('due_time', ''), task_info['priority'], 
+                                                      task_info['notes'], check_duplicate=True)
+                                if result:
+                                    added_count += 1
+                                else:
+                                    skipped_count += 1
+                        else:
+                            # No duplicate, just add
+                            self.add_task(task_info['task'], task_info['date'], 
+                                        task_info.get('due_time', ''), task_info['priority'], 
+                                        task_info['notes'], check_duplicate=False)
+                            added_count += 1
+                    except Exception as e:
+                        parse_errors.append(f"'{task_info['task']}': {str(e)}")
+                
+                # Show summary
+                summary_parts = []
+                if added_count > 0:
+                    summary_parts.append(f"Added: {added_count}")
+                if overwritten_count > 0:
+                    summary_parts.append(f"Overwritten: {overwritten_count}")
+                if skipped_count > 0:
+                    summary_parts.append(f"Skipped (duplicates): {skipped_count}")
+                
+                summary = ", ".join(summary_parts) if summary_parts else "No tasks added"
+                
+                if parse_errors:
+                    error_msg = f"{summary}\n\nErrors:\n" + '\n'.join(parse_errors[:5])
+                    if len(parse_errors) > 5:
+                        error_msg += f"\n... and {len(parse_errors) - 5} more errors"
                     messagebox.showwarning("Partial Success", error_msg)
                 else:
-                    messagebox.showinfo("Success", f"Successfully added {added_count} tasks!")
+                    messagebox.showinfo("Success", summary)
                 
                 if added_count > 0:
                     dialog.destroy()
@@ -464,7 +670,8 @@ Supported date formats: today, tomorrow, next monday, 09/15/2025, in 3 days
 Time formats: 2:30 PM, 14:30, 10 AM (now saved as Due Time!)
 Due phrases: "due at", "due on", "due by" are automatically removed from task names
 Priority: 1=urgent/highest, 2=high, 3=medium, 4=low, 5=lowest (default)
-Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/minor (=4)"""
+Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/minor (=4)
+Note: Duplicate task names will be detected and you'll be asked how to handle them."""
         
         help_label = ttk.Label(main_frame, text=help_text, font=('Helvetica', 8), foreground="gray")
         help_label.pack(anchor='w', pady=(0, 10))

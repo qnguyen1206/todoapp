@@ -47,6 +47,11 @@ class AIAssistant:
         self.current_ai_model = ""  # Default model
         self.available_models = []
         
+        # External AI provider configuration
+        self.current_provider = "ollama"  # Default to local Ollama
+        self.provider_config = {}
+        self.load_provider_config()
+        
         # Upload folder setup
         self.upload_folder = str(Path.home()) + "/TODOapp/uploads/"
         Path(self.upload_folder).mkdir(parents=True, exist_ok=True)
@@ -105,6 +110,51 @@ class AIAssistant:
         except requests.exceptions.RequestException:
             self.ollama_available = False
     
+    def load_provider_config(self):
+        """Load AI provider configuration from file"""
+        config_file = str(Path.home()) + "/TODOapp/ai_config.json"
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    self.current_provider = config.get('provider', 'ollama')
+                    self.provider_config = config.get(self.current_provider, {})
+        except:
+            self.current_provider = 'ollama'
+            self.provider_config = {}
+    
+    def set_provider(self, provider, config):
+        """Set the current AI provider and its configuration"""
+        self.current_provider = provider
+        self.provider_config = config
+        # Update the greeting/status
+        self.display_provider_status()
+    
+    def display_provider_status(self):
+        """Display current provider status in chat"""
+        provider_names = {
+            'ollama': 'Local (Ollama)',
+            'openai': 'OpenAI (ChatGPT)',
+            'anthropic': 'Anthropic (Claude)',
+            'google': 'Google (Gemini)'
+        }
+        provider_name = provider_names.get(self.current_provider, self.current_provider)
+        
+        if self.current_provider == 'ollama':
+            if self.ollama_available and self.current_ai_model in self.installed_models:
+                status = f"✓ Provider: {provider_name}\n✓ Model: {self.current_ai_model}\n"
+            else:
+                status = f"⚠️ Provider: {provider_name}\n⚠️ Ollama not running or model not found\n"
+        else:
+            model = self.provider_config.get('model', 'default')
+            has_key = bool(self.provider_config.get('api_key', ''))
+            if has_key:
+                status = f"✓ Provider: {provider_name}\n✓ Model: {model}\n"
+            else:
+                status = f"⚠️ Provider: {provider_name}\n⚠️ API key not configured\n"
+        
+        self.update_chat_history(f"\n--- AI Provider Changed ---\n{status}")
+    
     def _check_ollama_and_greet(self):
         """Background check for Ollama status then display greeting"""
         self.check_ollama_status()
@@ -115,22 +165,47 @@ class AIAssistant:
         """Display greeting with status information"""
         greeting = "AI: Hello! I'm your personal task assistant.\n\n"
         
-        if not self.ollama_available:
-            greeting += "⚠️ Status: Ollama is not running\n"
-            greeting += "Please start Ollama to use AI features.\n"
-            greeting += "Download from: https://ollama.ai\n"
-        elif not self.installed_models:
-            greeting += "⚠️ Status: No models installed\n"
-            greeting += "Please install a model using:\n"
-            greeting += "  ollama pull deepseek-r1:14b\n"
-        elif self.current_ai_model not in self.installed_models:
-            greeting += f"⚠️ Status: Model '{self.current_ai_model}' not found\n"
-            greeting += f"Installed models: {', '.join(self.installed_models)}\n"
-            greeting += f"Please install it using:\n"
-            greeting += f"  ollama pull {self.current_ai_model}\n"
+        provider_names = {
+            'ollama': 'Local (Ollama)',
+            'openai': 'OpenAI (ChatGPT)',
+            'anthropic': 'Anthropic (Claude)',
+            'google': 'Google (Gemini)'
+        }
+        
+        if self.current_provider != 'ollama':
+            # Using external API
+            provider_name = provider_names.get(self.current_provider, self.current_provider)
+            model = self.provider_config.get('model', 'default')
+            has_key = bool(self.provider_config.get('api_key', ''))
+            
+            if has_key:
+                greeting += f"✓ Provider: {provider_name}\n"
+                greeting += f"✓ Model: {model}\n"
+                greeting += "How can I help you today?\n"
+            else:
+                greeting += f"⚠️ Provider: {provider_name}\n"
+                greeting += "⚠️ API key not configured\n"
+                greeting += "Please configure your API key in AI Assistant → Configure AI Provider\n"
         else:
-            greeting += f"✓ Status: Ready (using {self.current_ai_model})\n"
-            greeting += "How can I help you today?\n"
+            # Using local Ollama
+            if not self.ollama_available:
+                greeting += "⚠️ Status: Ollama is not running\n"
+                greeting += "Please start Ollama to use AI features.\n"
+                greeting += "Download from: https://ollama.ai\n"
+                greeting += "\nTip: You can also use external AI services!\n"
+                greeting += "Go to AI Assistant → Configure AI Provider\n"
+            elif not self.installed_models:
+                greeting += "⚠️ Status: No models installed\n"
+                greeting += "Please install a model using:\n"
+                greeting += "  ollama pull deepseek-r1:14b\n"
+            elif self.current_ai_model not in self.installed_models:
+                greeting += f"⚠️ Status: Model '{self.current_ai_model}' not found\n"
+                greeting += f"Installed models: {', '.join(self.installed_models)}\n"
+                greeting += f"Please install it using:\n"
+                greeting += f"  ollama pull {self.current_ai_model}\n"
+            else:
+                greeting += f"✓ Status: Ready (using {self.current_ai_model})\n"
+                greeting += "How can I help you today?\n"
         
         self.update_chat_history(greeting)
 
@@ -147,16 +222,26 @@ class AIAssistant:
         if not user_text:
             return
         
-        # Check if Ollama is available before sending
-        if not self.ollama_available:
-            self.update_chat_history(f"User: {user_text}")
-            self.update_chat_history("AI: Error - Ollama is not running. Please start Ollama first.")
-            return
-        
-        if self.current_ai_model not in self.installed_models:
-            self.update_chat_history(f"User: {user_text}")
-            self.update_chat_history(f"AI: Error - Model '{self.current_ai_model}' is not installed.\nRun: ollama pull {self.current_ai_model}")
-            return
+        # Check provider availability
+        if self.current_provider == 'ollama':
+            if not self.ollama_available:
+                self.update_chat_history(f"User: {user_text}")
+                self.update_chat_history("AI: Error - Ollama is not running. Please start Ollama first.\n"
+                                        "Tip: You can use external AI services via AI Assistant → Configure AI Provider")
+                return
+            
+            if self.current_ai_model not in self.installed_models:
+                self.update_chat_history(f"User: {user_text}")
+                self.update_chat_history(f"AI: Error - Model '{self.current_ai_model}' is not installed.\nRun: ollama pull {self.current_ai_model}")
+                return
+        else:
+            # Check API key for external providers
+            api_key = self.provider_config.get('api_key', '')
+            if not api_key:
+                self.update_chat_history(f"User: {user_text}")
+                self.update_chat_history(f"AI: Error - No API key configured for {self.current_provider}.\n"
+                                        "Please configure it in AI Assistant → Configure AI Provider")
+                return
         
         self.update_chat_history(f"User: {user_text}")
         self.user_input.delete(0, tk.END)
@@ -173,30 +258,45 @@ class AIAssistant:
         self.ai_frame.config(cursor="watch")
         self.send_button.config(state='disabled')
         
-        # Start processing in a separate thread
-        threading.Thread(target=self.get_ai_response, args=(user_text, thinking_index)).start()
+        # Start processing in a separate thread based on provider
+        if self.current_provider == 'ollama':
+            threading.Thread(target=self.get_ai_response_ollama, args=(user_text, thinking_index)).start()
+        elif self.current_provider == 'openai':
+            threading.Thread(target=self.get_ai_response_openai, args=(user_text, thinking_index)).start()
+        elif self.current_provider == 'anthropic':
+            threading.Thread(target=self.get_ai_response_anthropic, args=(user_text, thinking_index)).start()
+        elif self.current_provider == 'google':
+            threading.Thread(target=self.get_ai_response_google, args=(user_text, thinking_index)).start()
+        else:
+            threading.Thread(target=self.get_ai_response_ollama, args=(user_text, thinking_index)).start()
 
-    def get_ai_response(self, prompt, thinking_index):
-        """Get response from AI model"""
+    def _build_system_prompt(self):
+        """Build the system prompt for AI assistants"""
+        uploaded_files = [f for f in os.listdir(self.upload_folder)]
+        files_context = "\nUploaded files: " + ", ".join(uploaded_files) if uploaded_files else ""
+        
+        return f"""You are a TODO assistant. 
+
+Available commands (use these to manage tasks):
+<command>add;[task];[date];[priority]</command>
+<command>finish;[task]</command>
+<command>delete;[task]</command>
+<command>edit;[old task];[new task];[new date];[new priority]</command>
+
+Current date: {datetime.now().strftime("%m-%d-%Y")}{files_context}
+
+Help users manage their tasks. Be concise and helpful."""
+
+    def get_ai_response_ollama(self, prompt, thinking_index):
+        """Get response from local Ollama model"""
         try:
-            # If there are uploaded files, include their paths in the context
-            uploaded_files = [f for f in os.listdir(self.upload_folder)]
-            files_context = "\nUploaded files: " + ", ".join(uploaded_files) if uploaded_files else ""
+            system_prompt = self._build_system_prompt()
             
             response = requests.post(
                 'http://localhost:11434/api/generate',
                 json={
                     'model': self.current_ai_model,
-                    'prompt': f"""You are a TODO assistant. 
-
-                        Available commands:
-                        <command>add;[task];[date];[priority]</command>
-                        <command>finish;[task]</command>
-                        <command>delete;[task]</command>
-                        <command>edit;[old task];[new task];[new date];[new priority]</command>
-
-                        Current time: {datetime.now().strftime("%m-%d-%Y")}{files_context}
-                        User: {prompt}""",
+                    'prompt': f"{system_prompt}\n\nUser: {prompt}",
                     'stream': True
                 },
                 stream=True
@@ -210,25 +310,143 @@ class AIAssistant:
                     if 'response' in chunk:
                         accumulated_response += chunk['response']
 
-            # Replace "Thinking..." with the response
-            def replace_thinking():
-                self.chat_history.config(state='normal')
-                self.chat_history.delete(f"{thinking_index}", f"{thinking_index} lineend + 1c")
-                self.chat_history.insert(tk.END, f"AI: {accumulated_response}\n")
-                self.chat_history.config(state='disabled')
-                self.chat_history.see(tk.END)
-
-            self.parent_app.root.after(0, replace_thinking)
-            self.parent_app.root.after(0, self.handle_ai_commands, accumulated_response)
+            self._finish_ai_response(accumulated_response, thinking_index)
 
         except requests.exceptions.ConnectionError:
             self.parent_app.root.after(0, self.update_chat_history, "AI: Could not connect to Ollama. Make sure it's running!")
         except Exception as e:
             self.parent_app.root.after(0, self.update_chat_history, f"AI: Error - {str(e)}")
         finally:
-            self.parent_app.root.after(0, lambda: self.user_input.config(state='normal'))
-            self.parent_app.root.after(0, lambda: self.ai_frame.config(cursor=""))
-            self.parent_app.root.after(0, lambda: self.send_button.config(state='normal'))
+            self._reset_input_state()
+
+    def get_ai_response_openai(self, prompt, thinking_index):
+        """Get response from OpenAI API"""
+        try:
+            api_key = self.provider_config.get('api_key', '')
+            model = self.provider_config.get('model', 'gpt-4o-mini')
+            system_prompt = self._build_system_prompt()
+            
+            response = requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': model,
+                    'messages': [
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': prompt}
+                    ],
+                    'max_tokens': 2000
+                },
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                accumulated_response = data['choices'][0]['message']['content']
+                self._finish_ai_response(accumulated_response, thinking_index)
+            else:
+                error_msg = response.json().get('error', {}).get('message', f'HTTP {response.status_code}')
+                self.parent_app.root.after(0, self.update_chat_history, f"AI: OpenAI Error - {error_msg}")
+                
+        except Exception as e:
+            self.parent_app.root.after(0, self.update_chat_history, f"AI: Error - {str(e)}")
+        finally:
+            self._reset_input_state()
+
+    def get_ai_response_anthropic(self, prompt, thinking_index):
+        """Get response from Anthropic (Claude) API"""
+        try:
+            api_key = self.provider_config.get('api_key', '')
+            model = self.provider_config.get('model', 'claude-3-5-sonnet-20241022')
+            system_prompt = self._build_system_prompt()
+            
+            response = requests.post(
+                'https://api.anthropic.com/v1/messages',
+                headers={
+                    'x-api-key': api_key,
+                    'anthropic-version': '2023-06-01',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': model,
+                    'max_tokens': 2000,
+                    'system': system_prompt,
+                    'messages': [
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                accumulated_response = data['content'][0]['text']
+                self._finish_ai_response(accumulated_response, thinking_index)
+            else:
+                error_data = response.json()
+                error_msg = error_data.get('error', {}).get('message', f'HTTP {response.status_code}')
+                self.parent_app.root.after(0, self.update_chat_history, f"AI: Anthropic Error - {error_msg}")
+                
+        except Exception as e:
+            self.parent_app.root.after(0, self.update_chat_history, f"AI: Error - {str(e)}")
+        finally:
+            self._reset_input_state()
+
+    def get_ai_response_google(self, prompt, thinking_index):
+        """Get response from Google Gemini API"""
+        try:
+            api_key = self.provider_config.get('api_key', '')
+            model = self.provider_config.get('model', 'gemini-1.5-flash')
+            system_prompt = self._build_system_prompt()
+            
+            response = requests.post(
+                f'https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}',
+                headers={'Content-Type': 'application/json'},
+                json={
+                    'contents': [
+                        {'role': 'user', 'parts': [{'text': f"{system_prompt}\n\nUser: {prompt}"}]}
+                    ],
+                    'generationConfig': {
+                        'maxOutputTokens': 2000
+                    }
+                },
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                accumulated_response = data['candidates'][0]['content']['parts'][0]['text']
+                self._finish_ai_response(accumulated_response, thinking_index)
+            else:
+                error_data = response.json()
+                error_msg = error_data.get('error', {}).get('message', f'HTTP {response.status_code}')
+                self.parent_app.root.after(0, self.update_chat_history, f"AI: Google AI Error - {error_msg}")
+                
+        except Exception as e:
+            self.parent_app.root.after(0, self.update_chat_history, f"AI: Error - {str(e)}")
+        finally:
+            self._reset_input_state()
+
+    def _finish_ai_response(self, accumulated_response, thinking_index):
+        """Common handler to finish AI response processing"""
+        def replace_thinking():
+            self.chat_history.config(state='normal')
+            self.chat_history.delete(f"{thinking_index}", f"{thinking_index} lineend + 1c")
+            self.chat_history.insert(tk.END, f"AI: {accumulated_response}\n")
+            self.chat_history.config(state='disabled')
+            self.chat_history.see(tk.END)
+
+        self.parent_app.root.after(0, replace_thinking)
+        self.parent_app.root.after(0, self.handle_ai_commands, accumulated_response)
+
+    def _reset_input_state(self):
+        """Reset input controls after AI response"""
+        self.parent_app.root.after(0, lambda: self.user_input.config(state='normal'))
+        self.parent_app.root.after(0, lambda: self.ai_frame.config(cursor=""))
+        self.parent_app.root.after(0, lambda: self.send_button.config(state='normal'))
 
     def handle_ai_commands(self, full_response):
         """Extract and process AI commands from response"""
