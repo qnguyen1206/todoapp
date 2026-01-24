@@ -30,7 +30,9 @@ class WeeklyScheduleView:
             "pending": "#FFE4B5",      # Light orange for pending
             "completed": "#90EE90",    # Light green for completed
             "overdue": "#FFB6C1",      # Light pink for overdue
-            "current": "#87CEEB"       # Light blue for current time slot
+            "current": "#87CEEB",      # Light blue for current time slot
+            "in_progress": "#87CEEB",  # Light blue for in-progress tasks
+            "not_today": "#D3D3D3"     # Light gray for not today
         }
         
         # Store cell references for task placement
@@ -218,26 +220,66 @@ class WeeklyScheduleView:
         days_str = task['days']
         task_days = [d.strip() for d in days_str.split(',')]
         
-        # Parse time to get hour
+        # Parse time to get start hour (and optionally end hour for spanning)
         time_str = task['time']
+        start_hour = None
+        end_hour = None
+        
         try:
-            # Handle both 12-hour and 24-hour formats
-            if 'AM' in time_str or 'PM' in time_str:
-                # 12-hour format
-                time_str_clean = time_str.replace('AM', '').replace('PM', '').strip()
-                hour = int(time_str_clean.split(':')[0])
-                if 'PM' in time_str and hour != 12:
-                    hour += 12
-                elif 'AM' in time_str and hour == 12:
-                    hour = 0
+            # Check if it's a time range (e.g., "9:00 AM - 10:00 AM" or "09:00 - 10:00")
+            if ' - ' in time_str:
+                # Time range format
+                parts = time_str.split(' - ')
+                start_time_part = parts[0].strip()
+                end_time_part = parts[1].strip() if len(parts) > 1 else None
+                
+                # Parse start time
+                if 'AM' in start_time_part or 'PM' in start_time_part:
+                    # 12-hour format
+                    start_time_clean = start_time_part.replace('AM', '').replace('PM', '').strip()
+                    start_hour = int(start_time_clean.split(':')[0])
+                    if 'PM' in start_time_part and start_hour != 12:
+                        start_hour += 12
+                    elif 'AM' in start_time_part and start_hour == 12:
+                        start_hour = 0
+                else:
+                    # 24-hour format
+                    start_hour = int(start_time_part.split(':')[0])
+                
+                # Parse end time if exists
+                if end_time_part:
+                    if 'AM' in end_time_part or 'PM' in end_time_part:
+                        # 12-hour format
+                        end_time_clean = end_time_part.replace('AM', '').replace('PM', '').strip()
+                        end_hour = int(end_time_clean.split(':')[0])
+                        if 'PM' in end_time_part and end_hour != 12:
+                            end_hour += 12
+                        elif 'AM' in end_time_part and end_hour == 12:
+                            end_hour = 0
+                    else:
+                        # 24-hour format
+                        end_hour = int(end_time_part.split(':')[0])
             else:
-                # 24-hour format
-                hour = int(time_str.split(':')[0])
+                # Single time format
+                if 'AM' in time_str or 'PM' in time_str:
+                    # 12-hour format
+                    time_str_clean = time_str.replace('AM', '').replace('PM', '').strip()
+                    start_hour = int(time_str_clean.split(':')[0])
+                    if 'PM' in time_str and start_hour != 12:
+                        start_hour += 12
+                    elif 'AM' in time_str and start_hour == 12:
+                        start_hour = 0
+                else:
+                    # 24-hour format
+                    start_hour = int(time_str.split(':')[0])
         except (ValueError, IndexError):
-            hour = 9  # Default to 9 AM if parsing fails
+            start_hour = 9  # Default to 9 AM if parsing fails
             
-        # Check if hour is within visible range
-        if hour < self.start_hour or hour > self.end_hour:
+        if start_hour is None:
+            start_hour = 9
+            
+        # Check if start hour is within visible range
+        if start_hour < self.start_hour or start_hour > self.end_hour:
             return
             
         # Determine task color based on status
@@ -246,19 +288,23 @@ class WeeklyScheduleView:
             bg_color = self.task_colors["completed"]
         elif 'overdue' in status:
             bg_color = self.task_colors["overdue"]
+        elif 'progress' in status:
+            bg_color = self.task_colors["current"]  # Use blue for in-progress
         else:
             bg_color = self.task_colors["pending"]
             
         # Place task in each applicable day column
         for day in task_days:
             day = day.strip()
-            if day in self.days and (day, hour) in self.time_cells:
-                cell = self.time_cells[(day, hour)]
+            if day in self.days and (day, start_hour) in self.time_cells:
+                cell = self.time_cells[(day, start_hour)]
                 
-                # Create task label
+                # Create task label with time range indicator if applicable
+                display_name = self._truncate_text(task['name'], 12)
+                
                 task_label = tk.Label(
                     cell,
-                    text=self._truncate_text(task['name'], 12),
+                    text=display_name,
                     font=('Helvetica', 7),
                     bg=bg_color,
                     relief="raised",
