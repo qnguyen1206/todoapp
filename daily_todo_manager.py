@@ -428,6 +428,11 @@ class DailyToDoManager:
             # Parse task time
             task_hour, task_minute = map(int, time_str.split(':'))
             task_time_minutes = task_hour * 60 + task_minute
+            
+            # Treat midnight (00:00) as end of day (23:59) for overdue comparison
+            # Midnight tasks are never overdue during the same day
+            if task_hour == 0 and task_minute == 0:
+                task_time_minutes = 23 * 60 + 59  # 23:59
 
             if current_time_minutes > task_time_minutes:
                 status = "Overdue"
@@ -488,6 +493,11 @@ class DailyToDoManager:
 
                 task_hour, task_minute = map(int, time_str.split(':'))
                 task_time_minutes = task_hour * 60 + task_minute
+                
+                # Treat midnight (00:00) as end of day (23:59) for overdue comparison
+                # Midnight tasks are never overdue during the same day
+                if task_hour == 0 and task_minute == 0:
+                    task_time_minutes = 23 * 60 + 59  # 23:59
 
                 # Get current values
                 current_values = list(values)

@@ -42,6 +42,15 @@ except ImportError as e:
     CALENDAR_VIEW_AVAILABLE = False
     CalendarView = None
 
+# Import weekly schedule view
+try:
+    from weekly_schedule_view import WeeklyScheduleView
+    WEEKLY_SCHEDULE_AVAILABLE = True
+except ImportError as e:
+    print(f"Weekly Schedule View not available: {e}")
+    WEEKLY_SCHEDULE_AVAILABLE = False
+    WeeklyScheduleView = None
+
 # Import updater system
 try:
     from modular_updater import ModularUpdater
@@ -331,34 +340,68 @@ The app will continue to work normally for task management without AI features."
         self.time_label.pack(side=tk.RIGHT, padx=10)
         self.update_time()  # start the clock
 
-        # Create a PanedWindow for resizable Daily/Todo split (40/60)
-        self.task_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
-        self.task_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
+        # Task view toggle frame - above the task panels
+        toggle_frame = ttk.Frame(parent)
+        toggle_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+        
+        # Task view toggle button - switch between Daily Tasks and Todo Tasks
+        self.current_task_view = tk.StringVar(value="todo")  # Start with todo view
+        self.task_view_toggle_btn = ttk.Button(
+            toggle_frame,
+            text="📅 Switch to Daily Tasks",
+            command=self.toggle_task_view
+        )
+        self.task_view_toggle_btn.pack(side=tk.LEFT)
 
-        # Daily To Do List Panel (40% height)
-        self.daily_todo_frame = tk.LabelFrame(self.task_pane, text="Daily To Do List",
-                                              font=("Helvetica", 10, "bold"), bg="#f0f0f0")
+        # Create container frame for switchable task views (full height)
+        self.task_container = ttk.Frame(parent)
+        self.task_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 5))
 
+        # ============ DAILY TO DO PANEL (initially hidden) ============
+        self.daily_panel_frame = tk.LabelFrame(self.task_container, text="Daily To Do List",
+                                               font=("Helvetica", 10, "bold"), bg="#f0f0f0")
+        
+        # Create notebook for daily task views (List View / Schedule View)
+        self.daily_notebook = ttk.Notebook(self.daily_panel_frame)
+        self.daily_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Tab 1: Task List View (existing daily todo list)
+        self.daily_todo_frame = tk.Frame(self.daily_notebook, bg="#f0f0f0")
+        self.daily_notebook.add(self.daily_todo_frame, text="📋 Task List")
+        
         # Initialize Daily Todo Manager
         self.daily_todo_manager = DailyToDoManager(self, self.daily_todo_frame)
         
-        # Add daily frame to pane (weight=2 for 40%)
-        self.task_pane.add(self.daily_todo_frame, weight=2)
+        # Tab 2: Weekly Schedule View
+        self.daily_schedule_frame = tk.Frame(self.daily_notebook, bg="#f0f0f0")
+        self.daily_notebook.add(self.daily_schedule_frame, text="📅 Schedule View")
+        
+        # Initialize Weekly Schedule View
+        if WEEKLY_SCHEDULE_AVAILABLE and WeeklyScheduleView:
+            self.weekly_schedule_view = WeeklyScheduleView(self, self.daily_schedule_frame, self.daily_todo_manager)
+        else:
+            self.weekly_schedule_view = None
+            ttk.Label(self.daily_schedule_frame, text="Schedule View not available",
+                     font=('Helvetica', 12)).pack(pady=50)
+        
+        # Bind tab change event to refresh schedule view when switching to it
+        self.daily_notebook.bind('<<NotebookTabChanged>>', self.on_daily_tab_changed)
 
-        # Create notebook for view switching (List View / Calendar View) - 60% height
-        self.view_notebook = ttk.Notebook(self.task_pane)
+        # ============ MAIN TO DO PANEL (initially visible) ============
+        # Create a LabelFrame container for the Todo List (matching Daily Todo List style)
+        self.todo_panel_frame = tk.LabelFrame(self.task_container, text="To Do List",
+                                              font=("Helvetica", 10, "bold"), bg="#f0f0f0")
+        
+        # Create notebook for view switching (List View / Calendar View) inside the panel
+        self.view_notebook = ttk.Notebook(self.todo_panel_frame)
+        self.view_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Tab 1: List View (existing todo list)
         self.todo_frame = tk.Frame(self.view_notebook, bg="#f0f0f0")
         self.view_notebook.add(self.todo_frame, text="📋 List View")
-        
-        # Add a label frame inside for consistent styling
-        list_label_frame = tk.LabelFrame(self.todo_frame, text="To Do List",
-                                         font=("Helvetica", 10, "bold"), bg="#f0f0f0")
-        list_label_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Initialize Todo List Manager with the label frame
-        self.todo_list_manager = ToDoListManager(self, list_label_frame)
+        # Initialize Todo List Manager directly with the frame
+        self.todo_list_manager = ToDoListManager(self, self.todo_frame)
         
         # Tab 2: Calendar View
         self.calendar_tab_frame = tk.Frame(self.view_notebook, bg="#f0f0f0")
@@ -366,10 +409,7 @@ The app will continue to work normally for task management without AI features."
         
         # Initialize Calendar View
         if CALENDAR_VIEW_AVAILABLE and CalendarView:
-            calendar_label_frame = tk.LabelFrame(self.calendar_tab_frame, text="Calendar View",
-                                                 font=("Helvetica", 10, "bold"), bg="#f0f0f0")
-            calendar_label_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            self.calendar_view = CalendarView(self, calendar_label_frame)
+            self.calendar_view = CalendarView(self, self.calendar_tab_frame)
         else:
             self.calendar_view = None
             ttk.Label(self.calendar_tab_frame, text="Calendar View not available", 
@@ -378,8 +418,9 @@ The app will continue to work normally for task management without AI features."
         # Bind tab change event to refresh calendar when switching to it
         self.view_notebook.bind('<<NotebookTabChanged>>', self.on_view_tab_changed)
         
-        # Add view notebook to pane (weight=3 for 60%)
-        self.task_pane.add(self.view_notebook, weight=3)
+        # Show the main todo panel by default (daily panel is hidden)
+        self.todo_panel_frame.pack(fill=tk.BOTH, expand=True)
+        # self.daily_panel_frame is NOT packed initially
         
         # Load and display tasks immediately after initialization
         self.todo_list_manager.refresh_task_list()
@@ -397,6 +438,33 @@ The app will continue to work normally for task management without AI features."
         selected_tab = self.view_notebook.index(self.view_notebook.select())
         if selected_tab == 1 and self.calendar_view:  # Calendar View tab
             self.calendar_view.refresh()
+
+    def on_daily_tab_changed(self, event):
+        """Handle tab change between Daily Task List and Schedule View"""
+        selected_tab = self.daily_notebook.index(self.daily_notebook.select())
+        if selected_tab == 1 and self.weekly_schedule_view:  # Schedule View tab
+            self.weekly_schedule_view.refresh()
+
+    def toggle_task_view(self):
+        """Toggle between Daily Tasks view and main Todo Tasks view"""
+        if self.current_task_view.get() == "todo":
+            # Switch to Daily Tasks view
+            self.todo_panel_frame.pack_forget()
+            self.daily_panel_frame.pack(fill=tk.BOTH, expand=True)
+            self.current_task_view.set("daily")
+            self.task_view_toggle_btn.config(text="📋 Switch to Todo Tasks")
+            # Refresh schedule view if it's the active tab
+            if self.daily_notebook.index(self.daily_notebook.select()) == 1 and self.weekly_schedule_view:
+                self.weekly_schedule_view.refresh()
+        else:
+            # Switch to main Todo Tasks view
+            self.daily_panel_frame.pack_forget()
+            self.todo_panel_frame.pack(fill=tk.BOTH, expand=True)
+            self.current_task_view.set("todo")
+            self.task_view_toggle_btn.config(text="📅 Switch to Daily Tasks")
+            # Refresh calendar if it's the active tab
+            if self.view_notebook.index(self.view_notebook.select()) == 1 and self.calendar_view:
+                self.calendar_view.refresh()
 
     def toggle_chatbot(self):
         """Toggle the visibility of the AI assistant panel"""
