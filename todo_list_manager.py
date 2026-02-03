@@ -661,17 +661,23 @@ class ToDoListManager:
         
         # Format help
         help_text = """Examples:
-• Buy groceries due tomorrow - priority 3 - Need milk and bread
-• Call dentist due at 2:30 PM priority 2
-• Meeting due on next Friday 14:30 priority 1
-• Submit report due by 09/20/2025 | urgent | Check formatting
+• Buy groceries tomorrow - priority 3 - Need milk and bread
+• Call dentist at 2:30 PM priority 2
+• Meeting on next Friday 14:30 priority 1
+• Submit report by Feb 20 | urgent | Check formatting
+• Presentation on the 15th at 3pm - high priority
+• Project deadline end of month | important
 
-Supported date formats: today, tomorrow, next monday, 09/15/2025, in 3 days
-Time formats: 2:30 PM, 14:30, 10 AM (now saved as Due Time!)
-Due phrases: "due at", "due on", "due by" are automatically removed from task names
+Supported date formats:
+  • Relative: today, tomorrow, tmr, next week, in 3 days, in 2 weeks
+  • Weekdays: monday, next friday, this wed, fri
+  • Month names: Feb 15, March 20th, 15th of April, Jan 5 2026
+  • Special: end of month, end of week, weekend, end of year
+  • Numeric: 09/15/2025, 2025-09-15
+Time formats: 2:30 PM, 14:30, 10 AM, 3pm
+Date phrases: "due", "on", "at", "by" before dates are automatically cleaned
 Priority: 1=urgent/highest, 2=high, 3=medium, 4=low, 5=lowest (default)
-Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/minor (=4)
-Note: Duplicate task names will be detected and you'll be asked how to handle them."""
+Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/minor (=4)"""
         
         help_label = ttk.Label(main_frame, text=help_text, font=('Helvetica', 8), foreground="gray")
         help_label.pack(anchor='w', pady=(0, 10))
@@ -874,44 +880,167 @@ Note: Duplicate task names will be detected and you'll be asked how to handle th
 
     def extract_date_from_text(self, text):
         """Extract date from text and return formatted date string"""
+        original_text = text
         text = text.lower().strip()
         today = datetime.now()
         
+        # Month name mappings
+        month_names = {
+            'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
+            'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6,
+            'july': 7, 'jul': 7, 'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'sept': 9,
+            'october': 10, 'oct': 10, 'november': 11, 'nov': 11, 'december': 12, 'dec': 12
+        }
+        
+        weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        weekday_abbrevs = {'mon': 'monday', 'tue': 'tuesday', 'tues': 'tuesday', 'wed': 'wednesday', 
+                          'thu': 'thursday', 'thur': 'thursday', 'thurs': 'thursday',
+                          'fri': 'friday', 'sat': 'saturday', 'sun': 'sunday'}
+        
         # Handle relative dates
-        if text in ['today']:
+        if text in ['today', 'now']:
             return today.strftime("%m-%d-%Y")
-        elif text in ['tomorrow']:
+        elif text in ['tomorrow', 'tmr', 'tmrw', 'tom']:
             return (today + timedelta(days=1)).strftime("%m-%d-%Y")
         elif text in ['yesterday']:
             return (today - timedelta(days=1)).strftime("%m-%d-%Y")
-        elif 'next week' in text:
+        elif text in ['next week', 'in a week', 'in 1 week']:
             return (today + timedelta(days=7)).strftime("%m-%d-%Y")
-        elif text.startswith('in ') and text.endswith(' days'):
-            try:
-                days = int(text.split()[1])
-                return (today + timedelta(days=days)).strftime("%m-%d-%Y")
-            except:
-                pass
-        elif text.startswith('next '):
-            # Handle "next monday", "next friday", etc.
-            day_name = text.replace('next ', '')
-            weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        elif text in ['end of week', 'eow', 'this weekend', 'weekend']:
+            # Get to Friday of this week
+            days_until_friday = (4 - today.weekday()) % 7
+            if days_until_friday == 0 and today.weekday() > 4:  # It's weekend, get next Friday
+                days_until_friday = 7 - (today.weekday() - 4)
+            return (today + timedelta(days=days_until_friday)).strftime("%m-%d-%Y")
+        elif text in ['end of month', 'eom', 'month end']:
+            # Get last day of current month
+            if today.month == 12:
+                last_day = datetime(today.year + 1, 1, 1) - timedelta(days=1)
+            else:
+                last_day = datetime(today.year, today.month + 1, 1) - timedelta(days=1)
+            return last_day.strftime("%m-%d-%Y")
+        elif text in ['next month']:
+            # First day of next month
+            if today.month == 12:
+                return datetime(today.year + 1, 1, 1).strftime("%m-%d-%Y")
+            else:
+                return datetime(today.year, today.month + 1, 1).strftime("%m-%d-%Y")
+        elif text in ['end of year', 'eoy', 'year end']:
+            return datetime(today.year, 12, 31).strftime("%m-%d-%Y")
+        
+        # Handle "in X days/weeks/months"
+        in_pattern = re.match(r'in\s+(\d+)\s*(day|days|week|weeks|month|months)', text)
+        if in_pattern:
+            num = int(in_pattern.group(1))
+            unit = in_pattern.group(2)
+            if 'day' in unit:
+                return (today + timedelta(days=num)).strftime("%m-%d-%Y")
+            elif 'week' in unit:
+                return (today + timedelta(weeks=num)).strftime("%m-%d-%Y")
+            elif 'month' in unit:
+                new_month = today.month + num
+                new_year = today.year + (new_month - 1) // 12
+                new_month = ((new_month - 1) % 12) + 1
+                try:
+                    return datetime(new_year, new_month, today.day).strftime("%m-%d-%Y")
+                except ValueError:  # Day doesn't exist in that month
+                    # Use last day of that month
+                    if new_month == 12:
+                        last_day = datetime(new_year + 1, 1, 1) - timedelta(days=1)
+                    else:
+                        last_day = datetime(new_year, new_month + 1, 1) - timedelta(days=1)
+                    return last_day.strftime("%m-%d-%Y")
+        
+        # Handle "next monday", "next friday", etc.
+        if text.startswith('next '):
+            day_name = text.replace('next ', '').strip()
+            day_name = weekday_abbrevs.get(day_name, day_name)
             if day_name in weekdays:
                 target_weekday = weekdays.index(day_name)
                 days_ahead = target_weekday - today.weekday()
                 if days_ahead <= 0:  # Target day already happened this week
                     days_ahead += 7
                 return (today + timedelta(days=days_ahead)).strftime("%m-%d-%Y")
-        elif text.startswith('this '):
-            # Handle "this friday", etc.
-            day_name = text.replace('this ', '')
-            weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        
+        # Handle "this friday", etc.
+        if text.startswith('this '):
+            day_name = text.replace('this ', '').strip()
+            day_name = weekday_abbrevs.get(day_name, day_name)
             if day_name in weekdays:
                 target_weekday = weekdays.index(day_name)
                 days_ahead = target_weekday - today.weekday()
                 if days_ahead < 0:  # If the day has passed this week, get next week's
                     days_ahead += 7
                 return (today + timedelta(days=days_ahead)).strftime("%m-%d-%Y")
+        
+        # Handle standalone weekday names (e.g., "monday", "fri")
+        standalone_day = weekday_abbrevs.get(text, text)
+        if standalone_day in weekdays:
+            target_weekday = weekdays.index(standalone_day)
+            days_ahead = target_weekday - today.weekday()
+            if days_ahead <= 0:  # Target day already happened this week, get next week
+                days_ahead += 7
+            return (today + timedelta(days=days_ahead)).strftime("%m-%d-%Y")
+        
+        # Handle month + day formats: "Feb 15", "February 15", "Feb 15th", "15 Feb", "15th February"
+        # Pattern: Month Day (with optional ordinal)
+        month_day_pattern = re.match(r'([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?', text)
+        if month_day_pattern:
+            month_str, day, year = month_day_pattern.groups()
+            if month_str in month_names:
+                month = month_names[month_str]
+                day = int(day)
+                year = int(year) if year else today.year
+                # If the date has passed this year, use next year
+                if year == today.year:
+                    try:
+                        target_date = datetime(year, month, day)
+                        if target_date < today:
+                            year += 1
+                    except ValueError:
+                        pass
+                try:
+                    return datetime(year, month, day).strftime("%m-%d-%Y")
+                except ValueError:
+                    pass
+        
+        # Pattern: Day Month (with optional ordinal)
+        day_month_pattern = re.match(r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([a-z]+)(?:\s*,?\s*(\d{4}))?', text)
+        if day_month_pattern:
+            day, month_str, year = day_month_pattern.groups()
+            if month_str in month_names:
+                month = month_names[month_str]
+                day = int(day)
+                year = int(year) if year else today.year
+                # If the date has passed this year, use next year
+                if year == today.year:
+                    try:
+                        target_date = datetime(year, month, day)
+                        if target_date < today:
+                            year += 1
+                    except ValueError:
+                        pass
+                try:
+                    return datetime(year, month, day).strftime("%m-%d-%Y")
+                except ValueError:
+                    pass
+        
+        # Handle just ordinal day ("the 15th", "15th") - assumes current or next month
+        ordinal_pattern = re.match(r'(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)', text)
+        if ordinal_pattern:
+            day = int(ordinal_pattern.group(1))
+            if 1 <= day <= 31:
+                try:
+                    target_date = datetime(today.year, today.month, day)
+                    if target_date <= today:
+                        # Move to next month
+                        if today.month == 12:
+                            target_date = datetime(today.year + 1, 1, day)
+                        else:
+                            target_date = datetime(today.year, today.month + 1, day)
+                    return target_date.strftime("%m-%d-%Y")
+                except ValueError:
+                    pass
         
         # Handle absolute dates - improved patterns
         date_patterns = [
@@ -1044,16 +1173,30 @@ Note: Duplicate task names will be detected and you'll be asked how to handle th
         return None
 
     def clean_due_phrases(self, text):
-        """Remove 'due at', 'due on', etc. phrases from text"""
+        """Remove 'due at', 'due on', 'on', 'at', 'by' etc. phrases from text when followed by date/time"""
         if not text or not text.strip():
             return text
             
         # Patterns to remove (case insensitive)
+        # These patterns match prepositions when followed by date/time indicators
         due_patterns = [
             r'\bdue\s+at\b',
             r'\bdue\s+on\b',
             r'\bdue\s+by\b',
+            r'\bdue\s+for\b',
             r'\bdue\b(?=\s+\d)',  # "due" followed by date/time
+            r'\bdue\b(?=\s+(?:today|tomorrow|tmr|monday|tuesday|wednesday|thursday|friday|saturday|sunday))',
+            r'\bdue\b(?=\s+(?:next|this|end\s+of))',
+            r'\bdue\b(?=\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))',
+            # Standalone prepositions before date/time (but keep them if part of task name)
+            r'\b(?:on|at|by|for)\b(?=\s+(?:today|tomorrow|tmr|tmrw))',
+            r'\b(?:on|at|by|for)\b(?=\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))',
+            r'\b(?:on|at|by|for)\b(?=\s+(?:mon|tue|wed|thu|fri|sat|sun)\b)',
+            r'\b(?:on|at|by|for)\b(?=\s+(?:next|this)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month))',
+            r'\b(?:on|at|by|for)\b(?=\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))',
+            r'\b(?:on|at|by|for)\b(?=\s+\d{1,2}[/\-])',  # Before date patterns like 02/15
+            r'\b(?:on|at|by|for)\b(?=\s+the\s+\d{1,2}(?:st|nd|rd|th))',  # "on the 15th"
+            r'\b(?:on|at|by)\b(?=\s+\d{1,2}(?:st|nd|rd|th))',  # "on 15th"
         ]
         
         cleaned_text = text

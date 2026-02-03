@@ -642,9 +642,32 @@ The app will continue to work normally for task management without AI features."
             )
 
     def check_startup_status(self):
-        """Check if the app is set to run at startup"""
+        """Check if the app is set to run at startup AND points to current executable"""
         startup_path = self.get_startup_path()
-        return startup_path.exists()
+        if not startup_path.exists():
+            return False
+        
+        # Verify the shortcut points to the current executable/script
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(str(startup_path))
+            target_path = shortcut.TargetPath
+            
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable - check if target matches current exe
+                current_path = sys.executable
+            else:
+                # Running as script - check if target is the batch file in same directory
+                script_path = os.path.abspath(sys.argv[0])
+                app_dir = os.path.dirname(script_path)
+                batch_path = os.path.join(app_dir, "run_todo.bat")
+                current_path = batch_path
+            
+            # Normalize paths for comparison (case-insensitive on Windows)
+            return os.path.normcase(target_path) == os.path.normcase(current_path)
+        except Exception:
+            # If we can't read the shortcut, assume it exists but may be invalid
+            return startup_path.exists()
 
     def get_startup_path(self):
         """Get the path to the startup shortcut"""
@@ -732,8 +755,8 @@ The app will continue to work normally for task management without AI features."
         menubar = tk.Menu(self.root)
         self.options_menu = tk.Menu(menubar, tearoff=0)  # Make this an instance variable
 
-        # Startup checkbox
-        self.startup_var = tk.BooleanVar(value=self.startup_enabled)
+        # Startup checkbox - must specify master for proper BooleanVar behavior
+        self.startup_var = tk.BooleanVar(master=self.root, value=self.startup_enabled)
         self.options_menu.add_checkbutton(
             label="Start with Windows",
             variable=self.startup_var,
