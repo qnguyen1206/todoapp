@@ -1,0 +1,215 @@
+# ============================================================
+# TODO App – Phala CVM Deployment (docker-compose.yml)
+# Last updated: 2026-07-13
+#
+# HOW TO DEPLOY:
+#   Images are already built and pushed to Docker Hub as kairu1206/cvm-*.
+#   To rebuild after code changes:
+#        docker build -t kairu1206/cvm-backend:latest   ./services/backend  && docker push kairu1206/cvm-backend:latest
+#        docker build -t kairu1206/cvm-ai:latest        ./services/ai_inference && docker push kairu1206/cvm-ai:latest
+#        docker build -t kairu1206/cvm-sync:latest      ./services/task_sync    && docker push kairu1206/cvm-sync:latest
+#        docker build -t kairu1206/cvm-scheduler:latest ./services/scheduler    && docker push kairu1206/cvm-scheduler:latest
+#
+#   1. Paste this file into https://cloud.phala.com → Create CVM → Advanced tab.
+#   2. Set ALL env vars marked [SECURE] in the Phala dashboard "Environment Variables" panel.
+#
+# PUBLIC HTTPS ENDPOINTS (automatically provisioned by Phala after deploy):
+#   Backend storage:  https://<app-id>-5000.dstack-prod5.phala.network
+#   AI inference:     https://<app-id>-5001.dstack-prod5.phala.network
+#   Task sync:        https://<app-id>-5002.dstack-prod5.phala.network
+#   Scheduler:        https://<app-id>-5003.dstack-prod5.phala.network
+#
+# NOTE: Nginx is NOT included – Phala provides automatic TLS for every exposed port.
+# NOTE: All services share one CVM (same TEE boundary) and talk via service names internally.
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # PostgreSQL – shared database for all backend services
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: cvm_todoapp
+      POSTGRES_USER: ${DB_USER:-cvm_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}      # [SECURE] – set this in the Phala dashboard
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Postgres is internal only – do NOT expose it publicly on Phala
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cvm_user}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Backend Storage Service
+  # Internal URL: http://backend:5000
+  # Public HTTPS:  https://<app-id>-5000.dstack-prod5.phala.network
+  # ----------------------------------------------------------
+  backend:
+    image: kairu1206/cvm-backend:latest
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
+      API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}               # [SECURE] – Phala dashboard
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backend_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # AI Inference Service
+  # Queries Ollama internally – your prompts never leave the TEE
+  # Internal URL: http://ai_inference:5001
+  # Public HTTPS:  https://<app-id>-5001.dstack-prod5.phala.network
+  # ----------------------------------------------------------
+  ai_inference:
+    image: kairu1206/cvm-ai:latest
+    ports:
+      - "5001:5001"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
+      API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
+      OLLAMA_ENDPOINT: http://ollama:11434             # internal – Ollama not exposed publicly
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-deepseek-r1:14b}
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      - postgres
+      - ollama
+    volumes:
+      - ai_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Task Sync Service
+  # P2P encrypted task sharing between users
+  # Internal URL: http://task_sync:5002
+  # Public HTTPS:  https://<app-id>-5002.dstack-prod5.phala.network
+  # ----------------------------------------------------------
+  task_sync:
+    image: kairu1206/cvm-sync:latest
+    ports:
+      - "5002:5002"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
+      API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}               # [SECURE] – Phala dashboard
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - sync_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Scheduler Service
+  # Cron-based background jobs (reminders, cleanup, auto-sync)
+  # Internal URL: http://scheduler:5003
+  # Public HTTPS:  https://<app-id>-5003.dstack-prod5.phala.network
+  # ----------------------------------------------------------
+  scheduler:
+    image: kairu1206/cvm-scheduler:latest
+    ports:
+      - "5003:5003"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
+      API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - scheduler_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Ollama – local LLM runtime (internal to the TEE, not exposed)
+  # After first deploy, pull your model:
+  #   phala cvms exec <app-id> -- ollama pull deepseek-r1:14b
+  # ----------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Web UI – browser-based frontend matching the Python desktop app
+  # Tabs: Tasks, Daily Tasks, AI Assistant, Calendar, Weekly, Settings
+  # Public HTTPS: https://<app-id>-8080.dstack-pha-prod9.phala.network
+  # ----------------------------------------------------------
+  web_ui:
+    image: kairu1206/cvm-webui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      BACKEND_URL:   http://backend:5000
+      AI_URL:        http://ai_inference:5001
+      SYNC_URL:      http://task_sync:5002
+      SCHEDULER_URL: http://scheduler:5003
+      API_KEY:       ${API_KEY}             # [SECURE] – Phala dashboard (same key as other services)
+      WEB_USER_ID:   ${WEB_USER_ID:-}       # Optional: set to match your desktop user ID
+      ENVIRONMENT:   production
+      LOG_LEVEL:     ${LOG_LEVEL:-info}
+    depends_on:
+      - backend
+      - ai_inference
+    volumes:
+      - webui_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+# ----------------------------------------------------------
+# Named volumes – persisted inside the CVM's encrypted storage
+# ----------------------------------------------------------
+volumes:
+  postgres_data:
+  backend_data:
+  ai_data:
+  sync_data:
+  scheduler_data:
+  ollama_data:
+  webui_data:

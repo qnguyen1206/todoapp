@@ -60,6 +60,15 @@ except ImportError:
     from todo_updater import Updater
     MODULAR_UPDATER_AVAILABLE = False
 
+# Import Phala CVM manager
+try:
+    from cvm_manager import CVMManager
+    CVM_AVAILABLE = True
+except ImportError as e:
+    print(f"Phala CVM not available: {e}")
+    CVM_AVAILABLE = False
+    CVMManager = None
+
 if getattr(sys, "frozen", False):
     base_path = sys._MEIPASS
     # Register cleanup for MEI folder on exit
@@ -176,7 +185,17 @@ class TodoApp(metaclass=SingletonMeta):
         self.mysql_available = False
         self.ai_assistant = None
         self.ai_available = False
-        
+        self.cvm_manager = None
+        self.cvm_available = False
+
+        # Initialize Phala CVM Manager synchronously (lightweight – just reads config)
+        if CVM_AVAILABLE and CVMManager:
+            try:
+                self.cvm_manager = CVMManager(self)
+                self.cvm_available = True
+            except Exception as e:
+                print(f"Failed to initialize Phala CVM Manager: {e}")
+
         # Create fallback AI interface immediately (fast)
         if not AI_ASSISTANT_AVAILABLE:
             self.create_fallback_ai_interface()
@@ -839,10 +858,33 @@ The app will continue to work normally for task management without AI features."
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self.show_about)
         
+        # Phala CVM menu
+        cvm_menu = tk.Menu(menubar, tearoff=0)
+        if self.cvm_available and self.cvm_manager:
+            cvm_menu.add_command(label="Configure Endpoints",        command=self.cvm_manager.open_endpoint_config)
+            cvm_menu.add_command(label="Test Connections",           command=self.cvm_manager.test_all_connections)
+            cvm_menu.add_command(label="View / Change User ID",      command=self.cvm_manager.show_user_id_dialog)
+            cvm_menu.add_separator()
+            cvm_menu.add_command(label="Push Tasks to CVM",         command=self.cvm_manager.push_tasks_to_cvm)
+            cvm_menu.add_command(label="Force Push (Overwrite CVM)", command=self.cvm_manager.force_push_tasks_to_cvm)
+            cvm_menu.add_command(label="Pull Tasks from CVM",        command=self.cvm_manager.pull_tasks_from_cvm)
+            cvm_menu.add_command(label="Sync Tasks (Two-Way)",       command=self.cvm_manager.sync_tasks_with_cvm)
+            cvm_menu.add_separator()
+            cvm_menu.add_command(label="Backend Storage Settings",   command=self.cvm_manager.configure_backend)
+            cvm_menu.add_command(label="AI Inference Settings",      command=self.cvm_manager.configure_ai)
+            cvm_menu.add_command(label="Task Sync Settings",         command=self.cvm_manager.configure_sync)
+            cvm_menu.add_command(label="Scheduler Settings",         command=self.cvm_manager.configure_scheduler)
+            cvm_menu.add_separator()
+            cvm_menu.add_command(label="View CVM Status",            command=self.cvm_manager.show_cvm_status)
+        else:
+            cvm_menu.add_command(label="Phala CVM (Not Available)",  state=tk.DISABLED)
+            cvm_menu.add_command(label="pip install requests cryptography to enable", state=tk.DISABLED)
+
         # Add menus to menubar
         menubar.add_cascade(label="Options", menu=self.options_menu)
         menubar.add_cascade(label="AI Assistant", menu=ai_menu)
         menubar.add_cascade(label="Share", menu=self.share_menu)
+        menubar.add_cascade(label="Phala CVM", menu=cvm_menu)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=menubar)
         

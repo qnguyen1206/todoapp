@@ -4,7 +4,7 @@ a = Analysis(
     ['todo.py'],
     pathex=[],
     binaries=[],
-    datas=[('clipboard.png', '.'), ('version.txt', '.')],
+    datas=[('clipboard.png', '.'), ('version.txt', '.'), ('cvm_config.json', '.')],
     hiddenimports=[
         'PIL',
         'PIL._imagingtk',
@@ -17,6 +17,8 @@ a = Analysis(
         'tkcalendar',
         'markdown',
         'requests',
+        'cryptography',
+        'cryptography.fernet',
         'mysql.connector',
         'socket',
         'keyring',
@@ -28,6 +30,8 @@ a = Analysis(
         'daily_todo_manager',
         'todo_list_manager',
         'calendar_view',
+        'cvm_manager',
+        'cvm_client',
         # Add datetime and other standard modules
         'datetime',
         'pathlib',

@@ -1,0 +1,11 @@
+{
+  "endpoints": {
+    "backend": "https://e70c1b393295cafaf2120490d3bc1dfe3ebef115-5000.dstack-pha-prod5.phala.network",
+    "ai_inference": "https://e70c1b393295cafaf2120490d3bc1dfe3ebef115-5001.dstack-pha-prod5.phala.network",
+    "task_sync": "https://e70c1b393295cafaf2120490d3bc1dfe3ebef115-5002.dstack-pha-prod5.phala.network",
+    "scheduler": "https://e70c1b393295cafaf2120490d3bc1dfe3ebef115-5003.dstack-pha-prod5.phala.network"
+  },
+  "encryption_key": null,
+  "api_key": "pq7/LgOu1qMDK7yBt20/VQbCDb1zgqjM941R74rAtXiggTLxMjI+vkjnuT3OTBkt",
+  "user_id": "admin"
+}

@@ -1,0 +1,227 @@
+/* ── Reset & Base ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #f5f5f5;
+  --surface:   #ffffff;
+  --border:    #d0d0d0;
+  --primary:   #1976d2;
+  --primary-h: #1565c0;
+  --danger:    #d32f2f;
+  --text:      #212121;
+  --muted:     #757575;
+  --overdue:   #c62828;
+  --today:     #e65100;
+  --row-hover: #f0f4ff;
+  --radius:    6px;
+  --shadow:    0 1px 4px rgba(0,0,0,.12);
+}
+
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg);
+       color: var(--text); font-size: 14px; line-height: 1.5; }
+
+/* ── Header ───────────────────────────────────────────────── */
+header {
+  background: var(--primary); color: #fff;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; height: 48px; box-shadow: var(--shadow);
+}
+.app-title { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
+.header-right { display: flex; gap: 8px; }
+.stat-badge {
+  background: rgba(255,255,255,.18); border-radius: 12px;
+  padding: 2px 10px; font-size: 13px; font-weight: 600;
+}
+
+/* ── Tab Bar ──────────────────────────────────────────────── */
+.tab-bar {
+  display: flex; background: var(--surface); border-bottom: 2px solid var(--border);
+  padding: 0 8px; gap: 2px;
+}
+.tab {
+  background: none; border: none; padding: 10px 16px; cursor: pointer;
+  font-size: 13px; color: var(--muted); border-bottom: 3px solid transparent;
+  margin-bottom: -2px; transition: color .15s, border-color .15s;
+}
+.tab:hover { color: var(--primary); }
+.tab.active { color: var(--primary); font-weight: 600; border-bottom-color: var(--primary); }
+
+/* ── Tab Content ──────────────────────────────────────────── */
+.tab-content { display: none; padding: 16px; max-width: 1200px; margin: 0 auto; }
+.tab-content.active { display: block; }
+
+/* ── Toolbar ──────────────────────────────────────────────── */
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+
+/* ── Buttons ──────────────────────────────────────────────── */
+.btn {
+  padding: 6px 14px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: var(--surface); cursor: pointer; font-size: 13px; font-weight: 500;
+  transition: background .12s, box-shadow .12s; white-space: nowrap;
+}
+.btn:hover { background: #f0f0f0; box-shadow: var(--shadow); }
+.btn.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn.btn-primary:hover { background: var(--primary-h); }
+.btn.btn-danger  { background: var(--danger);  color: #fff; border-color: var(--danger); }
+.btn.btn-danger:hover { filter: brightness(.9); }
+.btn.btn-sm { padding: 3px 9px; font-size: 12px; }
+
+/* ── Inputs ───────────────────────────────────────────────── */
+.input {
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 9px;
+  font-size: 13px; width: 100%; outline: none; font-family: inherit;
+  transition: border-color .15s;
+}
+.input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(25,118,210,.15); }
+
+/* ── Task Table ───────────────────────────────────────────── */
+.task-table { width: 100%; border-collapse: collapse; background: var(--surface);
+              border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.task-table th {
+  background: #e8edf5; text-align: left; padding: 9px 12px;
+  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+  border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+}
+.task-table th:hover { background: #dce4f0; }
+.task-table td { padding: 8px 12px; border-bottom: 1px solid #eee; vertical-align: middle; }
+.task-table tr:last-child td { border-bottom: none; }
+.task-table tr:hover td { background: var(--row-hover); }
+
+.task-table tr.overdue td:first-child { color: var(--overdue); font-weight: 600; }
+.task-table tr.today  td:first-child  { color: var(--today);   font-weight: 600; }
+
+.task-name-cell { cursor: pointer; }
+.task-name-cell:hover { text-decoration: underline; }
+
+.actions-cell { display: flex; gap: 4px; flex-wrap: nowrap; }
+.priority-pill {
+  display: inline-block; width: 22px; height: 22px; border-radius: 50%;
+  text-align: center; line-height: 22px; font-size: 12px; font-weight: 700; color: #fff;
+}
+.p1 { background: #b71c1c; } .p2 { background: #e64a19; }
+.p3 { background: #f9a825; } .p4 { background: #558b2f; }
+.p5 { background: #1565c0; }
+
+/* ── Daily List ───────────────────────────────────────────── */
+.daily-list { list-style: none; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.daily-item {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 8px 12px;
+}
+.daily-item.done .daily-title { text-decoration: line-through; color: var(--muted); }
+.daily-title { flex: 1; }
+.daily-check { width: 16px; height: 16px; cursor: pointer; }
+
+/* ── AI Layout ────────────────────────────────────────────── */
+.ai-layout { display: flex; gap: 16px; height: calc(100vh - 140px); }
+.ai-sidebar {
+  width: 200px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px;
+}
+.ai-sidebar label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.ai-status-box {
+  font-size: 12px; padding: 8px; background: #f5f5f5;
+  border-radius: var(--radius); color: var(--muted);
+}
+.ai-main { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.ai-chat {
+  flex: 1; overflow-y: auto; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 12px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.ai-msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; line-height: 1.6; font-size: 13px; }
+.ai-msg.user { background: var(--primary); color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
+.ai-msg.bot  { background: #f0f0f0; color: var(--text); align-self: flex-start; border-bottom-left-radius: 4px; }
+.ai-msg.thinking { color: var(--muted); font-style: italic; }
+.ai-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.ai-textarea { resize: none; flex: 1; }
+
+/* ── Calendar ─────────────────────────────────────────────── */
+.cal-nav { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+.cal-title { font-size: 16px; font-weight: 600; min-width: 160px; text-align: center; }
+.calendar-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden;
+}
+.cal-header { background: #e8edf5; padding: 6px 4px; text-align: center;
+              font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.cal-cell {
+  min-height: 80px; padding: 4px; border: 1px solid #eee;
+  font-size: 12px; vertical-align: top; background: var(--surface);
+}
+.cal-cell.other-month { background: #fafafa; color: var(--muted); }
+.cal-cell.today-cell  { background: #e3f2fd; }
+.cal-day { font-weight: 600; margin-bottom: 2px; }
+.cal-dot {
+  font-size: 11px; padding: 1px 4px; border-radius: 3px; margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cal-dot.overdue { background: #ffebee; color: var(--overdue); }
+.cal-dot.today   { background: #fff3e0; color: var(--today); }
+.cal-dot.normal  { background: #e8eaf6; color: #3949ab; }
+
+/* ── Weekly ───────────────────────────────────────────────── */
+.weekly-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px;
+}
+.weekly-day {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px; min-height: 120px;
+}
+.weekly-day-header {
+  font-size: 12px; font-weight: 700; border-bottom: 1px solid var(--border);
+  padding-bottom: 6px; margin-bottom: 8px;
+}
+.weekly-day.today-col { border-color: var(--primary); background: #e3f2fd; }
+.weekly-task {
+  font-size: 11px; padding: 3px 6px; border-radius: 4px; margin-bottom: 4px;
+}
+.weekly-task.overdue { background: #ffebee; color: var(--overdue); }
+.weekly-task.today   { background: #fff3e0; color: var(--today); }
+.weekly-task.normal  { background: #e8eaf6; color: #3949ab; }
+
+/* ── Settings ─────────────────────────────────────────────── */
+.settings-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px; margin-bottom: 12px;
+}
+.settings-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+.setting-row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.help-text { font-size: 12px; color: var(--muted); margin: 6px 0; }
+.uid-display {
+  display: block; background: #f5f5f5; padding: 6px 10px; border-radius: var(--radius);
+  font-family: monospace; font-size: 13px; margin: 6px 0; word-break: break-all;
+}
+.health-output {
+  margin-top: 10px; padding: 10px; background: #1e1e1e; color: #d4d4d4;
+  border-radius: var(--radius); font-size: 12px; white-space: pre-wrap;
+  max-height: 200px; overflow-y: auto;
+}
+
+/* ── Modal ────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.4);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.modal {
+  background: var(--surface); border-radius: var(--radius);
+  padding: 24px; width: 480px; max-width: 95vw; box-shadow: 0 8px 32px rgba(0,0,0,.2);
+}
+.modal h2 { font-size: 16px; margin-bottom: 16px; }
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 12px; font-weight: 600;
+                    color: var(--muted); margin-bottom: 4px; }
+.form-row { display: flex; gap: 12px; }
+.form-row .form-group { flex: 1; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.notes-body {
+  background: #f5f5f5; padding: 12px; border-radius: var(--radius);
+  white-space: pre-wrap; font-family: inherit; font-size: 13px; max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ── Misc ─────────────────────────────────────────────────── */
+.empty-msg { color: var(--muted); text-align: center; padding: 32px; font-style: italic; }

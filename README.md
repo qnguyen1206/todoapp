@@ -63,6 +63,13 @@ If you have Ollama:
 4. Use "Configure MySQL Connection" in the app's Share menu
 5. Test the connection to create the todoapp database
 
+**For Phala Cloud CVM**
+
+1. Create a CVM at https://phala.com/
+2. Install Python packages: `pip install requests cryptography`
+3. Setup endpoints in "Configure Endpoints" in the app's Phala CVM meny
+4. Test the connection to make sure everything works
+
 ---
 
 **NOTES:**
@@ -73,13 +80,13 @@ If you have Ollama:
 
 - If AI dependencies are missing, the AI tab will show installation instructions
 - If MySQL dependencies are missing, sharing features will be disabled but clearly indicated
+- If CVM dependencies are missing, CVM features will be disabled but app functions normally
 - The app never crashes due to missing optional dependencies
 
 **For the first time running with MySQL:**
 
 - Run "Test Connection" in "Configure MySQL Connection" to create the todoapp database
 - Enable MySQL Sharing to start using LAN features
-
   - If there are errors pop up, it is because the app was checking for first time run and creating files that is needed for the app to run properly.
 
 - The app will automatically check for updates and prompt the user to update if a new version is available.
@@ -96,6 +103,12 @@ If you have Ollama:
 - Able to upload files for context to AI
 - Able to start on window startup
 - Share tasks on LAN through MySQL
+- Calendar view for daily tasks and todo tasks
+- Store tasks encrypted on confidential cloud infrastructure
+- Run AI queries privately without 3rd-party exposure
+- Decentralized P2P task sharing
+- Scheduled automation and reminders
+- Hybrid setup combining local and cloud storage
 - Auto update
 
 ---
