@@ -56,7 +56,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='todo',
+    name='todoapp',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

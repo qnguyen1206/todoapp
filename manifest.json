@@ -2,82 +2,103 @@
   "generated": "2025-08-09T00:00:00Z",
   "modules": {
     "README.md": {
-      "hash": "3b3799827a9239f47b85c297d2df39dfe06036ee46dd31024f085b6e869d49c1",
+      "hash": "be0f5124cc6edc63996cfcaf09fcfbd9ac99d8a99c803a8512e2e207833427e1",
       "required": false,
-      "size": 3467,
+      "size": 4105,
       "type": "docs",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "ai_assistant.py": {
       "hash": "8e846eb4a97b3a3505cb99e9d0ca2faa896e7d506ff6549a7e97a396471a7dda",
       "required": true,
       "size": 28489,
       "type": "module",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "clipboard.png": {
       "hash": "1846afeff4e214c218c75b0d2ee637e88c3c6c6e76732ac65fbbe35eec1cd14c",
       "required": true,
       "size": 20986,
       "type": "asset",
-      "version": "1.6.2"
+      "version": "1.6.3"
+    },
+    "cvm_client.py": {
+      "hash": "d0ab73119b15b2a85bc6e6ccccc358fa4d48944cbc4b755e0232d35c0c2e0839",
+      "required": true,
+      "size": 17790,
+      "type": "module",
+      "version": "1.6.3"
+    },
+    "cvm_config.json": {
+      "hash": "3a201cd2cfa647b59467a4ea072dd6bbd53935792f6914a0f759cf5de9bb3efd",
+      "required": true,
+      "size": 583,
+      "type": "config",
+      "version": "1.6.3"
+    },
+    "cvm_manager.py": {
+      "hash": "4d4f7838a2d3f66867e4d67bc9791c697f669b18fa8733858e6796119a0d2fc6",
+      "required": true,
+      "size": 28567,
+      "type": "module",
+      "version": "1.6.3"
     },
     "daily_todo_manager.py": {
       "hash": "e20f0a09483faec7d332e9595daa72f39a7b15be677f6b5b87f9b20178af6977",
       "required": true,
       "size": 62700,
       "type": "module",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "modular_updater.py": {
-      "hash": "c14c28d46892e17db220af065acd6e1e9403ce8802e702756724500715dcd90f",
+      "hash": "568e7381ddfc55abb719716916f2dda8fc96c74bb150d9362418d8c38c977fb0",
       "required": false,
-      "size": 23776,
+      "size": 24192,
       "type": "system",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "mysql_lan_manager.py": {
       "hash": "cba0bc5c8a924ec4186bc556b6a113e823a34fb0583312fc94a809f98111c580",
       "required": true,
       "size": 37047,
       "type": "module",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "todo.exe": {
       "hash": "5d5f0e4c8086610ebe572644f551dcec0466348c964473060ed63cd0cfa79323",
       "required": true,
       "size": 50595077,
       "type": "core",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "todo.py": {
-      "hash": "fd0d12d65466cf2a17cd82def36854b540b5415966f612b389d56528a63ebe41",
+      "hash": "a20acf6f0f88e3aae973e2e32ade2f095990d3d09d8f972d4882c96ffd09e35b",
       "required": true,
-      "size": 63229,
+      "size": 65760,
       "type": "core",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "todo.spec": {
-      "hash": "9b4edbd6ff8561be77f3e215e21e3750a60cf013a1a4a896113ac46d5eb15484",
+      "hash": "64f21c7326160c2751a5f872c9c8083ae147047911a146895bcba75016108844",
       "required": false,
-      "size": 1529,
+      "size": 1662,
       "type": "build",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "todo_list_manager.py": {
       "hash": "605ce36552d65b6a332b136d17b7abfb8d6435aca7bc3156a4580ae96874da9a",
       "required": true,
       "size": 77937,
       "type": "module",
-      "version": "1.6.2"
+      "version": "1.6.3"
     },
     "version.txt": {
-      "hash": "cc62463628d767af138cbaca59820c248b2dbadae73b33a09647e378ff4bd4a8",
+      "hash": "f267ab0a5247499879a39c4b98d7d2ac4c72119b3345699d39ccb168dfa154f1",
       "required": true,
       "size": 5,
       "type": "config",
-      "version": "1.6.2"
+      "version": "1.6.3"
     }
   },
-  "version": "1.6.2"
+  "version": "1.6.3"
 }

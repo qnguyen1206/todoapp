@@ -60,8 +60,12 @@ class ModularUpdater:
                     "mysql_lan_manager.py": {"version": self.current_version, "hash": "", "type": "module"},
                     "daily_todo_manager.py": {"version": self.current_version, "hash": "", "type": "module"},
                     "todo_list_manager.py": {"version": self.current_version, "hash": "", "type": "module"},
-                    "todo_updater.py": {"version": self.current_version, "hash": "", "type": "system"},
-                    "clipboard.png": {"version": self.current_version, "hash": "", "type": "asset"}
+                    "cvm_client.py": {"version": self.current_version, "hash": "", "type": "module"},
+                    "cvm_manager.py": {"version": self.current_version, "hash": "", "type": "module"},
+                    "modular_updater.py": {"version": self.current_version, "hash": "", "type": "system"},
+                    "clipboard.png": {"version": self.current_version, "hash": "", "type": "asset"},
+                    "version.txt": {"version": self.current_version, "hash": "", "type": "config"},
+                    "cvm_config.json": {"version": self.current_version, "hash": "", "type": "config"}
                 }
             }
             self.save_local_manifest(default_manifest)

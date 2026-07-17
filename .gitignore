@@ -7,6 +7,8 @@ time_format_pref.txt
 daily_date.txt
 
 mysql_config.json
+ai_config.json
+cvm_config.json
 
 todo.exe
 
