@@ -38,7 +38,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     # Postgres is internal only – do NOT expose it publicly on Phala
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cvm_user}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-cvm_user} -d ${POSTGRES_DB:-cvm_todoapp}"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -86,13 +90,16 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
       API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
-      OLLAMA_ENDPOINT: http://ollama:11434             # internal – Ollama not exposed publicly
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-deepseek-r1:14b}
+      
+      PHALA_AI_URL: https://inference.phala.com/v1/completions
+      PHALA_AI_API_KEY: ${PHALA_AI_API_KEY}
+      PHALA_AI_MODEL: ${PHALA_AI_MODEL:-phala/qwen3.5-27b}
+
       ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
-      - postgres
-      - ollama
+      postgres:
+        condition: service_healthy
     volumes:
       - ai_data:/app/data
     healthcheck:
@@ -161,17 +168,6 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------
-  # Ollama – local LLM runtime (internal to the TEE, not exposed)
-  # After first deploy, pull your model:
-  #   phala cvms exec <app-id> -- ollama pull deepseek-r1:14b
-  # ----------------------------------------------------------
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-
-  # ----------------------------------------------------------
   # Web UI – browser-based frontend matching the Python desktop app
   # Tabs: Tasks, Daily Tasks, AI Assistant, Calendar, Weekly, Settings
   # Public HTTPS: https://<app-id>-8080.dstack-pha-prod9.phala.network
@@ -211,5 +207,4 @@ volumes:
   ai_data:
   sync_data:
   scheduler_data:
-  ollama_data:
   webui_data:

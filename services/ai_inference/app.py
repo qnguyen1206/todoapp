@@ -1,7 +1,8 @@
 """
 AI Inference Service for TODO App CVM
-Proxies requests to Ollama running inside the same TEE.
-All prompts stay inside the enclave — never exposed externally.
+
+Proxies requests to Phala Confidential AI using HTTP requests.
+The service keeps the same REST API so the frontend does not need to change.
 """
 
 import os
@@ -9,20 +10,36 @@ import logging
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "info").upper())
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
 
-OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://ollama:11434")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "deepseek-r1:14b")
-API_KEY = os.environ.get("API_KEY", "")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+API_KEY = os.getenv("API_KEY", "")
+
+PHALA_AI_URL = os.getenv(
+    "PHALA_AI_URL",
+    "https://inference.phala.com/v1/chat/completions",
+)
+
+PHALA_AI_API_KEY = os.getenv("PHALA_AI_API_KEY", "")
+
+DEFAULT_MODEL = os.getenv(
+    "PHALA_AI_MODEL",
+    "phala/qwen3.5-27b",
+)
+
+AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "120"))
+
+SYSTEM_PROMPT = "You are a helpful task management assistant."
 
 
 # ---------------------------------------------------------------------------
@@ -30,30 +47,45 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))
 # ---------------------------------------------------------------------------
 
 def require_api_key():
+    """Require the application's API key (not the Phala AI key)."""
     if not API_KEY:
         return None
+
     key = request.headers.get("X-API-Key") or request.args.get("api_key")
+
     if key != API_KEY:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        return jsonify({
+            "status": "error",
+            "message": "Unauthorized"
+        }), 401
+
     return None
 
 
-def ollama_available():
-    try:
-        r = requests.get(f"{OLLAMA_ENDPOINT}/api/tags", timeout=3)
-        return r.status_code == 200
-    except Exception:
-        return False
+def phala_request(messages, model):
+    """Send a chat completion request to Phala Confidential AI."""
 
+    headers = {
+        "Authorization": f"Bearer {PHALA_AI_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
-def list_ollama_models():
-    try:
-        r = requests.get(f"{OLLAMA_ENDPOINT}/api/tags", timeout=5)
-        if r.status_code == 200:
-            return [m["name"] for m in r.json().get("models", [])]
-    except Exception:
-        pass
-    return []
+    payload = {
+        "model": model,
+        "messages": messages,
+    }
+
+    response = requests.post(
+        PHALA_AI_URL,
+        headers=headers,
+        json=payload,
+        timeout=AI_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    return response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -62,18 +94,14 @@ def list_ollama_models():
 
 @app.route("/health", methods=["GET"])
 def health():
-    available = ollama_available()
-    models = list_ollama_models() if available else []
     return jsonify({
         "status": "ok",
         "service": "ai_inference",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "ollama": {
-            "available": available,
-            "endpoint": OLLAMA_ENDPOINT,
-            "models": models,
-            "default_model": DEFAULT_MODEL,
-        }
+        "provider": "Phala Confidential AI",
+        "endpoint": PHALA_AI_URL,
+        "default_model": DEFAULT_MODEL,
+        "configured": bool(PHALA_AI_API_KEY),
     })
 
 
@@ -82,142 +110,163 @@ def models():
     err = require_api_key()
     if err:
         return err
-    return jsonify({"status": "success", "models": list_ollama_models()})
+
+    return jsonify({
+        "status": "success",
+        "models": [
+            DEFAULT_MODEL
+        ]
+    })
 
 
 @app.route("/inference", methods=["POST"])
 def inference():
     """
-    Send a prompt to Ollama and return the response.
-    Supports optional streaming via ?stream=true.
-
     Request body:
-        {
-            "prompt": "string",
-            "model":  "optional-model-name",
-            "system": "optional system prompt",
-            "context": []   # optional list of context strings
-        }
+
+    {
+        "prompt": "...",
+        "model": "optional",
+        "system": "optional",
+        "context": [...]
+    }
     """
+
     err = require_api_key()
     if err:
         return err
 
     data = request.get_json(silent=True) or {}
+
     prompt = data.get("prompt", "").strip()
-    model = data.get("model") or DEFAULT_MODEL
-    system = data.get("system", "You are a helpful task management assistant.")
-    context_items = data.get("context", [])
-    do_stream = str(request.args.get("stream", "false")).lower() == "true"
 
     if not prompt:
-        return jsonify({"status": "error", "message": "prompt is required"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "prompt is required"
+        }), 400
 
-    # Build full prompt with optional context
-    full_prompt = prompt
+    model = data.get("model") or DEFAULT_MODEL
+    system = data.get("system") or SYSTEM_PROMPT
+    context_items = data.get("context", [])
+
     if context_items:
-        ctx = "\n".join(str(c) for c in context_items)
-        full_prompt = f"Context:\n{ctx}\n\nUser: {prompt}"
+        context_text = "\n".join(str(item) for item in context_items)
+        prompt = f"Context:\n{context_text}\n\nUser:\n{prompt}"
 
-    payload = {
-        "model": model,
-        "prompt": full_prompt,
-        "system": system,
-        "stream": do_stream,
-    }
+    messages = [
+        {
+            "role": "system",
+            "content": system,
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
 
     try:
-        if do_stream:
-            # Stream tokens back to the client
-            def generate():
-                with requests.post(
-                    f"{OLLAMA_ENDPOINT}/api/generate",
-                    json=payload,
-                    stream=True,
-                    timeout=OLLAMA_TIMEOUT,
-                ) as r:
-                    for chunk in r.iter_lines():
-                        if chunk:
-                            yield chunk + b"\n"
+        result = phala_request(messages, model)
 
-            return Response(
-                stream_with_context(generate()),
-                content_type="application/x-ndjson",
-            )
-        else:
-            r = requests.post(
-                f"{OLLAMA_ENDPOINT}/api/generate",
-                json=payload,
-                timeout=OLLAMA_TIMEOUT,
-            )
-            if r.status_code == 200:
-                result = r.json()
-                return jsonify({
-                    "status": "success",
-                    "response": result.get("response", ""),
-                    "model": model,
-                    "done": result.get("done", True),
-                })
-            else:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Ollama returned {r.status_code}: {r.text}",
-                }), 502
+        return jsonify({
+            "status": "success",
+            "response": result["choices"][0]["message"]["content"],
+            "model": model,
+        })
 
     except requests.exceptions.Timeout:
-        return jsonify({"status": "error", "message": "Ollama inference timed out"}), 504
+        return jsonify({
+            "status": "error",
+            "message": "Phala AI request timed out"
+        }), 504
+
+    except requests.exceptions.HTTPError as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Phala AI returned {e.response.status_code}: {e.response.text}"
+        }), 502
+
     except requests.exceptions.ConnectionError:
         return jsonify({
             "status": "error",
-            "message": f"Cannot connect to Ollama at {OLLAMA_ENDPOINT}. Is it running?",
+            "message": "Unable to connect to Phala AI"
         }), 503
+
     except Exception as exc:
-        log.error("inference error: %s", exc)
-        return jsonify({"status": "error", "message": str(exc)}), 500
+        log.exception("Inference error")
+
+        return jsonify({
+            "status": "error",
+            "message": str(exc)
+        }), 500
 
 
 @app.route("/chat", methods=["POST"])
 def chat():
     """
-    Chat-style endpoint using Ollama's /api/chat format.
-
     Request body:
-        {
-            "messages": [{"role": "user", "content": "..."}, ...],
-            "model": "optional-model-name"
-        }
+
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": "..."
+            }
+        ],
+        "model": "optional"
+    }
     """
+
     err = require_api_key()
     if err:
         return err
 
     data = request.get_json(silent=True) or {}
-    messages = data.get("messages", [])
-    model = data.get("model") or DEFAULT_MODEL
+
+    messages = data.get("messages")
 
     if not messages:
-        return jsonify({"status": "error", "message": "messages list is required"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "messages list is required"
+        }), 400
+
+    model = data.get("model") or DEFAULT_MODEL
 
     try:
-        r = requests.post(
-            f"{OLLAMA_ENDPOINT}/api/chat",
-            json={"model": model, "messages": messages, "stream": False},
-            timeout=OLLAMA_TIMEOUT,
-        )
-        if r.status_code == 200:
-            result = r.json()
-            return jsonify({
-                "status": "success",
-                "message": result.get("message", {}),
-                "model": model,
-            })
-        else:
-            return jsonify({"status": "error", "message": r.text}), 502
+        result = phala_request(messages, model)
+
+        return jsonify({
+            "status": "success",
+            "message": result["choices"][0]["message"],
+            "model": model,
+        })
+
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "status": "error",
+            "message": "Phala AI request timed out"
+        }), 504
+
+    except requests.exceptions.HTTPError as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Phala AI returned {e.response.status_code}: {e.response.text}"
+        }), 502
+
     except requests.exceptions.ConnectionError:
-        return jsonify({"status": "error", "message": "Ollama not available"}), 503
+        return jsonify({
+            "status": "error",
+            "message": "Unable to connect to Phala AI"
+        }), 503
+
     except Exception as exc:
-        log.error("chat error: %s", exc)
-        return jsonify({"status": "error", "message": str(exc)}), 500
+        log.exception("Chat error")
+
+        return jsonify({
+            "status": "error",
+            "message": str(exc)
+        }), 500
 
 
 # ---------------------------------------------------------------------------

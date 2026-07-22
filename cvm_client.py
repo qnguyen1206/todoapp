@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 import hashlib
+import uuid
 
 try:
     from cryptography.fernet import Fernet
@@ -18,6 +19,29 @@ try:
 except ImportError:
     ENCRYPTION_AVAILABLE = False
     print("cryptography not available. CVM end-to-end encryption will be disabled.")
+
+try:
+    from e2e_crypto import (
+        TASK_ENCRYPTION_PREFIX,
+        approval_payload,
+        decrypt_task as decrypt_task_v2,
+        encrypt_task as encrypt_task_v2,
+        generate_private_key,
+        private_key_from_b64,
+        private_key_to_b64,
+        public_key_to_b64,
+        sign_approval,
+        unwrap_workspace_key,
+        wrap_workspace_key,
+    )
+    PUBLIC_KEY_ENCRYPTION_AVAILABLE = True
+except ImportError:
+    PUBLIC_KEY_ENCRYPTION_AVAILABLE = False
+    print("cryptography is not available. Device-key encryption will be disabled.")
+
+
+class DeviceApprovalRequired(RuntimeError):
+    """Raised when a device has registered but has not been approved yet."""
 
 
 class CVMClient:
@@ -29,6 +53,10 @@ class CVMClient:
         self.encryption_key = None
         self.api_key = ""
         self.user_id = ""  # custom persistent user ID (empty = auto from hostname)
+        self.crypto_device_id = ""
+        self.crypto_encryption_private_key = ""
+        self.crypto_signing_private_key = ""
+        self._workspace_keys = {}
         self.load_cvm_config()
 
     def load_cvm_config(self):
@@ -41,6 +69,10 @@ class CVMClient:
                     self.encryption_key = config.get('encryption_key', None)
                     self.api_key = config.get('api_key', '')
                     self.user_id = config.get('user_id', '')
+                    crypto = config.get('crypto', {})
+                    self.crypto_device_id = crypto.get('device_id', '')
+                    self.crypto_encryption_private_key = crypto.get('encryption_private_key', '')
+                    self.crypto_signing_private_key = crypto.get('signing_private_key', '')
         except Exception as e:
             print(f"Failed to load CVM config: {e}")
             self.cvm_endpoints = {
@@ -51,14 +83,27 @@ class CVMClient:
             }
 
     def save_cvm_config(self):
-        """Save CVM configuration to file"""
+        """Save CVM configuration without discarding keys created by another client."""
         try:
-            config = {
+            config = {}
+            if os.path.exists(self.CVM_CONFIG_FILE):
+                try:
+                    with open(self.CVM_CONFIG_FILE, 'r') as f:
+                        config = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    config = {}
+            config.update({
                 'endpoints': self.cvm_endpoints,
                 'encryption_key': self.encryption_key,
                 'api_key': self.api_key,
                 'user_id': self.user_id,
-            }
+            })
+            if self.crypto_device_id and self.crypto_encryption_private_key and self.crypto_signing_private_key:
+                config['crypto'] = {
+                    'device_id': self.crypto_device_id,
+                    'encryption_private_key': self.crypto_encryption_private_key,
+                    'signing_private_key': self.crypto_signing_private_key,
+                }
             Path(self.CVM_CONFIG_FILE).parent.mkdir(parents=True, exist_ok=True)
             with open(self.CVM_CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2)
@@ -71,6 +116,42 @@ class CVMClient:
         if self.api_key:
             h["X-API-Key"] = self.api_key
         return h
+
+    def _ensure_device_keys(self):
+        """Create this computer's local ECDH and signing key pairs once."""
+        if not PUBLIC_KEY_ENCRYPTION_AVAILABLE:
+            return False
+        try:
+            if self.crypto_encryption_private_key and self.crypto_signing_private_key:
+                # Validate persisted material before relying on it.
+                private_key_from_b64(self.crypto_encryption_private_key)
+                private_key_from_b64(self.crypto_signing_private_key)
+                if self.crypto_device_id:
+                    return True
+            encryption_private_key = generate_private_key()
+            signing_private_key = generate_private_key()
+            self.crypto_device_id = uuid.uuid4().hex
+            self.crypto_encryption_private_key = private_key_to_b64(encryption_private_key)
+            self.crypto_signing_private_key = private_key_to_b64(signing_private_key)
+            self.save_cvm_config()
+            return True
+        except Exception as exc:
+            print(f"Failed to create local device keys: {exc}")
+            return False
+
+    def _device_key_material(self):
+        """Return the local private/public keys, generating them when possible."""
+        if not self._ensure_device_keys():
+            raise RuntimeError("Device-key encryption requires the cryptography package")
+        encryption_private_key = private_key_from_b64(self.crypto_encryption_private_key)
+        signing_private_key = private_key_from_b64(self.crypto_signing_private_key)
+        return {
+            'device_id': self.crypto_device_id,
+            'encryption_private_key': encryption_private_key,
+            'signing_private_key': signing_private_key,
+            'encryption_public_key': public_key_to_b64(encryption_private_key.public_key()),
+            'signing_public_key': public_key_to_b64(signing_private_key.public_key()),
+        }
     
     def set_endpoint(self, service_type, endpoint_url):
         """Set CVM endpoint for a specific service
@@ -108,8 +189,9 @@ class CVMClient:
 class CVMBackendClient(CVMClient):
     """Client for Phala CVM Backend Storage & Sync Service"""
 
-    # Prefix that marks an encrypted task blob in the notes field
+    # ENC1 is the legacy shared-secret format; ENC2 is device-key based.
     _ENC_PREFIX = "ENC1:"
+    _ENC2_PREFIX = "ENC2:"
 
     def _fernet(self):
         """Return a Fernet instance derived from the stored encryption key, or None."""
@@ -123,11 +205,145 @@ class CVMBackendClient(CVMClient):
             print(f"Fernet init failed: {e}")
             return None
 
-    def _encrypt_tasks(self, tasks):
+    def _crypto_request(self, method, path, **kwargs):
+        """Call the device-key registry; None means a backend is not configured."""
+        endpoint = self.cvm_endpoints.get('backend')
+        if not endpoint:
+            return None
+        kwargs.setdefault('headers', self._headers())
+        kwargs.setdefault('timeout', 10)
+        return requests.request(method, f"{endpoint}{path}", **kwargs)
+
+    def _get_crypto_devices(self, user_id):
+        response = self._crypto_request('GET', '/crypto/devices', params={'user_id': user_id})
+        if response is None or response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise RuntimeError(f"Could not load encryption devices: {response.text}")
+        return response.json().get('devices', [])
+
+    def get_encryption_devices(self, user_id):
+        """Return (success, devices-or-message) for the desktop pairing UI."""
+        try:
+            devices = self._get_crypto_devices(user_id)
+            if devices is None:
+                return False, "The deployed backend does not support device-key encryption yet."
+            return True, devices
+        except Exception as exc:
+            return False, str(exc)
+
+    def _workspace_key(self, user_id):
+        """Unlock this computer's workspace key, or register the computer once."""
+        if user_id in self._workspace_keys:
+            return self._workspace_keys[user_id]
+        if not PUBLIC_KEY_ENCRYPTION_AVAILABLE:
+            return None
+
+        devices = self._get_crypto_devices(user_id)
+        if devices is None:
+            return None  # A server from before the ENC2 protocol.
+
+        material = self._device_key_material()
+        own = next((d for d in devices if d.get('device_id') == material['device_id']), None)
+        if own is None:
+            candidate_key = os.urandom(32)
+            wrapped = wrap_workspace_key(
+                candidate_key,
+                material['encryption_public_key'],
+                user_id,
+                material['device_id'],
+            )
+            response = self._crypto_request(
+                'POST',
+                '/crypto/devices/register',
+                json={
+                    'user_id': user_id,
+                    'device_id': material['device_id'],
+                    'encryption_public_key': material['encryption_public_key'],
+                    'signing_public_key': material['signing_public_key'],
+                    'wrapped_workspace_key': wrapped,
+                },
+            )
+            if response is None or response.status_code == 404:
+                return None
+            if response.status_code not in (200, 201):
+                raise RuntimeError(f"Could not register this device: {response.text}")
+            own = response.json().get('device', {})
+            if own.get('status') == 'active':
+                self._workspace_keys[user_id] = candidate_key
+                return candidate_key
+
+        if own.get('status') != 'active':
+            raise DeviceApprovalRequired(
+                "This computer is waiting for approval from a device that already has access."
+            )
+        wrapped = own.get('wrapped_workspace_key')
+        if not wrapped:
+            raise RuntimeError("The approved device is missing its encrypted workspace key")
+        try:
+            workspace_key = unwrap_workspace_key(
+                wrapped,
+                material['encryption_private_key'],
+                user_id,
+                material['device_id'],
+            )
+        except Exception as exc:
+            raise RuntimeError("Could not unlock this device's workspace key") from exc
+        self._workspace_keys[user_id] = workspace_key
+        return workspace_key
+
+    def approve_encryption_device(self, user_id, device_id):
+        """Approve a pending device by wrapping the local key to its public key."""
+        workspace_key = self._workspace_key(user_id)
+        if not workspace_key:
+            raise RuntimeError("This backend does not support device-key encryption")
+        material = self._device_key_material()
+        devices = self._get_crypto_devices(user_id) or []
+        target = next((d for d in devices if d.get('device_id') == device_id), None)
+        if not target:
+            raise RuntimeError("The requested device no longer exists")
+        if target.get('status') != 'pending':
+            raise RuntimeError("The requested device is not waiting for approval")
+
+        wrapped = wrap_workspace_key(
+            workspace_key,
+            target['encryption_public_key'],
+            user_id,
+            device_id,
+        )
+        payload = approval_payload(
+            user_id,
+            device_id,
+            target['encryption_public_key'],
+            target['signing_public_key'],
+            wrapped,
+        )
+        response = self._crypto_request(
+            'POST',
+            f"/crypto/devices/{device_id}/approve",
+            json={
+                'user_id': user_id,
+                'approver_device_id': material['device_id'],
+                'wrapped_workspace_key': wrapped,
+                'signature': sign_approval(material['signing_private_key'], payload),
+                'signature_format': 'der',
+            },
+        )
+        if response is None or response.status_code == 404:
+            raise RuntimeError("The deployed backend does not support device approval yet")
+        if response.status_code != 200:
+            raise RuntimeError(f"Could not approve device: {response.text}")
+        return response.json().get('device', {})
+
+    def _encrypt_tasks(self, user_id, tasks):
         """Encrypt title+notes of every task before sending to CVM.
         Keeps due_date/due_time/priority in plaintext so the backend can sort.
         Returns tasks unchanged if no encryption key is configured.
         """
+        workspace_key = self._workspace_key(user_id)
+        if workspace_key:
+            return [encrypt_task_v2(task, workspace_key, user_id) for task in tasks]
+
         f = self._fernet()
         if not f:
             return tasks
@@ -142,10 +358,33 @@ class CVMBackendClient(CVMClient):
             encrypted.append(t)
         return encrypted
 
-    def _decrypt_tasks(self, tasks):
+    def _decrypt_tasks(self, user_id, tasks):
         """Decrypt title+notes of tasks received from CVM.
         Returns tasks unchanged if no key or not encrypted.
         """
+        workspace_key = self._workspace_key(user_id)
+        has_modern_tasks = any(
+            isinstance(task.get("notes"), str) and task["notes"].startswith(self._ENC2_PREFIX)
+            for task in tasks
+        )
+        if has_modern_tasks and not workspace_key:
+            raise DeviceApprovalRequired(
+                "This computer cannot read encrypted tasks until an existing device approves it."
+            )
+
+        decrypted_modern = []
+        for task in tasks:
+            t = dict(task)
+            notes = t.get("notes", "")
+            if isinstance(notes, str) and notes.startswith(self._ENC2_PREFIX):
+                try:
+                    t = decrypt_task_v2(t, workspace_key, user_id)
+                except Exception:
+                    t["title"] = "[Decryption failed]"
+                    t["notes"] = ""
+            decrypted_modern.append(t)
+        tasks = decrypted_modern
+
         f = self._fernet()
         if not f:
             return tasks
@@ -174,7 +413,7 @@ class CVMBackendClient(CVMClient):
         try:
             payload = {
                 'user_id': user_id,
-                'tasks':   self._encrypt_tasks(tasks_data),
+                'tasks':   self._encrypt_tasks(user_id, tasks_data),
                 'timestamp': datetime.now().isoformat()
             }
             response = requests.post(
@@ -200,7 +439,7 @@ class CVMBackendClient(CVMClient):
         try:
             payload = {
                 'user_id': user_id,
-                'tasks':   self._encrypt_tasks(tasks_data),
+                'tasks':   self._encrypt_tasks(user_id, tasks_data),
                 'timestamp': datetime.now().isoformat()
             }
             response = requests.post(
@@ -233,7 +472,7 @@ class CVMBackendClient(CVMClient):
             )
             if response.status_code == 200:
                 raw = response.json().get('tasks', [])
-                return True, self._decrypt_tasks(raw)
+                return True, self._decrypt_tasks(user_id, raw)
             else:
                 return False, f"Retrieval failed: {response.text}"
         except Exception as e:
@@ -248,7 +487,7 @@ class CVMBackendClient(CVMClient):
         try:
             payload = {
                 'user_id':    user_id,
-                'local_tasks': self._encrypt_tasks(local_tasks),
+                'local_tasks': self._encrypt_tasks(user_id, local_tasks),
                 'last_sync':  last_sync_time or datetime.now().isoformat()
             }
             response = requests.post(
@@ -259,7 +498,7 @@ class CVMBackendClient(CVMClient):
             )
             if response.status_code == 200:
                 raw = response.json().get('synced_tasks', [])
-                return True, self._decrypt_tasks(raw)
+                return True, self._decrypt_tasks(user_id, raw)
             else:
                 return False, f"Sync failed: {response.text}"
         except Exception as e:

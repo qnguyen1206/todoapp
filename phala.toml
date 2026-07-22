@@ -1,0 +1,4 @@
+app_id = "7ae3718bfb21f7feac51d3b223df22e26d7d67e1"
+name = "todoapp"
+profile = "quangs-projects"
+compose_file = "docker-compose.yml"
