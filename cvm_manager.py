@@ -487,6 +487,29 @@ class CVMManager:
         self.parent_app.root.after(0, mgr.refresh_task_list)
         return len(converted)
 
+    def _approve_pending_devices_best_effort(self, user_id):
+        """Approve pending ENC2 devices so they can decrypt shared workspace tasks.
+
+        This runs best-effort after desktop-originated push/sync operations.
+        """
+        try:
+            success, devices_or_error = self.backend_client.get_encryption_devices(user_id)
+            if not success or not isinstance(devices_or_error, list):
+                return
+
+            own_id = getattr(self.backend_client, 'crypto_device_id', '')
+            for device in devices_or_error:
+                device_id = device.get('device_id', '')
+                status = device.get('status', '')
+                if not device_id or status != 'pending' or device_id == own_id:
+                    continue
+                try:
+                    self.backend_client.approve_encryption_device(user_id, device_id)
+                except Exception as approve_err:
+                    print(f"Could not approve device {device_id}: {approve_err}")
+        except Exception as e:
+            print(f"Pending device approval check failed: {e}")
+
     # ------------------------------------------------------------------
     # Push / Pull / Sync actions (called from menu)
     # ------------------------------------------------------------------
@@ -523,6 +546,8 @@ class CVMManager:
 
         def do_replace():
             success, msg = self.backend_client.replace_tasks(user_id, tasks)
+            if success:
+                self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
                     messagebox.showinfo("Force Push Successful", msg, parent=self.parent_app.root)
@@ -570,6 +595,8 @@ class CVMManager:
 
         def do_push():
             success, msg = self.backend_client.store_tasks(user_id, tasks)
+            if success:
+                self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
                     messagebox.showinfo(
@@ -635,6 +662,8 @@ class CVMManager:
 
         def do_sync():
             success, data = self.backend_client.sync_tasks(user_id, local_tasks)
+            if success:
+                self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
                     count = self._apply_remote_tasks(data)

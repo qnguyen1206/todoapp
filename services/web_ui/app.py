@@ -10,6 +10,7 @@ import hashlib
 import base64
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timezone, date
 from pathlib import Path
 
@@ -23,6 +24,20 @@ try:
 except ImportError:
     Fernet = None
     FERNET_AVAILABLE = False
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    ASYMMETRIC_CRYPTO_AVAILABLE = True
+except ImportError:
+    hashes = None
+    serialization = None
+    ec = None
+    AESGCM = None
+    HKDF = None
+    ASYMMETRIC_CRYPTO_AVAILABLE = False
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "info").upper())
 log = logging.getLogger(__name__)
@@ -38,7 +53,12 @@ AI_URL           = os.getenv("AI_URL",         "http://ai_inference:5001")
 SYNC_URL         = os.getenv("SYNC_URL",       "http://task_sync:5002")
 SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 API_KEY          = os.getenv("API_KEY",        "")
-ENCRYPTION_KEY   = os.getenv("ENCRYPTION_KEY", "")
+WEB_UI_ENCRYPTION_KEY = os.getenv("WEB_UI_ENCRYPTION_KEY", "")
+
+TASK_ENCRYPTION_PREFIX = "ENC2:"
+KEY_WRAP_INFO = b"todoapp-keywrap-v1"
+TASK_INFO_PREFIX = "todoapp-task-v2"
+_WORKSPACE_KEY_CACHE = {}
 
 # Stable user ID for this web session — override via WEB_USER_ID env var
 # to match your desktop user ID for seamless sync.
@@ -128,21 +148,324 @@ def _task_color(due_date_str):
     return ""
 
 
+def _b64url_encode(value):
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value):
+    if not isinstance(value, str):
+        raise ValueError("Expected Base64 string")
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _task_context(user_id, task_id):
+    return f"{TASK_INFO_PREFIX}|{user_id}|{task_id}".encode("utf-8")
+
+
+def _key_wrap_context(user_id, device_id):
+    return f"{KEY_WRAP_INFO.decode()}|{user_id}|{device_id}".encode("utf-8")
+
+
+def _private_key_to_b64(private_key):
+    data = private_key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return _b64url_encode(data)
+
+
+def _private_key_from_b64(value):
+    private_key = serialization.load_der_private_key(_b64url_decode(value), password=None)
+    if not isinstance(private_key, ec.EllipticCurvePrivateKey) or not isinstance(private_key.curve, ec.SECP256R1):
+        raise ValueError("Expected P-256 private key")
+    return private_key
+
+
+def _public_key_to_b64(public_key):
+    data = public_key.public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return _b64url_encode(data)
+
+
+def _public_key_from_b64(value):
+    try:
+        return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), _b64url_decode(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid P-256 public key") from exc
+
+
+def _derive_wrapping_key(private_key, peer_public_key, salt):
+    shared_secret = private_key.exchange(ec.ECDH(), peer_public_key)
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=KEY_WRAP_INFO,
+    ).derive(shared_secret)
+
+
+def _wrap_workspace_key(workspace_key, recipient_public_key, user_id, device_id):
+    recipient = _public_key_from_b64(recipient_public_key)
+    ephemeral_private = ec.generate_private_key(ec.SECP256R1())
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    wrapping_key = _derive_wrapping_key(ephemeral_private, recipient, salt)
+    ciphertext = AESGCM(wrapping_key).encrypt(nonce, workspace_key, _key_wrap_context(user_id, device_id))
+    return {
+        "v": 1,
+        "ephemeral_public_key": _public_key_to_b64(ephemeral_private.public_key()),
+        "salt": _b64url_encode(salt),
+        "nonce": _b64url_encode(nonce),
+        "ciphertext": _b64url_encode(ciphertext),
+    }
+
+
+def _unwrap_workspace_key(envelope, recipient_private_key, user_id, device_id):
+    if not isinstance(envelope, dict) or envelope.get("v") != 1:
+        raise ValueError("Unsupported workspace-key envelope")
+    ephemeral_public = _public_key_from_b64(envelope["ephemeral_public_key"])
+    salt = _b64url_decode(envelope["salt"])
+    nonce = _b64url_decode(envelope["nonce"])
+    ciphertext = _b64url_decode(envelope["ciphertext"])
+    wrapping_key = _derive_wrapping_key(recipient_private_key, ephemeral_public, salt)
+    workspace_key = AESGCM(wrapping_key).decrypt(
+        nonce,
+        ciphertext,
+        _key_wrap_context(user_id, device_id),
+    )
+    if len(workspace_key) != 32:
+        raise ValueError("Invalid workspace key")
+    return workspace_key
+
+
+def _encrypt_task_v2(task, workspace_key, user_id):
+    t = dict(task)
+    task_id = str(t.get("id") or t.get("task_id") or "")
+    if not task_id:
+        raise ValueError("Task ID required")
+    sensitive = json.dumps(
+        {"title": t.get("title", ""), "notes": t.get("notes", "")},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(workspace_key).encrypt(nonce, sensitive, _task_context(user_id, task_id))
+    payload = _b64url_encode(
+        json.dumps(
+            {"v": 2, "nonce": _b64url_encode(nonce), "ciphertext": _b64url_encode(ciphertext)},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    t["title"] = "[Encrypted]"
+    t["notes"] = TASK_ENCRYPTION_PREFIX + payload
+    return t
+
+
+def _decrypt_task_v2(task, workspace_key, user_id):
+    t = dict(task)
+    notes = t.get("notes", "")
+    if not (isinstance(notes, str) and notes.startswith(TASK_ENCRYPTION_PREFIX)):
+        return t
+    task_id = str(t.get("id") or t.get("task_id") or "")
+    if not task_id:
+        raise ValueError("Task ID required")
+    payload = json.loads(_b64url_decode(notes[len(TASK_ENCRYPTION_PREFIX):]).decode("utf-8"))
+    if payload.get("v") != 2:
+        raise ValueError("Unsupported ENC2 version")
+    nonce = _b64url_decode(payload["nonce"])
+    ciphertext = _b64url_decode(payload["ciphertext"])
+    sensitive = json.loads(
+        AESGCM(workspace_key).decrypt(
+            nonce,
+            ciphertext,
+            _task_context(user_id, task_id),
+        ).decode("utf-8")
+    )
+    t["title"] = sensitive.get("title", "")
+    t["notes"] = sensitive.get("notes", "")
+    return t
+
+
+def _ensure_web_device_material():
+    """Generate and persist web-ui specific device keys (never desktop keys)."""
+    if not ASYMMETRIC_CRYPTO_AVAILABLE:
+        return None
+
+    device_id = _get_setting("crypto_device_id", "")
+    enc_priv_b64 = _get_setting("crypto_encryption_private_key", "")
+    sign_priv_b64 = _get_setting("crypto_signing_private_key", "")
+
+    try:
+        if device_id and enc_priv_b64 and sign_priv_b64:
+            enc_private = _private_key_from_b64(enc_priv_b64)
+            sign_private = _private_key_from_b64(sign_priv_b64)
+            return {
+                "device_id": device_id,
+                "enc_private": enc_private,
+                "sign_private": sign_private,
+                "enc_public": _public_key_to_b64(enc_private.public_key()),
+                "sign_public": _public_key_to_b64(sign_private.public_key()),
+            }
+    except Exception:
+        pass
+
+    enc_private = ec.generate_private_key(ec.SECP256R1())
+    sign_private = ec.generate_private_key(ec.SECP256R1())
+    device_id = uuid.uuid4().hex
+
+    _set_setting("crypto_device_id", device_id)
+    _set_setting("crypto_encryption_private_key", _private_key_to_b64(enc_private))
+    _set_setting("crypto_signing_private_key", _private_key_to_b64(sign_private))
+
+    return {
+        "device_id": device_id,
+        "enc_private": enc_private,
+        "sign_private": sign_private,
+        "enc_public": _public_key_to_b64(enc_private.public_key()),
+        "sign_public": _public_key_to_b64(sign_private.public_key()),
+    }
+
+
+def _workspace_key_for_user(user_id):
+    """Return this web-ui device's unwrapped workspace key for ENC2, if approved."""
+    if user_id in _WORKSPACE_KEY_CACHE:
+        return _WORKSPACE_KEY_CACHE[user_id]
+    if not ASYMMETRIC_CRYPTO_AVAILABLE:
+        return None
+
+    material = _ensure_web_device_material()
+    if not material:
+        return None
+
+    try:
+        resp = _backend("GET", "/crypto/devices", params={"user_id": user_id})
+    except Exception:
+        return None
+
+    if resp.status_code == 404:
+        # Backend not upgraded for ENC2.
+        return None
+    if resp.status_code != 200:
+        return None
+
+    devices = resp.json().get("devices", [])
+    own = next((d for d in devices if d.get("device_id") == material["device_id"]), None)
+
+    if own is None:
+        candidate_key = os.urandom(32)
+        wrapped = _wrap_workspace_key(
+            candidate_key,
+            material["enc_public"],
+            user_id,
+            material["device_id"],
+        )
+        register_payload = {
+            "user_id": user_id,
+            "device_id": material["device_id"],
+            "encryption_public_key": material["enc_public"],
+            "signing_public_key": material["sign_public"],
+            "wrapped_workspace_key": wrapped,
+        }
+        try:
+            reg_resp = _backend("POST", "/crypto/devices/register", json=register_payload)
+        except Exception:
+            return None
+        if reg_resp.status_code in (200, 201):
+            own = reg_resp.json().get("device", {})
+            if own.get("status") == "active":
+                _WORKSPACE_KEY_CACHE[user_id] = candidate_key
+                return candidate_key
+        return None
+
+    if own.get("status") != "active":
+        return None
+
+    wrapped = own.get("wrapped_workspace_key")
+    if not wrapped:
+        return None
+
+    try:
+        workspace_key = _unwrap_workspace_key(
+            wrapped,
+            material["enc_private"],
+            user_id,
+            material["device_id"],
+        )
+        _WORKSPACE_KEY_CACHE[user_id] = workspace_key
+        return workspace_key
+    except Exception:
+        return None
+
+
 def _legacy_fernet():
-    """Create Fernet compatible with desktop client's ENC1 encryption format."""
-    if not (FERNET_AVAILABLE and ENCRYPTION_KEY):
+    """Create Fernet for web-ui owned ENC1 encryption/decryption."""
+    if not (FERNET_AVAILABLE and WEB_UI_ENCRYPTION_KEY):
         return None
     try:
-        raw = hashlib.sha256(ENCRYPTION_KEY.encode("utf-8")).digest()
+        raw = hashlib.sha256(WEB_UI_ENCRYPTION_KEY.encode("utf-8")).digest()
         return Fernet(base64.urlsafe_b64encode(raw))
     except Exception:
         return None
 
 
-def _decrypt_task_if_needed(task):
-    """Decrypt legacy ENC1 task payloads so web UI can show plaintext title/notes."""
+def _encrypt_task_if_needed(task, user_id):
+    """Encrypt title+notes with ENC2 when approved; fallback to web-ui ENC1."""
     t = dict(task)
     notes = t.get("notes", "")
+    if isinstance(notes, str) and notes.startswith(TASK_ENCRYPTION_PREFIX):
+        return t
+
+    workspace_key = _workspace_key_for_user(user_id)
+    if workspace_key:
+        try:
+            return _encrypt_task_v2(t, workspace_key, user_id)
+        except Exception:
+            pass
+
+    f = _legacy_fernet()
+    if not f:
+        return t
+    if isinstance(notes, str) and notes.startswith("ENC1:"):
+        return t
+
+    sensitive = json.dumps(
+        {
+            "title": t.get("title", ""),
+            "notes": t.get("notes", ""),
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    t["notes"] = "ENC1:" + f.encrypt(sensitive.encode("utf-8")).decode("utf-8")
+    t["title"] = "[Encrypted]"
+    return t
+
+
+def _encrypt_tasks(tasks, user_id):
+    return [_encrypt_task_if_needed(task, user_id) for task in tasks]
+
+
+def _decrypt_task_if_needed(task, user_id):
+    """Decrypt ENC2 with web device key, fallback ENC1 with web-ui key."""
+    t = dict(task)
+    notes = t.get("notes", "")
+
+    if isinstance(notes, str) and notes.startswith(TASK_ENCRYPTION_PREFIX):
+        workspace_key = _workspace_key_for_user(user_id)
+        if not workspace_key:
+            t["title"] = "[Encrypted - web device approval required]"
+            t["notes"] = ""
+            return t
+        try:
+            return _decrypt_task_v2(t, workspace_key, user_id)
+        except Exception:
+            t["title"] = "[Encrypted - different key or corrupted payload]"
+            t["notes"] = ""
+            return t
+
     if not (isinstance(notes, str) and notes.startswith("ENC1:")):
         return t
 
@@ -156,14 +479,14 @@ def _decrypt_task_if_needed(task):
         t["title"] = payload.get("title", t.get("title", ""))
         t["notes"] = payload.get("notes", "")
     except Exception:
-        t["title"] = "[Decryption failed]"
+        t["title"] = "[Encrypted - different key]"
         t["notes"] = ""
 
     return t
 
 
-def _decrypt_tasks(tasks):
-    return [_decrypt_task_if_needed(task) for task in tasks]
+def _decrypt_tasks(tasks, user_id):
+    return [_decrypt_task_if_needed(task, user_id) for task in tasks]
 
 # ---------------------------------------------------------------------------
 # Page routes
@@ -180,7 +503,7 @@ def get_tasks():
     try:
         r = _backend("GET", f"/tasks/retrieve", params={"user_id": USER_ID})
         if r.status_code == 200:
-            tasks = _decrypt_tasks(r.json().get("tasks", []))
+            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
             # Annotate with color
             for t in tasks:
                 t["color"] = _task_color(t.get("due_date", ""))
@@ -219,7 +542,7 @@ def add_task():
     task = {"id": task_id, "title": title, "due_date": due_date,
             "due_time": due_time, "priority": priority, "notes": notes, "completed": False}
     try:
-        r = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": [task],
+        r = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": _encrypt_tasks([task], USER_ID),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
         if r.status_code == 200:
             return jsonify({"status": "success", "task": task})
@@ -240,7 +563,7 @@ def edit_task(task_id):
         "completed": data.get("completed", False),
     }
     try:
-        r = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": [task],
+        r = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": _encrypt_tasks([task], USER_ID),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
         if r.status_code == 200:
             return jsonify({"status": "success"})
@@ -253,7 +576,7 @@ def complete_task(task_id):
     # Fetch current task, mark completed, upsert back
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", [])) if r.status_code == 200 else []
+        tasks = r.json().get("tasks", []) if r.status_code == 200 else []
         task = next((t for t in tasks if t.get("task_id") == task_id), None)
         if not task:
             return jsonify({"status": "error", "message": "Task not found"}), 404
@@ -371,7 +694,7 @@ def ai_health():
 def calendar_data(year, month):
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", [])) if r.status_code == 200 else []
+        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
     except Exception:
         tasks = []
 
@@ -395,7 +718,7 @@ def weekly_data():
     from datetime import timedelta
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", [])) if r.status_code == 200 else []
+        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
     except Exception:
         tasks = []
 
@@ -436,10 +759,37 @@ def get_character():
 # ---------------------------------------------------------------------------
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
+    workspace_key_ready = bool(_workspace_key_for_user(USER_ID))
     return jsonify({"status": "success", "settings": {
         "use_24_hour": _get_setting("use_24_hour", "true") == "true",
         "web_user_id": USER_ID,
+        "crypto": {
+            "device_id": _get_setting("crypto_device_id", "") or None,
+            "workspace_key_ready": workspace_key_ready,
+            "enc2_supported": ASYMMETRIC_CRYPTO_AVAILABLE,
+        },
     }})
+
+
+@app.route("/api/crypto/status", methods=["GET"])
+def crypto_status():
+    """Return web-ui device encryption status for troubleshooting ENC2 access."""
+    try:
+        resp = _backend("GET", "/crypto/devices", params={"user_id": USER_ID})
+        devices = resp.json().get("devices", []) if resp.status_code == 200 else []
+    except Exception:
+        devices = []
+
+    device_id = _get_setting("crypto_device_id", "")
+    own = next((d for d in devices if d.get("device_id") == device_id), None)
+    return jsonify({
+        "status": "success",
+        "enc2_supported": ASYMMETRIC_CRYPTO_AVAILABLE,
+        "device_id": device_id or None,
+        "device_status": own.get("status") if own else "not_registered",
+        "workspace_key_ready": bool(_workspace_key_for_user(USER_ID)),
+        "user_id": USER_ID,
+    })
 
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
