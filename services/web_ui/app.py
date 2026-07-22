@@ -7,6 +7,7 @@ Proxies task/AI/sync requests to the internal CVM services.
 import os
 import json
 import hashlib
+import base64
 import logging
 import sqlite3
 from datetime import datetime, timezone, date
@@ -15,6 +16,13 @@ from pathlib import Path
 import requests as req
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_cors import CORS
+
+try:
+    from cryptography.fernet import Fernet
+    FERNET_AVAILABLE = True
+except ImportError:
+    Fernet = None
+    FERNET_AVAILABLE = False
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "info").upper())
 log = logging.getLogger(__name__)
@@ -30,6 +38,7 @@ AI_URL           = os.getenv("AI_URL",         "http://ai_inference:5001")
 SYNC_URL         = os.getenv("SYNC_URL",       "http://task_sync:5002")
 SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 API_KEY          = os.getenv("API_KEY",        "")
+ENCRYPTION_KEY   = os.getenv("ENCRYPTION_KEY", "")
 
 # Stable user ID for this web session — override via WEB_USER_ID env var
 # to match your desktop user ID for seamless sync.
@@ -118,6 +127,44 @@ def _task_color(due_date_str):
         pass
     return ""
 
+
+def _legacy_fernet():
+    """Create Fernet compatible with desktop client's ENC1 encryption format."""
+    if not (FERNET_AVAILABLE and ENCRYPTION_KEY):
+        return None
+    try:
+        raw = hashlib.sha256(ENCRYPTION_KEY.encode("utf-8")).digest()
+        return Fernet(base64.urlsafe_b64encode(raw))
+    except Exception:
+        return None
+
+
+def _decrypt_task_if_needed(task):
+    """Decrypt legacy ENC1 task payloads so web UI can show plaintext title/notes."""
+    t = dict(task)
+    notes = t.get("notes", "")
+    if not (isinstance(notes, str) and notes.startswith("ENC1:")):
+        return t
+
+    f = _legacy_fernet()
+    if not f:
+        return t
+
+    try:
+        ciphertext = notes[len("ENC1:"):]
+        payload = json.loads(f.decrypt(ciphertext.encode("utf-8")).decode("utf-8"))
+        t["title"] = payload.get("title", t.get("title", ""))
+        t["notes"] = payload.get("notes", "")
+    except Exception:
+        t["title"] = "[Decryption failed]"
+        t["notes"] = ""
+
+    return t
+
+
+def _decrypt_tasks(tasks):
+    return [_decrypt_task_if_needed(task) for task in tasks]
+
 # ---------------------------------------------------------------------------
 # Page routes
 # ---------------------------------------------------------------------------
@@ -133,7 +180,7 @@ def get_tasks():
     try:
         r = _backend("GET", f"/tasks/retrieve", params={"user_id": USER_ID})
         if r.status_code == 200:
-            tasks = r.json().get("tasks", [])
+            tasks = _decrypt_tasks(r.json().get("tasks", []))
             # Annotate with color
             for t in tasks:
                 t["color"] = _task_color(t.get("due_date", ""))
@@ -206,7 +253,7 @@ def complete_task(task_id):
     # Fetch current task, mark completed, upsert back
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = r.json().get("tasks", []) if r.status_code == 200 else []
+        tasks = _decrypt_tasks(r.json().get("tasks", [])) if r.status_code == 200 else []
         task = next((t for t in tasks if t.get("task_id") == task_id), None)
         if not task:
             return jsonify({"status": "error", "message": "Task not found"}), 404
@@ -324,7 +371,7 @@ def ai_health():
 def calendar_data(year, month):
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = r.json().get("tasks", []) if r.status_code == 200 else []
+        tasks = _decrypt_tasks(r.json().get("tasks", [])) if r.status_code == 200 else []
     except Exception:
         tasks = []
 
@@ -348,7 +395,7 @@ def weekly_data():
     from datetime import timedelta
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = r.json().get("tasks", []) if r.status_code == 200 else []
+        tasks = _decrypt_tasks(r.json().get("tasks", [])) if r.status_code == 200 else []
     except Exception:
         tasks = []
 
