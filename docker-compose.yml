@@ -182,7 +182,6 @@ services:
       SYNC_URL:      http://task_sync:5002
       SCHEDULER_URL: http://scheduler:5003
       API_KEY:       ${API_KEY}             # [SECURE] – Phala dashboard (same key as other services)
-      WEB_UI_ENCRYPTION_KEY: ${WEB_UI_ENCRYPTION_KEY}  # [SECURE] – web-ui-owned key for ENC1 task encryption
       WEB_USER_ID:   ${WEB_USER_ID:-}       # Optional: set to match your desktop user ID
       ENVIRONMENT:   production
       LOG_LEVEL:     ${LOG_LEVEL:-info}

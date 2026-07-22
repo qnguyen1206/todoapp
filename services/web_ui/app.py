@@ -19,13 +19,6 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_cors import CORS
 
 try:
-    from cryptography.fernet import Fernet
-    FERNET_AVAILABLE = True
-except ImportError:
-    Fernet = None
-    FERNET_AVAILABLE = False
-
-try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -53,7 +46,6 @@ AI_URL           = os.getenv("AI_URL",         "http://ai_inference:5001")
 SYNC_URL         = os.getenv("SYNC_URL",       "http://task_sync:5002")
 SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 API_KEY          = os.getenv("API_KEY",        "")
-WEB_UI_ENCRYPTION_KEY = os.getenv("WEB_UI_ENCRYPTION_KEY", "")
 
 TASK_ENCRYPTION_PREFIX = "ENC2:"
 KEY_WRAP_INFO = b"todoapp-keywrap-v1"
@@ -400,48 +392,13 @@ def _workspace_key_for_user(user_id):
         return None
 
 
-def _legacy_fernet():
-    """Create Fernet for web-ui owned ENC1 encryption/decryption."""
-    if not (FERNET_AVAILABLE and WEB_UI_ENCRYPTION_KEY):
-        return None
-    try:
-        raw = hashlib.sha256(WEB_UI_ENCRYPTION_KEY.encode("utf-8")).digest()
-        return Fernet(base64.urlsafe_b64encode(raw))
-    except Exception:
-        return None
-
-
 def _encrypt_task_if_needed(task, user_id):
-    """Encrypt title+notes with ENC2 when approved; fallback to web-ui ENC1."""
+    """Encrypt title+notes with ENC2 when this web device has been approved."""
     t = dict(task)
-    notes = t.get("notes", "")
-    if isinstance(notes, str) and notes.startswith(TASK_ENCRYPTION_PREFIX):
-        return t
-
     workspace_key = _workspace_key_for_user(user_id)
     if workspace_key:
-        try:
-            return _encrypt_task_v2(t, workspace_key, user_id)
-        except Exception:
-            pass
-
-    f = _legacy_fernet()
-    if not f:
-        return t
-    if isinstance(notes, str) and notes.startswith("ENC1:"):
-        return t
-
-    sensitive = json.dumps(
-        {
-            "title": t.get("title", ""),
-            "notes": t.get("notes", ""),
-        },
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    t["notes"] = "ENC1:" + f.encrypt(sensitive.encode("utf-8")).decode("utf-8")
-    t["title"] = "[Encrypted]"
-    return t
+        return _encrypt_task_v2(t, workspace_key, user_id)
+    raise RuntimeError("Web UI device has not been approved for encrypted task storage yet")
 
 
 def _encrypt_tasks(tasks, user_id):
@@ -449,7 +406,7 @@ def _encrypt_tasks(tasks, user_id):
 
 
 def _decrypt_task_if_needed(task, user_id):
-    """Decrypt ENC2 with web device key, fallback ENC1 with web-ui key."""
+    """Decrypt ENC2 with the web UI device's workspace key."""
     t = dict(task)
     notes = t.get("notes", "")
 
@@ -465,23 +422,6 @@ def _decrypt_task_if_needed(task, user_id):
             t["title"] = "[Encrypted - different key or corrupted payload]"
             t["notes"] = ""
             return t
-
-    if not (isinstance(notes, str) and notes.startswith("ENC1:")):
-        return t
-
-    f = _legacy_fernet()
-    if not f:
-        return t
-
-    try:
-        ciphertext = notes[len("ENC1:"):]
-        payload = json.loads(f.decrypt(ciphertext.encode("utf-8")).decode("utf-8"))
-        t["title"] = payload.get("title", t.get("title", ""))
-        t["notes"] = payload.get("notes", "")
-    except Exception:
-        t["title"] = "[Encrypted - different key]"
-        t["notes"] = ""
-
     return t
 
 
@@ -576,7 +516,7 @@ def complete_task(task_id):
     # Fetch current task, mark completed, upsert back
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = r.json().get("tasks", []) if r.status_code == 200 else []
+        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
         task = next((t for t in tasks if t.get("task_id") == task_id), None)
         if not task:
             return jsonify({"status": "error", "message": "Task not found"}), 404
