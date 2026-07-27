@@ -9,6 +9,7 @@
 #        docker build -t kairu1206/cvm-ai:latest        ./services/ai_inference && docker push kairu1206/cvm-ai:latest
 #        docker build -t kairu1206/cvm-sync:latest      ./services/task_sync    && docker push kairu1206/cvm-sync:latest
 #        docker build -t kairu1206/cvm-scheduler:latest ./services/scheduler    && docker push kairu1206/cvm-scheduler:latest
+#        docker build -t kairu1206/cvm-webui:latest ./services/web_ui && docker push kairu1206/cvm-webui:latest
 #
 #   1. Paste this file into https://cloud.phala.com → Create CVM → Advanced tab.
 #   2. Set ALL env vars marked [SECURE] in the Phala dashboard "Environment Variables" panel.
@@ -91,9 +92,9 @@ services:
       DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
       API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
       
-      PHALA_AI_URL: https://inference.phala.com/v1/completions
+      PHALA_AI_URL: https://inference.phala.com/v1/chat/completions
       PHALA_AI_API_KEY: ${PHALA_AI_API_KEY}
-      PHALA_AI_MODEL: ${PHALA_AI_MODEL:-phala/qwen3.5-27b}
+      PHALA_AI_MODEL: ${PHALA_AI_MODEL:-deepseek/deepseek-v4-flash}
 
       ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}

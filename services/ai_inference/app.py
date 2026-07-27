@@ -34,7 +34,7 @@ PHALA_AI_API_KEY = os.getenv("PHALA_AI_API_KEY", "")
 
 DEFAULT_MODEL = os.getenv(
     "PHALA_AI_MODEL",
-    "phala/qwen3.5-27b",
+    "deepseek/deepseek-v4-flash",
 )
 
 AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "120"))

@@ -26,6 +26,19 @@ header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 16px; height: 48px; box-shadow: var(--shadow);
 }
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.header-left a {
+  display: flex;
+  align-items: center;
+}
+.header-left img {
+  height: 22px;   /* adjust to 20-24px as desired */
+  width: auto;
+}
 .app-title { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
 .header-right { display: flex; gap: 8px; }
 .stat-badge {
