@@ -213,13 +213,16 @@ async function loadDaily() {
     list.innerHTML = '<li class="empty-msg">No daily tasks yet.</li>';
     return;
   }
-  list.innerHTML = tasks.map(t => `
+  list.innerHTML = tasks.map(t => {
+    const safeId = encodeURIComponent(String(t.id ?? ''));
+    return `
     <li class="daily-item ${t.done ? 'done' : ''}">
       <input type="checkbox" class="daily-check" ${t.done ? 'checked' : ''}
-             onchange="toggleDaily(${t.id})"/>
+             onchange="toggleDaily('${safeId}')"/>
       <span class="daily-title">${escHtml(t.title)}</span>
-      <button class="btn btn-sm btn-danger" onclick="deleteDaily(${t.id})">✗</button>
-    </li>`).join('');
+      <button class="btn btn-sm btn-danger" onclick="deleteDaily('${safeId}')">✗</button>
+    </li>`;
+  }).join('');
 }
 
 async function addDailyTask() {
@@ -397,18 +400,44 @@ async function saveSetting(key, value) {
 async function checkHealth() {
   const out = document.getElementById('health-output');
   out.textContent = 'Checking…';
-  const endpoints = [
-    ['/api/ai/health', 'AI Inference'],
-    ['/health', 'Web UI'],
-  ];
-  const results = await Promise.allSettled(endpoints.map(([path]) => api('GET', path)));
-  out.textContent = endpoints.map(([_, name], i) => {
-    const r = results[i];
-    if (r.status === 'fulfilled') {
-      return `${name}: ${r.value.status ?? 'ok'}`;
+  try {
+    const data = await api('GET', '/api/health/all');
+    const services = data.services ?? {};
+    const labels = {
+      web_ui: 'Web UI',
+      backend: 'Backend Storage',
+      ai_inference: 'AI Inference',
+      task_sync: 'Task Sync',
+      scheduler: 'Scheduler',
+    };
+
+    const order = ['web_ui', 'backend', 'ai_inference', 'task_sync', 'scheduler'];
+    const lines = [];
+    const overallClass = data.overall_ok ? 'ok' : 'degraded';
+    const overallText = data.overall_ok ? 'Overall: OK' : 'Overall: DEGRADED';
+    lines.push(`<div class="overall ${overallClass}">${escHtml(overallText)}</div>`);
+
+    for (const key of order) {
+      const svc = services[key] || {};
+      const name = labels[key] || key;
+      const status = svc.status || 'unknown';
+      const code = svc.code || 0;
+      const badge = svc.ok ? 'OK' : 'ERROR';
+      const badgeClass = svc.ok ? 'ok' : 'error';
+      const detail = svc.message ? ` - ${svc.message}` : '';
+      lines.push(
+        `<div class="health-row">` +
+          `<span class="service-name">${escHtml(name)}:</span>` +
+          `<span class="status-badge ${badgeClass}">${escHtml(badge)}</span>` +
+          `<span class="status-detail">(${escHtml(status)}, HTTP ${escHtml(code)})${escHtml(detail)}</span>` +
+        `</div>`
+      );
     }
-    return `${name}: ERROR – ${r.reason}`;
-  }).join('\n');
+
+    out.innerHTML = lines.join('');
+  } catch (e) {
+    out.textContent = `Health check failed: ${e?.message || e}`;
+  }
 }
 
 /* ── Keyboard shortcuts ─────────────────────────────────────────── */

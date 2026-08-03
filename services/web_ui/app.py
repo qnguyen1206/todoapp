@@ -48,6 +48,7 @@ SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 API_KEY          = os.getenv("API_KEY",        "")
 
 TASK_ENCRYPTION_PREFIX = "ENC2:"
+DAILY_NOTES_PREFIX = "[CVM_DAILY]"
 KEY_WRAP_INFO = b"todoapp-keywrap-v1"
 TASK_INFO_PREFIX = "todoapp-task-v2"
 _WORKSPACE_KEY_CACHE = {}
@@ -428,6 +429,54 @@ def _decrypt_task_if_needed(task, user_id):
 def _decrypt_tasks(tasks, user_id):
     return [_decrypt_task_if_needed(task, user_id) for task in tasks]
 
+
+def _decode_daily_payload(notes_text):
+    """Decode desktop daily payload stored in notes, or return None."""
+    if not isinstance(notes_text, str) or not notes_text.startswith(DAILY_NOTES_PREFIX):
+        return None
+    try:
+        payload = json.loads(notes_text[len(DAILY_NOTES_PREFIX):])
+        if isinstance(payload, dict) and payload.get("kind") == "daily":
+            return payload
+    except Exception:
+        pass
+    return None
+
+
+def _encode_daily_payload(raw_text, completed=False):
+    payload = {
+        "kind": "daily",
+        "raw": raw_text,
+        "completed": bool(completed),
+    }
+    return DAILY_NOTES_PREFIX + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _split_remote_tasks(tasks):
+    """Split remote backend tasks into regular-todo and daily-marker lists."""
+    regular = []
+    daily = []
+
+    for task in tasks:
+        daily_payload = _decode_daily_payload(task.get("notes", ""))
+        if daily_payload:
+            remote_task_id = str(task.get("task_id") or task.get("id") or "")
+            raw = (daily_payload.get("raw") or task.get("title") or "").strip()
+            if not raw:
+                continue
+            done = bool(daily_payload.get("completed", task.get("completed", False)))
+            daily.append({
+                "id": f"remote:{remote_task_id}",
+                "title": raw,
+                "done": done,
+                "source": "remote",
+                "remote_task_id": remote_task_id,
+            })
+        else:
+            regular.append(task)
+
+    return regular, daily
+
 # ---------------------------------------------------------------------------
 # Page routes
 # ---------------------------------------------------------------------------
@@ -444,6 +493,7 @@ def get_tasks():
         r = _backend("GET", f"/tasks/retrieve", params={"user_id": USER_ID})
         if r.status_code == 200:
             tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
+            tasks, _daily = _split_remote_tasks(tasks)
             # Annotate with color
             for t in tasks:
                 t["color"] = _task_color(t.get("due_date", ""))
@@ -552,11 +602,41 @@ def delete_task(task_id):
 @app.route("/api/daily", methods=["GET"])
 def get_daily():
     today = date.today().isoformat()
+
+    # Local web-only daily items
     conn = get_db()
     rows = conn.execute(
         "SELECT * FROM daily_tasks WHERE date=? ORDER BY id", (today,)).fetchall()
     conn.close()
-    return jsonify({"status": "success", "tasks": [dict(r) for r in rows]})
+
+    local_tasks = [{
+        "id": f"local:{r['id']}",
+        "title": r["title"],
+        "done": bool(r["done"]),
+        "source": "local",
+    } for r in rows]
+
+    # Remote daily items synced from desktop app
+    remote_daily = []
+    try:
+        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+        if r.status_code == 200:
+            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
+            _regular, remote_daily = _split_remote_tasks(tasks)
+    except Exception:
+        remote_daily = []
+
+    combined = remote_daily + local_tasks
+    deduped = []
+    seen = set()
+    for item in combined:
+        key = (str(item.get("title", "")).strip().lower(), bool(item.get("done", False)))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return jsonify({"status": "success", "tasks": deduped})
 
 @app.route("/api/daily", methods=["POST"])
 def add_daily():
@@ -570,20 +650,111 @@ def add_daily():
     conn.commit()
     row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.close()
-    return jsonify({"status": "success", "id": row_id})
 
-@app.route("/api/daily/<int:task_id>/toggle", methods=["POST"])
+    # Best-effort mirror into remote backend so desktop and web daily lists can converge.
+    try:
+        remote_task_id = "daily:" + hashlib.md5(title.encode()).hexdigest()[:20]
+        remote_task = {
+            "id": remote_task_id,
+            "title": title,
+            "due_date": "",
+            "due_time": "",
+            "priority": "1",
+            "notes": _encode_daily_payload(title, False),
+            "completed": False,
+        }
+        _backend(
+            "POST",
+            "/tasks/store",
+            json={
+                "user_id": USER_ID,
+                "tasks": _encrypt_tasks([remote_task], USER_ID),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception:
+        pass
+
+    return jsonify({"status": "success", "id": f"local:{row_id}"})
+
+@app.route("/api/daily/<task_id>/toggle", methods=["POST"])
 def toggle_daily(task_id):
+    if task_id.startswith("remote:"):
+        remote_task_id = task_id.split(":", 1)[1]
+        try:
+            r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+            if r.status_code != 200:
+                return jsonify({"status": "error", "message": r.text}), r.status_code
+
+            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
+            match = next((t for t in tasks if str(t.get("task_id") or t.get("id") or "") == remote_task_id), None)
+            if not match:
+                return jsonify({"status": "error", "message": "Daily task not found"}), 404
+
+            payload = _decode_daily_payload(match.get("notes", ""))
+            if not payload:
+                return jsonify({"status": "error", "message": "Not a daily task"}), 400
+
+            raw = (payload.get("raw") or match.get("title") or "").strip()
+            done = bool(payload.get("completed", match.get("completed", False)))
+            updated = dict(match)
+            updated["id"] = remote_task_id
+            updated["title"] = raw
+            updated["completed"] = not done
+            updated["notes"] = _encode_daily_payload(raw, not done)
+            updated.pop("task_id", None)
+
+            r2 = _backend(
+                "POST",
+                "/tasks/store",
+                json={
+                    "user_id": USER_ID,
+                    "tasks": _encrypt_tasks([updated], USER_ID),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            if r2.status_code == 200:
+                return jsonify({"status": "success"})
+            return jsonify({"status": "error", "message": r2.text}), r2.status_code
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 503
+
+    if task_id.startswith("local:"):
+        task_id = task_id.split(":", 1)[1]
+
+    try:
+        local_id = int(task_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid daily task id"}), 400
+
     conn = get_db()
-    conn.execute("UPDATE daily_tasks SET done = 1 - done WHERE id=?", (task_id,))
+    conn.execute("UPDATE daily_tasks SET done = 1 - done WHERE id=?", (local_id,))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
 
-@app.route("/api/daily/<int:task_id>", methods=["DELETE"])
+@app.route("/api/daily/<task_id>", methods=["DELETE"])
 def delete_daily(task_id):
+    if task_id.startswith("remote:"):
+        remote_task_id = task_id.split(":", 1)[1]
+        try:
+            r = _backend("DELETE", f"/tasks/{remote_task_id}", params={"user_id": USER_ID})
+            if r.status_code == 200:
+                return jsonify({"status": "success"})
+            return jsonify({"status": "error", "message": r.text}), r.status_code
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 503
+
+    if task_id.startswith("local:"):
+        task_id = task_id.split(":", 1)[1]
+
+    try:
+        local_id = int(task_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid daily task id"}), 400
+
     conn = get_db()
-    conn.execute("DELETE FROM daily_tasks WHERE id=?", (task_id,))
+    conn.execute("DELETE FROM daily_tasks WHERE id=?", (local_id,))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
@@ -635,6 +806,7 @@ def calendar_data(year, month):
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
         tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        tasks, _daily = _split_remote_tasks(tasks)
     except Exception:
         tasks = []
 
@@ -659,6 +831,7 @@ def weekly_data():
     try:
         r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
         tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        tasks, _daily = _split_remote_tasks(tasks)
     except Exception:
         tasks = []
 
@@ -747,6 +920,61 @@ def health():
     return jsonify({"status": "ok", "service": "web_ui",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "user_id": USER_ID})
+
+
+@app.route("/api/health/all", methods=["GET"])
+def health_all():
+    """Check health for all internal services reachable from web_ui."""
+    services = {
+        "web_ui": {
+            "url": None,
+            "ok": True,
+            "status": "ok",
+            "code": 200,
+            "message": "running",
+        },
+        "backend": {"url": f"{BACKEND_URL}/health"},
+        "ai_inference": {"url": f"{AI_URL}/health"},
+        "task_sync": {"url": f"{SYNC_URL}/health"},
+        "scheduler": {"url": f"{SCHEDULER_URL}/health"},
+    }
+
+    for name, svc in services.items():
+        if svc.get("url") is None:
+            continue
+        try:
+            resp = req.get(svc["url"], headers=_headers(), timeout=5)
+            payload = {}
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {}
+
+            status_text = str(payload.get("status", "")).lower() if isinstance(payload, dict) else ""
+            is_ok = resp.status_code == 200 and status_text in ("ok", "success", "healthy", "")
+            services[name] = {
+                "url": svc["url"],
+                "ok": is_ok,
+                "status": payload.get("status", "ok") if isinstance(payload, dict) else "unknown",
+                "code": resp.status_code,
+                "message": payload.get("message", "") if isinstance(payload, dict) else "",
+            }
+        except Exception as exc:
+            services[name] = {
+                "url": svc["url"],
+                "ok": False,
+                "status": "error",
+                "code": 0,
+                "message": str(exc),
+            }
+
+    overall_ok = all(svc.get("ok", False) for svc in services.values())
+    return jsonify({
+        "status": "ok" if overall_ok else "degraded",
+        "overall_ok": overall_ok,
+        "services": services,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
 # ---------------------------------------------------------------------------
 # Startup
