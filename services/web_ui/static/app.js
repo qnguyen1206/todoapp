@@ -51,6 +51,21 @@ function escHtml(s) {
                         .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+/* ── Trust Modal ─────────────────────────────────────────── */
+function openTrustModal() {
+    document.getElementById("trust-modal").style.display = "flex";
+}
+
+function closeTrustModal() {
+    document.getElementById("trust-modal").style.display = "none";
+}
+
+document.getElementById("trust-modal").addEventListener("click", function(e) {
+    if (e.target === this) {
+        closeTrustModal();
+    }
+});
+
 /* ── Character / Stats ─────────────────────────────────────────── */
 async function loadCharacter() {
   try {

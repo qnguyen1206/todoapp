@@ -8,15 +8,20 @@ import json
 import subprocess
 import hashlib
 import importlib
+import uuid
 
 class ModularUpdater:
     def __init__(self, auto_check=False):
-        self.version_file = str(Path.home()) + "/TODOapp/version.txt"
-        self.manifest_file = str(Path.home()) + "/TODOapp/manifest.json"
+        self.app_dir = self.get_app_dir()
+        self.legacy_app_dir = Path.home() / "TODOapp"
+        self.version_file = self.resolve_state_file("version.txt")
+        self.manifest_file = self.resolve_state_file("manifest.json")
         self.current_version = self.get_current_version()
         self.current_manifest = self.load_local_manifest()
         self.is_executable_mode = getattr(sys, 'frozen', False)  # Detect if running as executable
+        self.cleanup_legacy_update_artifacts()
         print(f"Current version: {self.current_version}")
+        print(f"Application directory: {self.app_dir}")
         print(f"Running as executable: {self.is_executable_mode}")
         if not self.is_executable_mode:
             print("Source code mode - full modular updates available")
@@ -25,6 +30,54 @@ class ModularUpdater:
         
         if auto_check:
             self.check_for_updates()
+
+    def get_app_dir(self):
+        """Return the directory where the app is currently running from."""
+        if getattr(sys, 'frozen', False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parent
+
+    def resolve_state_file(self, filename):
+        """Use app-local state files and migrate from legacy home folder if needed."""
+        app_path = self.app_dir / filename
+        legacy_path = self.legacy_app_dir / filename
+
+        if app_path.exists():
+            return str(app_path)
+
+        if legacy_path.exists():
+            try:
+                app_path.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.copy2(legacy_path, app_path)
+                return str(app_path)
+            except Exception as e:
+                print(f"Could not migrate {filename} to app directory: {e}")
+                return str(legacy_path)
+
+        app_path.parent.mkdir(parents=True, exist_ok=True)
+        return str(app_path)
+
+    def cleanup_legacy_update_artifacts(self):
+        """Remove stale updater artifacts from prior update attempts."""
+        artifact_names = ["update.zip", "update.exe", "update_launcher.bat"]
+        candidate_dirs = {self.app_dir, self.legacy_app_dir}
+
+        # cleanup_and_update.py is an old runtime artifact from executable updates.
+        # Do not remove it from source checkouts where it may be intentionally tracked.
+        if self.is_executable_mode:
+            artifact_names.append("cleanup_and_update.py")
+        else:
+            candidate_dirs = {self.legacy_app_dir}
+
+        for base_dir in candidate_dirs:
+            for artifact in artifact_names:
+                artifact_path = base_dir / artifact
+                try:
+                    if artifact_path.exists() and artifact_path.is_file():
+                        artifact_path.unlink()
+                except Exception as e:
+                    print(f"Could not remove legacy artifact {artifact_path}: {e}")
     
     def get_current_version(self):
         try:
@@ -238,8 +291,8 @@ class ModularUpdater:
     def download_and_apply_updates(self, updates_needed, remote_manifest, new_version):
         """Download and apply modular updates"""
         try:
-            download_path = str(Path.home()) + "/TODOapp/updates/"
-            os.makedirs(download_path, exist_ok=True)
+            download_path = self.app_dir / "updates"
+            download_path.mkdir(parents=True, exist_ok=True)
             
             # Show progress dialog
             progress_window = self.create_progress_window()
@@ -255,7 +308,8 @@ class ModularUpdater:
                 # Download file
                 response = requests.get(update["url"], stream=True)
                 if response.status_code == 200:
-                    temp_file = os.path.join(download_path, update["name"])
+                    temp_file = download_path / update["name"]
+                    temp_file.parent.mkdir(parents=True, exist_ok=True)
                     
                     with open(temp_file, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=8192):
@@ -265,13 +319,13 @@ class ModularUpdater:
                     downloaded_hash = self.calculate_file_hash(temp_file)
                     if downloaded_hash == update["hash"]:
                         downloaded_files.append({
-                            "temp_path": temp_file,
+                            "temp_path": str(temp_file),
                             "target_name": update["name"],
                             "type": update["type"]
                         })
                     else:
                         print(f"Hash mismatch for {update['name']}")
-                        self.cleanup_temp_files([temp_file])
+                        self.cleanup_temp_files([str(temp_file)])
                         messagebox.showerror("Update Failed", f"File verification failed for {update['name']}")
                         return
             
@@ -340,7 +394,7 @@ class ModularUpdater:
     def apply_downloaded_updates(self, downloaded_files):
         """Apply downloaded updates to the application"""
         needs_restart = False
-        current_dir = os.getcwd()
+        current_dir = str(self.app_dir)
         
         for file_info in downloaded_files:
             target_path = os.path.join(current_dir, file_info["target_name"])
@@ -436,63 +490,133 @@ class ModularUpdater:
             response = requests.get(url, stream=True)
             if response.status_code == 200:
                 is_zip = url.lower().endswith('.zip')
-                download_path = str(Path.home()) + "/TODOapp/"
-                temp_file = download_path + ("update.zip" if is_zip else "update.exe")
+                work_dir = self.app_dir / ".update_tmp" / uuid.uuid4().hex
+                work_dir.mkdir(parents=True, exist_ok=True)
+                temp_file = work_dir / ("package.zip" if is_zip else "package.exe")
                 
                 with open(temp_file, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
                 
-                with open(self.version_file, "w") as f:
-                    f.write(new_version)
-                
-                current_dir = os.getcwd()
-                cleanup_script = download_path + "cleanup_and_update.py"
-                
-                temp_file_path = temp_file.replace("\\", "/")
-                cleanup_script_path = cleanup_script.replace("\\", "/")
-                current_dir_path = current_dir.replace("\\", "/")
-                
-                with open(cleanup_script, "w") as f:
-                    f.write(f'''
-import os
-import time
-import sys
-import shutil
-import zipfile
-
-time.sleep(3)
-print("Starting full update process...")
-
-app_dir = r"{current_dir_path}"
-temp_file = r"{temp_file_path}"
-cleanup_script = r"{cleanup_script_path}"
-
-try:
-    if temp_file.endswith('.zip'):
-        with zipfile.ZipFile(temp_file, 'r') as zip_ref:
-            zip_ref.extractall(app_dir)
-        print("Full update completed!")
-        os.startfile(os.path.join(app_dir, "todo.exe"))
-    else:
-        shutil.copy2(temp_file, os.path.join(app_dir, "todo.exe"))
-        print("Full update completed!")
-        os.startfile(os.path.join(app_dir, "todo.exe"))
-    
-    os.remove(temp_file)
-    os.remove(cleanup_script)
-except Exception as e:
-    print(f"Update failed: {{e}}")
-''')
-                
-                subprocess.Popen([sys.executable, cleanup_script], 
-                                 creationflags=subprocess.CREATE_NO_WINDOW)
+                if self.is_executable_mode:
+                    self.launch_windows_inplace_update_worker(temp_file, work_dir, new_version)
+                else:
+                    self.apply_full_update_source_mode(temp_file, is_zip, new_version)
                 
                 messagebox.showinfo("Update", "Update downloaded. The application will restart.")
                 sys.exit()
                 
         except Exception as e:
             messagebox.showerror("Update Failed", f"Failed to update: {str(e)}")
+
+    def launch_windows_inplace_update_worker(self, package_path, work_dir, new_version):
+        """Run update worker in a separate PowerShell process so the current exe can exit."""
+        ps_script_path = work_dir / "apply_update.ps1"
+        app_dir_str = str(self.app_dir)
+        package_str = str(package_path)
+        work_dir_str = str(work_dir)
+        version_file_str = str(Path(self.version_file))
+        main_exe_str = str(self.app_dir / "todo.exe")
+        legacy_dir_str = str(self.legacy_app_dir)
+        current_pid = os.getpid()
+
+        script_content = f'''$ErrorActionPreference = "Stop"
+$AppDir = "{app_dir_str}"
+$PackagePath = "{package_str}"
+$WorkDir = "{work_dir_str}"
+$VersionFile = "{version_file_str}"
+$MainExe = "{main_exe_str}"
+$LegacyDir = "{legacy_dir_str}"
+$ParentPid = {current_pid}
+
+function Remove-IfExists([string]$PathValue) {{
+    if (Test-Path -LiteralPath $PathValue) {{
+        Remove-Item -LiteralPath $PathValue -Force -Recurse -ErrorAction SilentlyContinue
+    }}
+}}
+
+function Copy-Payload([string]$SourceRoot, [string]$TargetRoot) {{
+    $protectedNames = @("todo.txt","dailytask.txt","daily_date.txt","storage_pref.txt","time_format_pref.txt","mysql_config.json","cvm_config.json","ai_config.json","uploads")
+    Get-ChildItem -LiteralPath $SourceRoot -Force | ForEach-Object {{
+        if ($protectedNames -contains $_.Name) {{ return }}
+        $dest = Join-Path $TargetRoot $_.Name
+        if ($_.PSIsContainer) {{
+            Copy-Item -LiteralPath $_.FullName -Destination $dest -Recurse -Force
+        }} else {{
+            Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+        }}
+    }}
+}}
+
+try {{
+    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+
+    if ($PackagePath.ToLower().EndsWith(".zip")) {{
+        $ExtractDir = Join-Path $WorkDir "extracted"
+        New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
+        Expand-Archive -LiteralPath $PackagePath -DestinationPath $ExtractDir -Force
+
+        $PayloadDir = $ExtractDir
+        $Children = Get-ChildItem -LiteralPath $ExtractDir -Force
+        if ($Children.Count -eq 1 -and $Children[0].PSIsContainer) {{
+            $PayloadDir = $Children[0].FullName
+        }}
+
+        Copy-Payload -SourceRoot $PayloadDir -TargetRoot $AppDir
+    }} else {{
+        Copy-Item -LiteralPath $PackagePath -Destination $MainExe -Force
+    }}
+
+    Set-Content -LiteralPath $VersionFile -Value "{new_version}" -NoNewline
+
+    Remove-IfExists (Join-Path $AppDir "update.zip")
+    Remove-IfExists (Join-Path $AppDir "update.exe")
+    Remove-IfExists (Join-Path $AppDir "cleanup_and_update.py")
+    Remove-IfExists (Join-Path $LegacyDir "update.zip")
+    Remove-IfExists (Join-Path $LegacyDir "update.exe")
+    Remove-IfExists (Join-Path $LegacyDir "cleanup_and_update.py")
+
+    if (Test-Path -LiteralPath $MainExe) {{
+        Start-Process -FilePath $MainExe -WorkingDirectory $AppDir
+    }}
+}} catch {{
+    "Update failed: $($_.Exception.Message)" | Out-File -FilePath (Join-Path $WorkDir "update_error.log") -Encoding utf8
+}}
+
+$cleanupCmd = "ping 127.0.0.1 -n 3 > nul & rmdir /s /q `"$WorkDir`""
+Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cleanupCmd" -WindowStyle Hidden
+'''
+
+        with open(ps_script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
+
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ps_script_path)
+            ],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+
+    def apply_full_update_source_mode(self, package_path, is_zip, new_version):
+        """Apply full update in source mode directly from Python."""
+        import shutil
+        import zipfile
+
+        if is_zip:
+            with zipfile.ZipFile(package_path, 'r') as zip_ref:
+                zip_ref.extractall(str(self.app_dir))
+        else:
+            shutil.copy2(str(package_path), str(self.app_dir / "todo.exe"))
+
+        with open(self.version_file, "w") as f:
+            f.write(new_version)
+
+        self.cleanup_temp_files([str(package_path)])
     
     def is_newer_version(self, latest, current):
         """Compare version strings properly"""

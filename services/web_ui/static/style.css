@@ -46,6 +46,34 @@ header {
   padding: 2px 10px; font-size: 13px; font-weight: 600;
 }
 
+.verified-badge {
+    cursor: pointer;
+    height: 36px;
+}
+
+.trust-modal {
+  width: min(1000px, 94vw);
+  max-height: 94vh;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.trust-modal iframe {
+  border: none;
+  border-radius: 8px;
+  width: 100%;
+  height: min(78vh, 900px);
+  flex: 1 1 auto;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
 /* ── Tab Bar ──────────────────────────────────────────────── */
 .tab-bar {
   display: flex; background: var(--surface); border-bottom: 2px solid var(--border);

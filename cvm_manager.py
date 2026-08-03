@@ -5,6 +5,7 @@ Provides UI for configuring and managing CVM integration
 
 import json
 import hashlib
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from pathlib import Path
@@ -20,6 +21,8 @@ except ImportError:
 
 class CVMManager:
     """Manages Phala CVM configuration and integration"""
+
+    _DAILY_NOTES_PREFIX = "[CVM_DAILY]"
     
     def __init__(self, parent_app):
         self.parent_app = parent_app
@@ -444,20 +447,28 @@ class CVMManager:
         return hashlib.sha256(socket.gethostname().encode()).hexdigest()[:16]
 
     def _local_tasks_as_dicts(self):
-        """Read all tasks from the local task manager and return as list of dicts."""
+        """Read all local tasks (main + daily) as dict payloads for CVM."""
+        combined = self._local_todo_tasks_as_dicts()
+        combined.extend(self._local_daily_tasks_as_dicts())
+        return self._dedupe_payload_tasks(combined)
+
+    def _local_todo_tasks_as_dicts(self):
+        """Read main todo list as task payloads."""
         mgr = getattr(self.parent_app, 'todo_list_manager', None)
         if not mgr:
             return []
         tasks = mgr.load_tasks()   # list of (title, due_date, due_time, priority, notes)
         result = []
-        for idx, t in enumerate(tasks):
+        for t in tasks:
             title    = t[0] if len(t) > 0 else ""
             due_date = t[1] if len(t) > 1 else ""
             due_time = t[2] if len(t) > 2 else ""
             priority = t[3] if len(t) > 3 else "1"
             notes    = t[4] if len(t) > 4 else ""
-            # Stable ID: hash of title+date so repeated pushes don't duplicate
-            task_id = hashlib.md5(f"{title}|{due_date}".encode()).hexdigest()[:12]
+            # Include due_time to avoid collisions between same-day tasks.
+            task_id = "todo:" + hashlib.md5(
+                f"{title}|{due_date}|{due_time}".encode()
+            ).hexdigest()[:20]
             result.append({
                 "id":       task_id,
                 "title":    title,
@@ -469,23 +480,143 @@ class CVMManager:
             })
         return result
 
+    def _daily_file_path(self):
+        """Return daily task file path from manager or fallback path."""
+        daily_mgr = getattr(self.parent_app, 'daily_todo_manager', None)
+        if daily_mgr and getattr(daily_mgr, 'DAILY_TASK_FILE', None):
+            return daily_mgr.DAILY_TASK_FILE
+        return str(Path.home() / "TODOapp" / "dailytask.txt")
+
+    def _local_daily_tasks_as_dicts(self):
+        """Read all daily task lines as CVM payload entries."""
+        file_path = self._daily_file_path()
+        if not os.path.exists(file_path):
+            return []
+
+        result = []
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+
+                    is_completed = raw.startswith("[COMPLETED] ")
+                    clean = raw.replace("[COMPLETED] ", "", 1) if is_completed else raw
+
+                    payload = {
+                        "kind": "daily",
+                        "raw": clean,
+                        "completed": is_completed,
+                    }
+                    notes = self._DAILY_NOTES_PREFIX + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+                    task_id = "daily:" + hashlib.md5(clean.encode()).hexdigest()[:20]
+                    result.append({
+                        "id": task_id,
+                        "title": clean,
+                        "due_date": "",
+                        "due_time": "",
+                        "priority": "1",
+                        "notes": notes,
+                        "completed": is_completed,
+                    })
+        except Exception as e:
+            print(f"Could not read daily tasks for CVM sync: {e}")
+
+        return result
+
+    def _dedupe_payload_tasks(self, tasks):
+        """Deduplicate payload entries by semantic content."""
+        deduped = []
+        seen = set()
+        for task in tasks:
+            key = self._task_fingerprint(task)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(task)
+        return deduped
+
+    def _task_fingerprint(self, task):
+        """Fingerprint for de-duplication across legacy/new task IDs."""
+        notes = task.get("notes", "")
+        if isinstance(notes, str) and notes.startswith(self._DAILY_NOTES_PREFIX):
+            data = self._decode_daily_notes(notes)
+            raw = (data.get("raw") or task.get("title", "")).strip()
+            completed = bool(data.get("completed", task.get("completed", False)))
+            return f"daily|{raw}|{int(completed)}"
+        return "|".join([
+            "todo",
+            str(task.get("title", "")).strip(),
+            str(task.get("due_date", "")).strip(),
+            str(task.get("due_time", "")).strip(),
+        ])
+
+    def _decode_daily_notes(self, notes):
+        """Parse [CVM_DAILY] payload from notes field."""
+        try:
+            blob = notes[len(self._DAILY_NOTES_PREFIX):]
+            data = json.loads(blob)
+            if isinstance(data, dict) and data.get("kind") == "daily":
+                return data
+        except Exception:
+            pass
+        return {}
+
     def _apply_remote_tasks(self, remote_tasks):
-        """Write remote tasks back to the local task file and refresh the UI."""
+        """Write remote tasks to local files (main + daily) and refresh UI."""
         mgr = getattr(self.parent_app, 'todo_list_manager', None)
         if not mgr:
             return 0
-        converted = []
-        for t in remote_tasks:
-            converted.append((
+
+        unique_remote = self._dedupe_payload_tasks(remote_tasks or [])
+        todo_converted = []
+        daily_lines = []
+
+        for t in unique_remote:
+            notes = t.get("notes", "")
+            if isinstance(notes, str) and notes.startswith(self._DAILY_NOTES_PREFIX):
+                daily = self._decode_daily_notes(notes)
+                raw = (daily.get("raw") or t.get("title", "")).strip()
+                if raw:
+                    if bool(daily.get("completed", t.get("completed", False))):
+                        daily_lines.append(f"[COMPLETED] {raw}")
+                    else:
+                        daily_lines.append(raw)
+                continue
+
+            todo_converted.append((
                 t.get("title", ""),
                 t.get("due_date", ""),
                 t.get("due_time", ""),
                 str(t.get("priority", "1")),
                 t.get("notes", "No notes"),
             ))
-        mgr.save_tasks(converted, skip_mysql=True)
+
+        # Persist main tasks
+        mgr.save_tasks(todo_converted, skip_mysql=True)
         self.parent_app.root.after(0, mgr.refresh_task_list)
-        return len(converted)
+
+        # Persist daily tasks
+        seen_lines = set()
+        daily_unique = []
+        for line in daily_lines:
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            daily_unique.append(line)
+
+        daily_file = self._daily_file_path()
+        Path(daily_file).parent.mkdir(parents=True, exist_ok=True)
+        with open(daily_file, "w", encoding="utf-8") as f:
+            for line in daily_unique:
+                f.write(line + "\n")
+
+        daily_mgr = getattr(self.parent_app, 'daily_todo_manager', None)
+        if daily_mgr:
+            self.parent_app.root.after(0, daily_mgr.load_daily_tasks)
+
+        return len(unique_remote)
 
     def _approve_pending_devices_best_effort(self, user_id):
         """Approve pending ENC2 devices so they can decrypt shared workspace tasks.
@@ -575,7 +706,7 @@ class CVMManager:
         return "?"
 
     def push_tasks_to_cvm(self):
-        """Push all local tasks to the CVM backend service."""
+        """Push all local tasks to CVM by replacing remote set (prevents duplicates)."""
         endpoint = self.cvm_client.cvm_endpoints.get('backend', '').strip()
         if not endpoint:
             messagebox.showwarning(
@@ -594,14 +725,14 @@ class CVMManager:
         user_id = self._get_user_id()
 
         def do_push():
-            success, msg = self.backend_client.store_tasks(user_id, tasks)
+            success, msg = self.backend_client.replace_tasks(user_id, tasks)
             if success:
                 self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
                     messagebox.showinfo(
                         "Push Successful",
-                        f"Pushed {len(tasks)} task(s) to CVM backend.",
+                        f"Pushed {len(tasks)} task(s) to CVM backend (remote replaced).",
                         parent=self.parent_app.root
                     )
                 else:
