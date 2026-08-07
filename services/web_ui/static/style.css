@@ -176,6 +176,8 @@ header {
 .ai-msg.user { background: var(--primary); color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
 .ai-msg.bot  { background: #f0f0f0; color: var(--text); align-self: flex-start; border-bottom-left-radius: 4px; }
 .ai-msg.thinking { color: var(--muted); font-style: italic; }
+.ai-text { white-space: pre-wrap; }
+.ai-receipt { margin-top: 6px; font-size: 11px; color: var(--muted); font-family: monospace; }
 .ai-input-row { display: flex; gap: 8px; align-items: flex-end; }
 .ai-textarea { resize: none; flex: 1; }
 
@@ -249,6 +251,32 @@ header {
 }
 .setting-row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .help-text { font-size: 12px; color: var(--muted); margin: 6px 0; }
+.saved-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+.saved-model-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: #f8f9fb;
+  border: 1px solid #e5e7eb;
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+.saved-model-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+.saved-model-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .uid-display {
   display: block; background: #f5f5f5; padding: 6px 10px; border-radius: var(--radius);
   font-family: monospace; font-size: 13px; margin: 6px 0; word-break: break-all;
@@ -300,6 +328,12 @@ header {
   background: var(--surface); border-radius: var(--radius);
   padding: 24px; width: 480px; max-width: 95vw; box-shadow: 0 8px 32px rgba(0,0,0,.2);
 }
+.modal.modal-lg {
+  width: min(900px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
 .modal h2 { font-size: 16px; margin-bottom: 16px; }
 .form-group { margin-bottom: 12px; }
 .form-group label { display: block; font-size: 12px; font-weight: 600;
@@ -311,6 +345,11 @@ header {
   background: #f5f5f5; padding: 12px; border-radius: var(--radius);
   white-space: pre-wrap; font-family: inherit; font-size: 13px; max-height: 300px;
   overflow-y: auto;
+}
+.notes-body.notes-body-lg {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 320px;
 }
 
 /* ── Misc ─────────────────────────────────────────────────── */

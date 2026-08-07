@@ -6,6 +6,11 @@ let calYear       = new Date().getFullYear();
 let calMonth      = new Date().getMonth() + 1;  // 1-based
 let aiModels      = [];
 let use24Hour     = true;
+let selectedAiModelSetting = '';
+let activeAiModelChoice = '';
+let savedAiModels = [];
+let currentNotesFull = '';
+const NOTES_PREVIEW_LIMIT = 500;
 
 /* ── Tab Switching ─────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(btn => {
@@ -26,10 +31,16 @@ document.querySelectorAll('.tab').forEach(btn => {
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 async function api(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body !== undefined) opts.body = JSON.stringify(body);
-  const r = await fetch(path, opts);
-  return r.json();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const opts = { method, headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    return r.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function fmtTime(t) {
@@ -121,10 +132,9 @@ function renderTasks() {
   tbody.innerHTML = tasks.map(t => {
     const id    = escHtml(t.task_id);
     const title = escHtml(t.title);
-    const notes = escHtml(t.notes);
     const color = t.color || '';
     return `<tr class="${color}">
-      <td class="task-name-cell" onclick="showNotes('${id}','${title}','${notes}')">${title}</td>
+      <td class="task-name-cell" onclick="showNotes('${id}')">${title}</td>
       <td>${escHtml(t.due_date)}</td>
       <td>${fmtTime(t.due_time)}</td>
       <td>${priorityPill(t.priority)}</td>
@@ -148,10 +158,38 @@ async function deleteTask(id) {
   loadTasks();
 }
 
+async function clearAllTasks() {
+  if (!confirm('Clear all tasks in the Tasks tab? Daily tasks will be kept.')) return;
+  await api('POST', '/api/tasks/clear');
+  loadTasks();
+}
+
 function showNotes(id, title, notes) {
-  document.getElementById('notes-title').textContent = title;
-  document.getElementById('notes-body').textContent  = notes || 'No notes';
+  const task = allTasks.find(t => String(t.task_id) === String(id));
+  const safeTitle = task?.title || title || 'Task Notes';
+  currentNotesFull = task?.notes || notes || 'No notes';
+
+  const isLong = currentNotesFull.length > NOTES_PREVIEW_LIMIT;
+  const preview = isLong
+    ? `${currentNotesFull.slice(0, NOTES_PREVIEW_LIMIT)}\n\n[... truncated ...]`
+    : currentNotesFull;
+
+  document.getElementById('notes-title').textContent = safeTitle;
+  document.getElementById('notes-body').textContent  = preview || 'No notes';
+  const readMoreBtn = document.getElementById('notes-read-more');
+  if (readMoreBtn) {
+    readMoreBtn.style.display = isLong ? 'inline-flex' : 'none';
+  }
   document.getElementById('notes-modal').style.display = 'flex';
+}
+
+function openFullNotes() {
+  document.getElementById('notes-full-body').textContent = currentNotesFull || 'No notes';
+  document.getElementById('notes-full-modal').style.display = 'flex';
+}
+
+function closeFullNotes() {
+  document.getElementById('notes-full-modal').style.display = 'none';
 }
 
 /* ── Task Modal ─────────────────────────────────────────────────── */
@@ -247,20 +285,45 @@ async function deleteDaily(id) {
   loadDaily();
 }
 
+async function clearAllDaily() {
+  if (!confirm('Clear all daily tasks in the Daily tab? Regular tasks will be kept.')) return;
+  await api('POST', '/api/daily/clear');
+  loadDaily();
+}
+
 /* ══════════════════════════════════════════════════════════════════
    AI ASSISTANT
 ══════════════════════════════════════════════════════════════════ */
 async function initAI() {
   const statusBox = document.getElementById('ai-status');
   statusBox.textContent = 'Checking…';
+  if (!selectedAiModelSetting && savedAiModels.length === 0) {
+    try {
+      const s = await api('GET', '/api/settings');
+      selectedAiModelSetting = (s.settings?.phala_ai_model || '').trim();
+      savedAiModels = Array.isArray(s.settings?.phala_ai_models)
+        ? s.settings.phala_ai_models.map(m => String(m || '').trim()).filter(Boolean)
+        : [];
+    } catch {}
+  }
+
+  aiModels = [];
   try {
     const h = await api('GET', '/api/ai/health');
-    const ollama = h.ollama ?? {};
-    if (ollama.available) {
-      statusBox.textContent = `✓ Ollama online\nModel: ${ollama.default_model}`;
-      aiModels = ollama.models ?? [];
+    const ok = ['ok', 'success', 'healthy'].includes(String(h?.status || '').toLowerCase());
+    if (ok) {
+      statusBox.textContent = selectedAiModelSetting
+        ? `✓ AI service online\nDefault model: ${selectedAiModelSetting}`
+        : '✓ AI service online';
     } else {
-      statusBox.textContent = '⚠ Ollama not running.\nPull a model via CVM exec.';
+      const msg = h?.message ? `\n${h.message}` : '';
+      statusBox.textContent = `⚠ AI service reported an issue${msg}`;
+    }
+
+    try {
+      const m = await api('GET', '/api/ai/models');
+      aiModels = Array.isArray(m?.models) ? m.models : [];
+    } catch {
       aiModels = [];
     }
   } catch {
@@ -269,8 +332,32 @@ async function initAI() {
   }
 
   const sel = document.getElementById('ai-model-select');
-  sel.innerHTML = '<option value="">Default</option>' +
-    aiModels.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
+  const modelSet = new Set(aiModels.map(m => String(m || '').trim()).filter(Boolean));
+  for (const m of savedAiModels) modelSet.add(m);
+  if (selectedAiModelSetting) modelSet.add(selectedAiModelSetting);
+  const modelOptions = Array.from(modelSet);
+
+  const defaultLabel = selectedAiModelSetting
+    ? `Use default (${selectedAiModelSetting})`
+    : 'Use configured model';
+
+  sel.innerHTML = `<option value="">${escHtml(defaultLabel)}</option>` +
+    modelOptions.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
+
+  // Preserve user choice across tab switches; fallback to saved setting.
+  if (activeAiModelChoice && modelOptions.includes(activeAiModelChoice)) {
+    sel.value = activeAiModelChoice;
+  } else if (selectedAiModelSetting && modelOptions.includes(selectedAiModelSetting)) {
+    sel.value = selectedAiModelSetting;
+    activeAiModelChoice = selectedAiModelSetting;
+  } else {
+    sel.value = '';
+    activeAiModelChoice = '';
+  }
+
+  sel.onchange = () => {
+    activeAiModelChoice = sel.value;
+  };
 
   // Initial greeting
   const chat = document.getElementById('ai-chat');
@@ -290,11 +377,35 @@ function appendAIMessage(role, text) {
   return div;
 }
 
+function appendAIBotResponse(text, payload) {
+  const chat = document.getElementById('ai-chat');
+  const div = document.createElement('div');
+  div.className = 'ai-msg bot';
+
+  const body = document.createElement('div');
+  body.className = 'ai-text';
+  body.textContent = text || '(no response)';
+  div.appendChild(body);
+
+  const receiptId = payload?.receipt_id || '';
+  if (receiptId) {
+    const meta = document.createElement('div');
+    meta.className = 'ai-receipt';
+    meta.textContent = `Receipt: ${receiptId}`;
+    div.appendChild(meta);
+  }
+
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
 async function sendAI() {
   const input = document.getElementById('ai-input');
   const prompt = input.value.trim();
   if (!prompt) return;
-  const model = document.getElementById('ai-model-select').value;
+  const selectedModel = document.getElementById('ai-model-select').value;
+  const model = selectedModel; // Empty string intentionally means "use backend default model".
 
   appendAIMessage('user', prompt);
   input.value = '';
@@ -305,9 +416,9 @@ async function sendAI() {
     const d = await api('POST', '/api/ai/chat', { prompt, model });
     thinking.remove();
     if (d.status === 'success') {
-      appendAIMessage('bot', d.response || '(no response)');
+      appendAIBotResponse(d.response || '(no response)', d);
     } else {
-      appendAIMessage('bot', `⚠ ${d.message}`);
+      appendAIBotResponse(`⚠ ${escHtml(d.message || 'Unknown AI error')}`, {});
     }
   } catch (e) {
     thinking.remove();
@@ -388,13 +499,94 @@ async function loadSettings() {
   const d = await api('GET', '/api/settings');
   const s = d.settings ?? {};
   use24Hour = s.use_24_hour !== false;
+  selectedAiModelSetting = (s.phala_ai_model || '').trim();
+  savedAiModels = Array.isArray(s.phala_ai_models)
+    ? s.phala_ai_models.map(m => String(m || '').trim()).filter(Boolean)
+    : [];
   document.getElementById('setting-24h').checked = use24Hour;
   document.getElementById('setting-uid').textContent = s.web_user_id ?? '–';
+  const aiInput = document.getElementById('setting-ai-model');
+  if (aiInput) aiInput.value = '';
+  renderSavedAiModelList();
 }
 
 async function saveSetting(key, value) {
   if (key === 'use_24_hour') use24Hour = value;
   await api('POST', '/api/settings', { [key]: value });
+}
+
+async function addAiModelSetting() {
+  const input = document.getElementById('setting-ai-model');
+  if (!input) return;
+  const model = input.value.trim();
+  if (!model) return;
+
+  if (!savedAiModels.includes(model)) {
+    savedAiModels.push(model);
+    await saveSetting('phala_ai_models', savedAiModels);
+  }
+
+  // If no default is set yet, use the first added model as default.
+  if (!selectedAiModelSetting) {
+    selectedAiModelSetting = model;
+    activeAiModelChoice = model;
+    await saveSetting('phala_ai_model', model);
+  }
+
+  input.value = '';
+  renderSavedAiModelList();
+  await initAI();
+}
+
+async function setDefaultAiModel(model) {
+  selectedAiModelSetting = String(model || '').trim();
+  activeAiModelChoice = selectedAiModelSetting;
+  await saveSetting('phala_ai_model', selectedAiModelSetting);
+  renderSavedAiModelList();
+  await initAI();
+}
+
+async function removeAiModelSetting(model) {
+  const target = String(model || '').trim();
+  if (!target) return;
+
+  savedAiModels = savedAiModels.filter(m => m !== target);
+  await saveSetting('phala_ai_models', savedAiModels);
+
+  if (selectedAiModelSetting === target) {
+    selectedAiModelSetting = savedAiModels[0] || '';
+    activeAiModelChoice = selectedAiModelSetting;
+    await saveSetting('phala_ai_model', selectedAiModelSetting);
+  }
+
+  renderSavedAiModelList();
+  await initAI();
+}
+
+function renderSavedAiModelList() {
+  const list = document.getElementById('saved-model-list');
+  if (!list) return;
+
+  if (!savedAiModels.length) {
+    list.innerHTML = '<div class="empty-msg" style="padding:10px 0;">No saved models yet.</div>';
+    return;
+  }
+
+  list.innerHTML = savedAiModels.map(model => {
+    const isDefault = model === selectedAiModelSetting;
+    const displayModel = escHtml(model);
+    const encodedModel = encodeURIComponent(model);
+    return `
+      <div class="saved-model-item">
+        <code class="saved-model-name">${displayModel}</code>
+        <div class="saved-model-actions">
+          <button class="btn btn-sm ${isDefault ? 'btn-primary' : ''}" onclick="setDefaultAiModel(decodeURIComponent('${encodedModel}'))">
+            ${isDefault ? 'Default' : 'Set Default'}
+          </button>
+          <button class="btn btn-sm btn-danger" onclick="removeAiModelSetting(decodeURIComponent('${encodedModel}'))">Remove</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 async function checkHealth() {
@@ -445,6 +637,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeModal();
     document.getElementById('notes-modal').style.display = 'none';
+    closeFullNotes();
   }
 });
 

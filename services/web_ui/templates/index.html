@@ -38,6 +38,7 @@
     <div class="toolbar">
       <button class="btn btn-primary" onclick="openAddTask()">+ Add Task</button>
       <button class="btn" onclick="loadTasks()">↻ Refresh</button>
+      <button class="btn btn-danger" onclick="clearAllTasks()">Clear All Tasks</button>
     </div>
 
     <table class="task-table" id="task-table">
@@ -64,6 +65,7 @@
       <input id="daily-input" class="input" type="text" placeholder="New daily task…" style="flex:1"/>
       <button class="btn btn-primary" onclick="addDailyTask()">+ Add</button>
       <button class="btn" onclick="loadDaily()">↻ Refresh</button>
+      <button class="btn btn-danger" onclick="clearAllDaily()">Clear All Daily</button>
     </div>
     <ul id="daily-list" class="daily-list">
       <li class="empty-msg">Loading…</li>
@@ -78,7 +80,7 @@
       <div class="ai-sidebar">
         <label>Model</label>
         <select id="ai-model-select" class="input">
-          <option value="">Default</option>
+          <option value="">Use configured model</option>
         </select>
         <div id="ai-status" class="ai-status-box">Checking…</div>
       </div>
@@ -125,6 +127,21 @@
         <input type="checkbox" id="setting-24h" onchange="saveSetting('use_24_hour', this.checked)"/>
         Use 24-Hour Time Format
       </label>
+    </div>
+    <div class="settings-card">
+      <h3>AI Model</h3>
+      <p class="help-text">Saved models for this web UI profile.</p>
+      <div id="saved-model-list" class="saved-model-list"></div>
+      <div class="form-row">
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="setting-ai-model">Add model name</label>
+          <input id="setting-ai-model" class="input" type="text" placeholder="deepseek/deepseek-v4-flash"/>
+        </div>
+        <div class="form-group" style="align-self: end; margin-bottom: 0;">
+          <button class="btn" onclick="addAiModelSetting()">Add Model</button>
+        </div>
+      </div>
+      <p class="help-text">Use "Set Default" to choose the model used by default in AI Assistant.</p>
     </div>
     <div class="settings-card">
       <h3>Your CVM Identity</h3>
@@ -194,7 +211,18 @@
       <h2 id="notes-title">Task Notes</h2>
       <pre id="notes-body" class="notes-body"></pre>
       <div class="modal-actions">
+        <button id="notes-read-more" class="btn" style="display:none" onclick="openFullNotes()">Read More</button>
         <button class="btn" onclick="document.getElementById('notes-modal').style.display='none'">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="notes-full-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+      <h2>Full Notes</h2>
+      <pre id="notes-full-body" class="notes-body notes-body-lg"></pre>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeFullNotes()">Close</button>
       </div>
     </div>
   </div>

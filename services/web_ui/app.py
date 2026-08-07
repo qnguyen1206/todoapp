@@ -46,6 +46,7 @@ AI_URL           = os.getenv("AI_URL",         "http://ai_inference:5001")
 SYNC_URL         = os.getenv("SYNC_URL",       "http://task_sync:5002")
 SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 API_KEY          = os.getenv("API_KEY",        "")
+AI_PROXY_TIMEOUT = int(os.getenv("AI_PROXY_TIMEOUT", "60"))
 
 TASK_ENCRYPTION_PREFIX = "ENC2:"
 DAILY_NOTES_PREFIX = "[CVM_DAILY]"
@@ -124,7 +125,7 @@ def _backend(method, path, **kwargs):
 def _ai(method, path, **kwargs):
     url = f"{AI_URL}{path}"
     kwargs.setdefault("headers", _headers())
-    kwargs.setdefault("timeout", 120)
+    kwargs.setdefault("timeout", AI_PROXY_TIMEOUT)
     return req.request(method, url, **kwargs)
 
 def _task_color(due_date_str):
@@ -596,6 +597,35 @@ def delete_task(task_id):
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
+@app.route("/api/tasks/clear", methods=["POST"])
+def clear_tasks_only():
+    """Clear only regular tasks while preserving remote daily tasks."""
+    try:
+        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+
+        preserved_daily = []
+        for task in tasks:
+            if _decode_daily_payload(task.get("notes", "")):
+                kept = dict(task)
+                kept["id"] = str(kept.get("task_id") or kept.get("id") or "")
+                kept.pop("task_id", None)
+                preserved_daily.append(kept)
+
+        r2 = _backend(
+            "POST",
+            "/tasks/replace",
+            json={
+                "user_id": USER_ID,
+                "tasks": _encrypt_tasks(preserved_daily, USER_ID),
+            },
+        )
+        if r2.status_code == 200:
+            return jsonify({"status": "success", "kept_daily": len(preserved_daily)})
+        return jsonify({"status": "error", "message": r2.text}), r2.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
+
 # ---------------------------------------------------------------------------
 # Daily Tasks API (local SQLite)
 # ---------------------------------------------------------------------------
@@ -759,6 +789,42 @@ def delete_daily(task_id):
     conn.close()
     return jsonify({"status": "success"})
 
+@app.route("/api/daily/clear", methods=["POST"])
+def clear_daily_only():
+    """Clear all daily tasks (remote + local) while preserving regular tasks."""
+    try:
+        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+
+        preserved_regular = []
+        for task in tasks:
+            if _decode_daily_payload(task.get("notes", "")):
+                continue
+            kept = dict(task)
+            kept["id"] = str(kept.get("task_id") or kept.get("id") or "")
+            kept.pop("task_id", None)
+            preserved_regular.append(kept)
+
+        r2 = _backend(
+            "POST",
+            "/tasks/replace",
+            json={
+                "user_id": USER_ID,
+                "tasks": _encrypt_tasks(preserved_regular, USER_ID),
+            },
+        )
+        if r2.status_code != 200:
+            return jsonify({"status": "error", "message": r2.text}), r2.status_code
+
+        conn = get_db()
+        conn.execute("DELETE FROM daily_tasks")
+        conn.commit()
+        conn.close()
+
+        return jsonify({"status": "success", "kept_regular": len(preserved_regular)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
+
 # ---------------------------------------------------------------------------
 # AI API (proxy → ai_inference service)
 # ---------------------------------------------------------------------------
@@ -773,10 +839,39 @@ def ai_chat():
         r = _ai("POST", "/inference", json={"prompt": prompt, "model": model})
         if r.status_code == 200:
             return jsonify(r.json())
-        return jsonify({"status": "error", "message": r.text}), r.status_code
+
+        message = f"AI service error ({r.status_code})"
+        receipt_id = ""
+        try:
+            upstream = r.json()
+            if isinstance(upstream, dict):
+                # Extract the deepest human-readable error string.
+                raw = upstream.get("message") or ""
+                if not raw:
+                    err_obj = upstream.get("error", {})
+                    if isinstance(err_obj, dict):
+                        raw = err_obj.get("message") or ""
+                # Strip internal URL noise from upstream verifier errors.
+                if "upstream verification failed" in raw.lower():
+                    message = "AI model route temporarily unavailable. Try again or select a different model."
+                elif raw:
+                    message = raw
+                receipt_id = upstream.get("receipt_id", "")
+        except Exception:
+            pass
+
+        payload = {"status": "error", "message": message}
+        if receipt_id:
+            payload["receipt_id"] = receipt_id
+        return jsonify(payload), r.status_code
+    except req.exceptions.Timeout:
+        return jsonify({
+            "status": "error",
+            "message": "AI request timed out waiting for ai_inference. Please try again."
+        }), 504
     except req.exceptions.ConnectionError:
         return jsonify({"status": "error",
-                        "message": "AI service not available. Is Ollama running inside the CVM?"}), 503
+                        "message": "AI service not available. Check ai_inference service health in CVM."}), 503
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
@@ -870,12 +965,53 @@ def get_character():
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
+def _normalize_model_list(models):
+    """Normalize model list: trimmed, unique, non-empty strings."""
+    out = []
+    seen = set()
+    for item in models or []:
+        model = str(item or "").strip()
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        out.append(model)
+    return out
+
+
+def _get_saved_ai_models(default_model=""):
+    """Return saved model list from settings storage."""
+    raw = _get_setting("phala_ai_models", "")
+    models = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                models = parsed
+        except Exception:
+            models = []
+
+    models = _normalize_model_list(models)
+    if default_model and default_model not in models:
+        models.insert(0, default_model)
+    return models
+
+
+def _save_ai_models(models):
+    """Persist normalized model list as JSON string."""
+    normalized = _normalize_model_list(models)
+    _set_setting("phala_ai_models", json.dumps(normalized, ensure_ascii=False))
+
+
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     workspace_key_ready = bool(_workspace_key_for_user(USER_ID))
+    default_model = _get_setting("phala_ai_model", os.getenv("PHALA_AI_MODEL", "")).strip()
+    saved_models = _get_saved_ai_models(default_model)
     return jsonify({"status": "success", "settings": {
         "use_24_hour": _get_setting("use_24_hour", "true") == "true",
         "web_user_id": USER_ID,
+        "phala_ai_model": default_model,
+        "phala_ai_models": saved_models,
         "crypto": {
             "device_id": _get_setting("crypto_device_id", "") or None,
             "workspace_key_ready": workspace_key_ready,
@@ -907,9 +1043,12 @@ def crypto_status():
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
     data = request.get_json(silent=True) or {}
-    for key in ("use_24_hour",):
-        if key in data:
-            _set_setting(key, str(data[key]).lower())
+    if "use_24_hour" in data:
+        _set_setting("use_24_hour", str(data["use_24_hour"]).lower())
+    if "phala_ai_model" in data:
+        _set_setting("phala_ai_model", str(data["phala_ai_model"]).strip())
+    if "phala_ai_models" in data and isinstance(data["phala_ai_models"], list):
+        _save_ai_models(data["phala_ai_models"])
     return jsonify({"status": "success"})
 
 # ---------------------------------------------------------------------------

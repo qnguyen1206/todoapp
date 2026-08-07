@@ -78,6 +78,7 @@ class DailyToDoManager:
         daily_add_frame = ttk.Frame(self.daily_todo_frame)
         daily_add_frame.pack(side=tk.BOTTOM, pady=5, padx=10, fill=tk.X)
         ttk.Button(daily_add_frame, text="+ Add", command=self.add_daily_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(daily_add_frame, text="Clear All Daily", command=self.clear_all_daily_tasks).pack(side=tk.RIGHT, padx=5)
         
         # Create Treeview for daily tasks with action columns
         self.daily_tree = ttk.Treeview(self.daily_todo_frame, columns=("Days", "Time", "Task", "Status", "Complete", "Edit", "Delete", "Original"), show="headings", height=6)
@@ -1032,6 +1033,23 @@ class DailyToDoManager:
             # Re-sort tasks after deleting to maintain chronological order
             self.sort_tree_by_time()
             messagebox.showinfo("Success", "Task deleted!")
+
+    def clear_all_daily_tasks(self):
+        """Delete all tasks shown in the Daily tab."""
+        item_ids = self.daily_tree.get_children()
+        if not item_ids:
+            messagebox.showinfo("Info", "No daily tasks to clear.")
+            return
+
+        if not messagebox.askyesno(
+            "Clear All Daily Tasks",
+            "Are you sure you want to delete all tasks in the Daily tab?"
+        ):
+            return
+
+        self.daily_tree.delete(*item_ids)
+        self.save_daily_tasks()
+        messagebox.showinfo("Success", "All daily tasks were cleared.")
 
     def add_daily_task(self):
         """Add a new daily task"""

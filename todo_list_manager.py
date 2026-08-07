@@ -5,6 +5,7 @@ editing, completion tracking, and task management with notes support.
 """
 
 import os
+import json
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkcalendar import DateEntry
@@ -14,6 +15,8 @@ import re
 
 
 class ToDoListManager:
+    NOTES_STORAGE_PREFIX = "__JSON_NOTES__:"
+
     def __init__(self, parent_app, todo_frame):
         self.parent_app = parent_app
         self.todo_frame = todo_frame
@@ -56,6 +59,7 @@ class ToDoListManager:
         control_frame.pack(pady=5, padx=10, fill=tk.X)
         ttk.Button(control_frame, text="+ Add Task", command=self.add_task_dialog).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="+ Add Multiple Tasks", command=self.add_multiple_tasks_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Clear All Tasks", command=self.clear_all_tasks).pack(side=tk.RIGHT, padx=5)
 
     def on_tree_click(self, event):
         """Handle clicks on main task action buttons"""
@@ -78,6 +82,48 @@ class ToDoListManager:
             elif col_name == "Task":  # Task name clicked - show notes
                 self.show_task_notes(item)
 
+    def _encode_notes_for_storage(self, notes):
+        """Store notes safely on a single line while preserving paragraphs."""
+        if not notes or str(notes).strip() == "":
+            notes = "No notes"
+        normalized = str(notes).replace("\r\n", "\n").replace("\r", "\n")
+        return self.NOTES_STORAGE_PREFIX + json.dumps(normalized, ensure_ascii=False)
+
+    def _decode_notes_from_storage(self, notes):
+        """Decode notes from storage, with backward compatibility for legacy text."""
+        if not notes:
+            return "No notes"
+
+        raw = str(notes)
+        if raw.startswith(self.NOTES_STORAGE_PREFIX):
+            try:
+                decoded = json.loads(raw[len(self.NOTES_STORAGE_PREFIX):])
+                return decoded if decoded else "No notes"
+            except Exception:
+                pass
+
+        # Backward compatibility for older escaped text.
+        return raw.replace("\\n", "\n") if raw else "No notes"
+
+    def _open_full_notes_window(self, task_name, notes):
+        """Open a larger read-only window for very long notes."""
+        full_dialog = tk.Toplevel(self.parent_app.root)
+        full_dialog.title(f"Full Notes: {task_name}")
+        full_dialog.geometry("760x560")
+        full_dialog.resizable(True, True)
+
+        self.parent_app.register_dialog(full_dialog)
+
+        ttk.Label(full_dialog, text=f"Task: {task_name}", font=('Helvetica', 12, 'bold')).pack(padx=10, pady=(10, 4), anchor='w')
+        ttk.Label(full_dialog, text="Full Notes", font=('Helvetica', 10, 'bold')).pack(padx=10, pady=(0, 6), anchor='w')
+
+        text = tk.Text(full_dialog, wrap=tk.WORD)
+        text.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+        text.insert("1.0", notes if notes and notes != "No notes" else "No notes")
+        text.config(state='disabled')
+
+        ttk.Button(full_dialog, text="Close", command=full_dialog.destroy).pack(pady=8)
+
     def show_task_notes(self, item):
         """Show notes/details for the selected task"""
         try:
@@ -94,6 +140,10 @@ class ToDoListManager:
             task_name = full_data[0]
             # New format: (task, date, time, priority, notes) - notes is index 4
             notes = full_data[4] if len(full_data) > 4 else ""
+            full_notes = notes if notes and notes != "No notes" else "No notes"
+            preview_limit = 600
+            is_long = len(full_notes) > preview_limit
+            preview = (full_notes[:preview_limit] + "\n\n[... truncated ...]") if is_long else full_notes
             
             # Create notes display dialog
             notes_dialog = tk.Toplevel(self.parent_app.root)
@@ -115,8 +165,8 @@ class ToDoListManager:
             
             # Insert notes or default message
             notes_text.config(state='normal')
-            if notes.strip() and notes != "No notes":
-                notes_text.insert("1.0", notes)
+            if full_notes.strip() and full_notes != "No notes":
+                notes_text.insert("1.0", preview)
             else:
                 notes_text.insert("1.0", "No notes/extra info/details available for this task.")
                 notes_text.tag_add("italic", "1.0", "end")
@@ -129,6 +179,13 @@ class ToDoListManager:
             
             # Edit Task button (primary action)
             ttk.Button(button_frame, text="✎ Edit Task", command=lambda: self.edit_task_from_notes(notes_dialog, item)).pack(side=tk.LEFT, padx=5)
+
+            if is_long:
+                ttk.Button(
+                    button_frame,
+                    text="Read More",
+                    command=lambda: self._open_full_notes_window(task_name, full_notes)
+                ).pack(side=tk.LEFT, padx=5)
             
             # Close button
             ttk.Button(button_frame, text="Close", command=notes_dialog.destroy).pack(side=tk.RIGHT, padx=5)
@@ -1467,6 +1524,23 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         self.save_tasks(tasks)
         self.refresh_task_list()
 
+    def clear_all_tasks(self):
+        """Delete all tasks from the main task list."""
+        tasks = self.load_tasks()
+        if not tasks:
+            messagebox.showinfo("Info", "No tasks to clear.")
+            return
+
+        if not messagebox.askyesno(
+            "Clear All Tasks",
+            "Are you sure you want to delete all tasks in the Tasks tab?"
+        ):
+            return
+
+        self.save_tasks([])
+        self.refresh_task_list()
+        messagebox.showinfo("Success", "All tasks were cleared.")
+
     def refresh_task_list(self):
         """Refresh the task list display"""
         self.tree.delete(*self.tree.get_children())  # Clear existing tasks
@@ -1620,6 +1694,8 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                                     notes = "No notes"
                             else:
                                 notes = "No notes"
+
+                        notes = self._decode_notes_from_storage(notes)
                         
                         tasks.append((task_name, due_date, due_time, priority, notes))
                     except ValueError as e:
@@ -1657,13 +1733,15 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 # Handle empty notes - always ensure we have "No notes" if empty
                 if not notes or notes.strip() == "":
                     notes = "No notes"
+
+                stored_notes = self._encode_notes_for_storage(notes)
                 
                 # Handle empty time
                 if not due_time:
                     due_time = ""
                 
                 # Create the line with proper formatting (including time)
-                task_line = f"{task_name} | {date} | {due_time} | {priority} | {notes}"
+                task_line = f"{task_name} | {date} | {due_time} | {priority} | {stored_notes}"
                 f.write(task_line + "\n")
     
         # Sync to MySQL if enabled and not skipping
