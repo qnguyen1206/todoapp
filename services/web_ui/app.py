@@ -842,6 +842,7 @@ def ai_chat():
 
         message = f"AI service error ({r.status_code})"
         receipt_id = ""
+        attestation = ""
         try:
             upstream = r.json()
             if isinstance(upstream, dict):

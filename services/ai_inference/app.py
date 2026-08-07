@@ -46,6 +46,7 @@ FALLBACK_MODEL = os.getenv(
 )
 
 AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "45"))
+ATTESTATION_TIMEOUT = int(os.getenv("ATTESTATION_TIMEOUT", "30"))
 
 SYSTEM_PROMPT = "You are a helpful task management assistant."
 
@@ -129,7 +130,12 @@ def phala_request(messages, model, nonce):
 
     receipt_id = response.headers.get("x-receipt-id", "").strip()
 
-    attestation = get_attestation(nonce)
+    attestation = ""
+    try:
+        # Best-effort: attestation should not block or fail the chat response path.
+        attestation = get_attestation(nonce)
+    except Exception as exc:
+        log.warning("Attestation fetch failed: %s", exc)
 
     return {
         "json": response.json(),
@@ -185,7 +191,7 @@ def get_attestation(nonce):
         headers={
             "Authorization": f"Bearer {PHALA_AI_API_KEY}"
         },
-        timeout=30
+        timeout=ATTESTATION_TIMEOUT
     )
 
     r.raise_for_status()

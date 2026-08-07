@@ -30,9 +30,9 @@ document.querySelectorAll('.tab').forEach(btn => {
 });
 
 /* ── Helpers ───────────────────────────────────────────────────── */
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs = 20000) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 20000);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const opts = { method, headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal };
     if (body !== undefined) opts.body = JSON.stringify(body);
@@ -377,90 +377,21 @@ function appendAIMessage(role, text) {
   return div;
 }
 
-function parseAttestation(attestation) {
-  if (!attestation) return null;
-  if (typeof attestation === 'object') return attestation;
+function normalizeAttestation(attestation) {
+  if (!attestation) return '';
   if (typeof attestation === 'string') {
     try {
-      return JSON.parse(attestation);
+      const parsed = JSON.parse(attestation);
+      return JSON.stringify(parsed, null, 2);
     } catch {
-      return null;
+      return attestation;
     }
   }
-  return null;
-}
-
-function shortValue(value, max = 100) {
-  const s = String(value ?? '');
-  return s.length > max ? `${s.slice(0, max)}...` : s;
-}
-
-function hasValue(value) {
-  return value !== undefined && value !== null && value !== '';
-}
-
-function attestationSummaryText(attestation) {
-  const parsed = parseAttestation(attestation);
-  if (!parsed) {
-    if (!attestation) return '';
-    return `Attestation present, but could not parse structured fields.\n\nRaw value:\n${String(attestation)}`;
+  try {
+    return JSON.stringify(attestation, null, 2);
+  } catch {
+    return String(attestation);
   }
-
-  const apiVersion = parsed.api_version;
-  const workloadId = parsed.workload_id;
-  const keysetDigest = parsed.workload_keyset_digest;
-  const a = parsed.attestation || {};
-  const freshness = a.freshness || {};
-  const staleAfter = freshness.stale_after;
-  const staleAfterMs = staleAfter ? Date.parse(staleAfter) : NaN;
-  const isFresh = Number.isFinite(staleAfterMs) && staleAfterMs > Date.now();
-  const provenance = a.source_provenance || {};
-  const reportData = a.report_data;
-  const workloadKeyset = a.workload_keyset || {};
-  const receiptKeys = Array.isArray(workloadKeyset.receipt_signing_keys)
-    ? workloadKeyset.receipt_signing_keys.length
-    : 0;
-  const evidenceQuote = a.evidence?.quote;
-  const keysetEndorsement = a.keyset_endorsement;
-  const serviceCapabilities = parsed.service_capabilities;
-
-  const checkApi = apiVersion === 'aci/1';
-  const checkFresh = isFresh;
-  const checkIds = hasValue(workloadId) && hasValue(keysetDigest);
-  const checkProvenancePresent = hasValue(provenance) && typeof provenance === 'object' && Object.keys(provenance).length > 0;
-  const checkReportDataPresent = hasValue(reportData);
-
-  const checks = [
-    `- api_version is aci/1: ${checkApi ? 'PASS' : 'FAIL'} (found: ${shortValue(apiVersion || 'missing')})`,
-    `- attestation.freshness.stale_after is in the future: ${checkFresh ? 'PASS' : 'FAIL'} (stale_after: ${shortValue(staleAfter || 'missing')})`,
-    `- workload_id and workload_keyset_digest are present: ${checkIds ? 'PASS' : 'FAIL'}`,
-    `- attestation.source_provenance matches trusted release: ${checkProvenancePresent ? 'PRESENT (manual trust match required)' : 'MISSING'}`,
-    `- attestation.report_data bound to nonce/keyset: ${checkReportDataPresent ? 'PRESENT (cryptographic binding not verified in Web UI)' : 'MISSING'}`,
-  ];
-
-  const fields = [
-    `- workload_id: ${shortValue(workloadId || 'missing')}`,
-    `- workload_keyset_digest: ${shortValue(keysetDigest || 'missing')}`,
-    `- attestation.tee_type: ${shortValue(a.tee_type || 'missing')}`,
-    `- attestation.evidence.quote: ${hasValue(evidenceQuote) ? `present (${String(evidenceQuote).length} chars)` : 'missing'}`,
-    `- attestation.report_data: ${hasValue(reportData) ? shortValue(reportData) : 'missing'}`,
-    `- attestation.workload_keyset: ${Object.keys(workloadKeyset).length ? `present (receipt_signing_keys=${receiptKeys})` : 'missing'}`,
-    `- attestation.keyset_endorsement: ${hasValue(keysetEndorsement) ? 'present' : 'missing'}`,
-    `- attestation.source_provenance.repo_url: ${shortValue(provenance.repo_url || 'missing')}`,
-    `- attestation.source_provenance.repo_commit: ${shortValue(provenance.repo_commit || 'missing')}`,
-    `- attestation.source_provenance.image_digest: ${shortValue(provenance.image_digest || 'missing')}`,
-    `- attestation.freshness.fetched_at: ${shortValue(freshness.fetched_at || 'missing')}`,
-    `- attestation.freshness.stale_after: ${shortValue(staleAfter || 'missing')}`,
-    `- service_capabilities: ${hasValue(serviceCapabilities) ? shortValue(JSON.stringify(serviceCapabilities)) : 'missing'}`,
-  ];
-
-  return [
-    'Attestation checks',
-    ...checks,
-    '',
-    'Report fields',
-    ...fields,
-  ].join('\n');
 }
 
 function appendAIBotResponse(text, payload) {
@@ -481,7 +412,7 @@ function appendAIBotResponse(text, payload) {
     div.appendChild(meta);
   }
 
-  const attestationText = attestationSummaryText(payload?.attestation);
+  const attestationText = normalizeAttestation(payload?.attestation);
   if (attestationText) {
     const details = document.createElement('details');
     details.className = 'ai-attestation';
@@ -515,7 +446,7 @@ async function sendAI() {
   const thinking = appendAIMessage('bot thinking', '…thinking…');
 
   try {
-    const d = await api('POST', '/api/ai/chat', { prompt, model });
+    const d = await api('POST', '/api/ai/chat', { prompt, model }, 90000);
     thinking.remove();
     if (d.status === 'success') {
       appendAIBotResponse(d.response || '(no response)', d);
