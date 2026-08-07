@@ -181,6 +181,29 @@ header {
 .ai-input-row { display: flex; gap: 8px; align-items: flex-end; }
 .ai-textarea { resize: none; flex: 1; }
 
+.ai-attestation{
+    margin-top:10px;
+    border:1px solid #ddd;
+    border-radius:6px;
+    background:#fafafa;
+    padding:8px;
+}
+
+.ai-attestation summary{
+    cursor:pointer;
+    font-weight:600;
+    color:#1976d2;
+}
+
+.ai-attestation pre{
+    margin-top:8px;
+    max-height:250px;
+    overflow:auto;
+    font-size:11px;
+    white-space:pre-wrap;
+    font-family:monospace;
+}
+
 /* ── Calendar ─────────────────────────────────────────────── */
 .cal-nav { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
 .cal-title { font-size: 16px; font-weight: 600; min-width: 160px; text-align: center; }

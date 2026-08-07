@@ -396,11 +396,20 @@ function appendAIBotResponse(text, payload) {
   }
 
   const attestation = payload?.attestation || '';
-  if (receiptId) {
-    const meta = document.createElement('div');
-    meta.className = 'ai-attestation';
-    meta.textContent = `Attestation: ${attestation}`;
-    div.appendChild(meta);
+  if (attestation) {
+    const details = document.createElement("details");
+    details.className = "ai-attestation";
+
+    const summary = document.createElement("summary");
+    summary.textContent = "🔒 Attestation";
+
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(payload.attestation, null, 2);
+
+    details.appendChild(summary);
+    details.appendChild(pre);
+
+    div.appendChild(details);
   }
 
   chat.appendChild(div);

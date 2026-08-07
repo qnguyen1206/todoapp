@@ -245,7 +245,7 @@ def inference():
     ]
 
     try:
-        nonce = secrets.token_urlsafe(16)
+        nonce = secrets.token_urlsafe(32)
         result = phala_request_with_fallback(messages, requested_model, nonce)
         response_text = _extract_text_response(result.get("json", {}))
         if not response_text:
@@ -288,7 +288,7 @@ def chat():
     requested_model = data.get("model") or DEFAULT_MODEL
 
     try:
-        nonce = secrets.token_urlsafe(16)
+        nonce = secrets.token_urlsafe(32)
         result = phala_request_with_fallback(messages, requested_model, nonce)
         return jsonify({"status": "success",
                         "message": result["json"].get("choices", [{}])[0].get("message", {}),
