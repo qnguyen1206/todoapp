@@ -433,6 +433,37 @@ function appendAIBotResponse(text, payload) {
   return div;
 }
 
+async function loadAttestationForMessage(messageNode, nonce) {
+  if (!messageNode || !nonce) return;
+
+  const existing = messageNode.querySelector('.ai-attestation');
+  if (existing) existing.remove();
+
+  const details = document.createElement('details');
+  details.className = 'ai-attestation';
+
+  const summary = document.createElement('summary');
+  summary.textContent = 'Attestation';
+
+  const pre = document.createElement('pre');
+  pre.textContent = 'Loading attestation...';
+
+  details.appendChild(summary);
+  details.appendChild(pre);
+  messageNode.appendChild(details);
+
+  try {
+    const attestation = await api('GET', `/api/ai/attestation?nonce=${encodeURIComponent(nonce)}`, undefined, 30000);
+    if (attestation.status === 'error') {
+      pre.textContent = attestation.message || 'Attestation request failed';
+      return;
+    }
+    pre.textContent = normalizeAttestation(attestation);
+  } catch (e) {
+    pre.textContent = `Attestation fetch failed: ${e.message}`;
+  }
+}
+
 async function sendAI() {
   const input = document.getElementById('ai-input');
   const prompt = input.value.trim();
@@ -448,10 +479,16 @@ async function sendAI() {
   try {
     const d = await api('POST', '/api/ai/chat', { prompt, model }, 90000);
     thinking.remove();
+    const messageNode = d.status === 'success'
+      ? appendAIBotResponse(d.response || '(no response)', d)
+      : appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
+
     if (d.status === 'success') {
-      appendAIBotResponse(d.response || '(no response)', d);
-    } else {
-      appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
+      if (d.nonce) {
+        loadAttestationForMessage(messageNode, d.nonce);
+      }
+    } else if (d.nonce) {
+      loadAttestationForMessage(messageNode, d.nonce);
     }
   } catch (e) {
     thinking.remove();

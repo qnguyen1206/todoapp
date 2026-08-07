@@ -842,7 +842,7 @@ def ai_chat():
 
         message = f"AI service error ({r.status_code})"
         receipt_id = ""
-        attestation = ""
+        nonce = ""
         try:
             upstream = r.json()
             if isinstance(upstream, dict):
@@ -858,15 +858,15 @@ def ai_chat():
                 elif raw:
                     message = raw
                 receipt_id = upstream.get("receipt_id", "")
-                attestation = upstream.get("attestation", "")
+                nonce = upstream.get("nonce", "")
         except Exception:
             pass
 
         payload = {"status": "error", "message": message}
         if receipt_id:
             payload["receipt_id"] = receipt_id
-        if attestation:
-            payload["attestation"] = attestation
+        if nonce:
+            payload["nonce"] = nonce
         return jsonify(payload), r.status_code
     except req.exceptions.Timeout:
         return jsonify({
@@ -888,6 +888,25 @@ def ai_models():
         return jsonify({"status": "success", "models": []})
     except Exception:
         return jsonify({"status": "success", "models": []})
+
+
+@app.route("/api/ai/attestation", methods=["GET"])
+def ai_attestation():
+    nonce = (request.args.get("nonce") or "").strip()
+    if not nonce:
+        return jsonify({"status": "error", "message": "nonce required"}), 400
+
+    try:
+        r = _ai("GET", "/attestation", params={"nonce": nonce}, timeout=15)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        return jsonify({"status": "error", "message": r.text}), r.status_code
+    except req.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "attestation request timed out"}), 504
+    except req.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "attestation service unavailable"}), 503
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/ai/health", methods=["GET"])
 def ai_health():

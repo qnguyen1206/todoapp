@@ -46,7 +46,7 @@ FALLBACK_MODEL = os.getenv(
 )
 
 AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "45"))
-ATTESTATION_TIMEOUT = int(os.getenv("ATTESTATION_TIMEOUT", "30"))
+ATTESTATION_TIMEOUT = int(os.getenv("ATTESTATION_TIMEOUT", "120"))
 
 SYSTEM_PROMPT = "You are a helpful task management assistant."
 
@@ -130,17 +130,10 @@ def phala_request(messages, model, nonce):
 
     receipt_id = response.headers.get("x-receipt-id", "").strip()
 
-    attestation = ""
-    try:
-        # Best-effort: attestation should not block or fail the chat response path.
-        attestation = get_attestation(nonce)
-    except Exception as exc:
-        log.warning("Attestation fetch failed: %s", exc)
-
     return {
         "json": response.json(),
         "receipt_id": receipt_id,
-        "attestation" : attestation,
+        "nonce": nonce,
     }
 
 
@@ -262,7 +255,7 @@ def inference():
         return jsonify({"status": "success", "response": response_text,
                         "model": result.get("used_model", requested_model),
                         "receipt_id": result.get("receipt_id", ""),
-                        "attestation": result.get("attestation", "")})
+                        "nonce": result.get("nonce", "")})
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
@@ -300,7 +293,7 @@ def chat():
                         "message": result["json"].get("choices", [{}])[0].get("message", {}),
                         "model": result.get("used_model", requested_model),
                         "receipt_id": result.get("receipt_id", ""),
-                        "attestation": result.get("attestation", "")})
+                        "nonce": result.get("nonce", "")})
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
