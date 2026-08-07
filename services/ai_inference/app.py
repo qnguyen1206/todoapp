@@ -103,8 +103,9 @@ def _extract_text_response(payload):
     return ""
 
 
-def phala_request(messages, model):
+def phala_request(messages, model, nonce):
     """Send a chat completion request to Phala Confidential AI."""
+
     headers = {
         "Authorization": f"Bearer {PHALA_AI_API_KEY}",
         "Content-Type": "application/json",
@@ -127,10 +128,13 @@ def phala_request(messages, model):
     response.raise_for_status()
 
     receipt_id = response.headers.get("x-receipt-id", "").strip()
+
+    attestation = get_attestation(nonce)
+
     return {
         "json": response.json(),
         "receipt_id": receipt_id,
-        "attestation" : None,
+        "attestation" : attestation,
     }
 
 
@@ -155,18 +159,18 @@ def _is_upstream_verification_route_failure(exc):
     )
 
 
-def phala_request_with_fallback(messages, requested_model):
+def phala_request_with_fallback(messages, requested_model, nonce):
     """Try requested model first; retry once on route verification failure."""
     model = requested_model or DEFAULT_MODEL
     try:
-        result = phala_request(messages, model)
+        result = phala_request(messages, model, nonce)
         result["used_model"] = model
         return result
     except requests.exceptions.HTTPError as exc:
         # Retry only when the selected route is unavailable and fallback is different.
         if model != FALLBACK_MODEL and _is_upstream_verification_route_failure(exc):
             log.warning("Primary model route unavailable, retrying fallback model: %s", FALLBACK_MODEL)
-            result = phala_request(messages, FALLBACK_MODEL)
+            result = phala_request(messages, FALLBACK_MODEL, nonce)
             result["used_model"] = FALLBACK_MODEL
             result["fallback_from"] = model
             return result
@@ -241,7 +245,8 @@ def inference():
     ]
 
     try:
-        result = phala_request_with_fallback(messages, requested_model)
+        nonce = secrets.token_urlsafe(16)
+        result = phala_request_with_fallback(messages, requested_model, nonce)
         response_text = _extract_text_response(result.get("json", {}))
         if not response_text:
             return jsonify({"status": "error",
@@ -250,7 +255,8 @@ def inference():
 
         return jsonify({"status": "success", "response": response_text,
                         "model": result.get("used_model", requested_model),
-                        "receipt_id": result.get("receipt_id", "")})
+                        "receipt_id": result.get("receipt_id", ""),
+                        "attestation": result.get("attestation", "")})
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
@@ -282,11 +288,13 @@ def chat():
     requested_model = data.get("model") or DEFAULT_MODEL
 
     try:
-        result = phala_request_with_fallback(messages, requested_model)
+        nonce = secrets.token_urlsafe(16)
+        result = phala_request_with_fallback(messages, requested_model, nonce)
         return jsonify({"status": "success",
                         "message": result["json"].get("choices", [{}])[0].get("message", {}),
                         "model": result.get("used_model", requested_model),
-                        "receipt_id": result.get("receipt_id", "")})
+                        "receipt_id": result.get("receipt_id", ""),
+                        "attestation": result.get("attestation", "")})
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504

@@ -395,6 +395,14 @@ function appendAIBotResponse(text, payload) {
     div.appendChild(meta);
   }
 
+  const attestation = payload?.attestation || '';
+  if (receiptId) {
+    const meta = document.createElement('div');
+    meta.className = 'ai-attestation';
+    meta.textContent = `Attestation: ${attestation}`;
+    div.appendChild(meta);
+  }
+
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;

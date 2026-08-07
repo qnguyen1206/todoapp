@@ -857,12 +857,15 @@ def ai_chat():
                 elif raw:
                     message = raw
                 receipt_id = upstream.get("receipt_id", "")
+                attestation = upstream.get("attestation", "")
         except Exception:
             pass
 
         payload = {"status": "error", "message": message}
         if receipt_id:
             payload["receipt_id"] = receipt_id
+        if attestation:
+            payload["attestation"] = attestation
         return jsonify(payload), r.status_code
     except req.exceptions.Timeout:
         return jsonify({
