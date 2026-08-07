@@ -377,6 +377,92 @@ function appendAIMessage(role, text) {
   return div;
 }
 
+function parseAttestation(attestation) {
+  if (!attestation) return null;
+  if (typeof attestation === 'object') return attestation;
+  if (typeof attestation === 'string') {
+    try {
+      return JSON.parse(attestation);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function shortValue(value, max = 100) {
+  const s = String(value ?? '');
+  return s.length > max ? `${s.slice(0, max)}...` : s;
+}
+
+function hasValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function attestationSummaryText(attestation) {
+  const parsed = parseAttestation(attestation);
+  if (!parsed) {
+    if (!attestation) return '';
+    return `Attestation present, but could not parse structured fields.\n\nRaw value:\n${String(attestation)}`;
+  }
+
+  const apiVersion = parsed.api_version;
+  const workloadId = parsed.workload_id;
+  const keysetDigest = parsed.workload_keyset_digest;
+  const a = parsed.attestation || {};
+  const freshness = a.freshness || {};
+  const staleAfter = freshness.stale_after;
+  const staleAfterMs = staleAfter ? Date.parse(staleAfter) : NaN;
+  const isFresh = Number.isFinite(staleAfterMs) && staleAfterMs > Date.now();
+  const provenance = a.source_provenance || {};
+  const reportData = a.report_data;
+  const workloadKeyset = a.workload_keyset || {};
+  const receiptKeys = Array.isArray(workloadKeyset.receipt_signing_keys)
+    ? workloadKeyset.receipt_signing_keys.length
+    : 0;
+  const evidenceQuote = a.evidence?.quote;
+  const keysetEndorsement = a.keyset_endorsement;
+  const serviceCapabilities = parsed.service_capabilities;
+
+  const checkApi = apiVersion === 'aci/1';
+  const checkFresh = isFresh;
+  const checkIds = hasValue(workloadId) && hasValue(keysetDigest);
+  const checkProvenancePresent = hasValue(provenance) && typeof provenance === 'object' && Object.keys(provenance).length > 0;
+  const checkReportDataPresent = hasValue(reportData);
+
+  const checks = [
+    `- api_version is aci/1: ${checkApi ? 'PASS' : 'FAIL'} (found: ${shortValue(apiVersion || 'missing')})`,
+    `- attestation.freshness.stale_after is in the future: ${checkFresh ? 'PASS' : 'FAIL'} (stale_after: ${shortValue(staleAfter || 'missing')})`,
+    `- workload_id and workload_keyset_digest are present: ${checkIds ? 'PASS' : 'FAIL'}`,
+    `- attestation.source_provenance matches trusted release: ${checkProvenancePresent ? 'PRESENT (manual trust match required)' : 'MISSING'}`,
+    `- attestation.report_data bound to nonce/keyset: ${checkReportDataPresent ? 'PRESENT (cryptographic binding not verified in Web UI)' : 'MISSING'}`,
+  ];
+
+  const fields = [
+    `- workload_id: ${shortValue(workloadId || 'missing')}`,
+    `- workload_keyset_digest: ${shortValue(keysetDigest || 'missing')}`,
+    `- attestation.tee_type: ${shortValue(a.tee_type || 'missing')}`,
+    `- attestation.evidence.quote: ${hasValue(evidenceQuote) ? `present (${String(evidenceQuote).length} chars)` : 'missing'}`,
+    `- attestation.report_data: ${hasValue(reportData) ? shortValue(reportData) : 'missing'}`,
+    `- attestation.workload_keyset: ${Object.keys(workloadKeyset).length ? `present (receipt_signing_keys=${receiptKeys})` : 'missing'}`,
+    `- attestation.keyset_endorsement: ${hasValue(keysetEndorsement) ? 'present' : 'missing'}`,
+    `- attestation.source_provenance.repo_url: ${shortValue(provenance.repo_url || 'missing')}`,
+    `- attestation.source_provenance.repo_commit: ${shortValue(provenance.repo_commit || 'missing')}`,
+    `- attestation.source_provenance.image_digest: ${shortValue(provenance.image_digest || 'missing')}`,
+    `- attestation.freshness.fetched_at: ${shortValue(freshness.fetched_at || 'missing')}`,
+    `- attestation.freshness.stale_after: ${shortValue(staleAfter || 'missing')}`,
+    `- service_capabilities: ${hasValue(serviceCapabilities) ? shortValue(JSON.stringify(serviceCapabilities)) : 'missing'}`,
+  ];
+
+  return [
+    'Attestation checks',
+    ...checks,
+    '',
+    'Report fields',
+    ...fields,
+  ].join('\n');
+}
+
 function appendAIBotResponse(text, payload) {
   const chat = document.getElementById('ai-chat');
   const div = document.createElement('div');
@@ -395,20 +481,19 @@ function appendAIBotResponse(text, payload) {
     div.appendChild(meta);
   }
 
-  const attestation = payload?.attestation || '';
-  if (attestation) {
-    const details = document.createElement("details");
-    details.className = "ai-attestation";
+  const attestationText = attestationSummaryText(payload?.attestation);
+  if (attestationText) {
+    const details = document.createElement('details');
+    details.className = 'ai-attestation';
 
-    const summary = document.createElement("summary");
-    summary.textContent = "🔒 Attestation";
+    const summary = document.createElement('summary');
+    summary.textContent = 'Attestation';
 
-    const pre = document.createElement("pre");
-    pre.textContent = JSON.stringify(payload.attestation, null, 2);
+    const pre = document.createElement('pre');
+    pre.textContent = attestationText;
 
     details.appendChild(summary);
     details.appendChild(pre);
-
     div.appendChild(details);
   }
 
@@ -435,11 +520,11 @@ async function sendAI() {
     if (d.status === 'success') {
       appendAIBotResponse(d.response || '(no response)', d);
     } else {
-      appendAIBotResponse(`⚠ ${escHtml(d.message || 'Unknown AI error')}`, {});
+      appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
     }
   } catch (e) {
     thinking.remove();
-    appendAIMessage('bot', `✗ Error: ${e.message}`);
+    appendAIBotResponse(`✗ Error: ${e.message}`, {});
   }
 }
 

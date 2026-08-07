@@ -190,9 +190,25 @@ header {
 }
 
 .ai-attestation summary{
+  list-style: none;
     cursor:pointer;
     font-weight:600;
     color:#1976d2;
+}
+
+.ai-attestation summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-attestation summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform .15s ease;
+}
+
+.ai-attestation[open] summary::before {
+  transform: rotate(90deg);
 }
 
 .ai-attestation pre{
