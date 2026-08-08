@@ -1,118 +1,118 @@
 {
-  "generated": "2026-08-03T15:15:55.041269Z",
+  "generated": "2026-08-08T14:20:49.037125Z",
   "modules": {
     "README.md": {
       "hash": "be0f5124cc6edc63996cfcaf09fcfbd9ac99d8a99c803a8512e2e207833427e1",
       "required": false,
       "size": 4105,
       "type": "docs",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "ai_assistant.py": {
       "hash": "8e846eb4a97b3a3505cb99e9d0ca2faa896e7d506ff6549a7e97a396471a7dda",
       "required": true,
       "size": 28489,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "calendar_view.py": {
       "hash": "9d9833820feb6c40d891d9771307765e9969e50da31a51d7fe699ceb1e102afc",
       "required": true,
       "size": 28389,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "clipboard.png": {
       "hash": "1846afeff4e214c218c75b0d2ee637e88c3c6c6e76732ac65fbbe35eec1cd14c",
       "required": true,
       "size": 20986,
       "type": "asset",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "cvm_client.py": {
       "hash": "445d834c86ab99f98a35e9105a5ba942b3faeffe7a656bf1cba7ccacb9550907",
       "required": true,
       "size": 28623,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "cvm_config.json": {
       "hash": "2deca7e06bcd21b19cd8e52e9e904a4fb516784ae3dce2edab219f714df9b124",
       "required": true,
       "size": 633,
       "type": "config",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "cvm_manager.py": {
       "hash": "1499fec71993f93ebb518b5fa9b801887f73ee023b0f122187f08b1b272abf3f",
       "required": true,
       "size": 35044,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "daily_todo_manager.py": {
-      "hash": "e20f0a09483faec7d332e9595daa72f39a7b15be677f6b5b87f9b20178af6977",
+      "hash": "871a5004ee64ef061153460c154d32107412c097b0bcffb47dd73721f9e64ced",
       "required": true,
-      "size": 62700,
+      "size": 63422,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "modular_updater.py": {
       "hash": "9256328c9228c797ce7e31eecb538e7b67493e7b497fa881a7e135b5bb088a0b",
       "required": false,
       "size": 29663,
       "type": "system",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "mysql_lan_manager.py": {
       "hash": "cba0bc5c8a924ec4186bc556b6a113e823a34fb0583312fc94a809f98111c580",
       "required": true,
       "size": 37047,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "todo.exe": {
       "hash": "5d5f0e4c8086610ebe572644f551dcec0466348c964473060ed63cd0cfa79323",
       "required": true,
       "size": 50595077,
       "type": "core",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "todo.py": {
       "hash": "a20acf6f0f88e3aae973e2e32ade2f095990d3d09d8f972d4882c96ffd09e35b",
       "required": true,
       "size": 65760,
       "type": "core",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "todo.spec": {
       "hash": "64f21c7326160c2751a5f872c9c8083ae147047911a146895bcba75016108844",
       "required": false,
       "size": 1662,
       "type": "build",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "todo_list_manager.py": {
-      "hash": "605ce36552d65b6a332b136d17b7abfb8d6435aca7bc3156a4580ae96874da9a",
+      "hash": "312f5130abb6087a1a9156eebdbb52a1b8e20cf11434d21c9004eb5250c6428e",
       "required": true,
-      "size": 77937,
+      "size": 81309,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "version.txt": {
-      "hash": "18ba3cd396b304c3bf6ebd743e5adbd9b9b5b2a42f553e7f74e0bcfb5495a21f",
+      "hash": "12cc1e14b3ecb7567a4b44b553b8202d61cec222b5b69cfb1e856125b8b01b44",
       "required": true,
       "size": 5,
       "type": "config",
-      "version": "1.7.1"
+      "version": "1.7.2"
     },
     "weekly_schedule_view.py": {
       "hash": "1db78cfde26212516c8a5d8fc6ad0133e0dff84b0aae694a830838fce345c640",
       "required": true,
       "size": 15665,
       "type": "module",
-      "version": "1.7.1"
+      "version": "1.7.2"
     }
   },
-  "version": "1.7.1"
+  "version": "1.7.2"
 }
