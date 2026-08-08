@@ -10,6 +10,7 @@ import logging
 import json
 import secrets
 import requests
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -110,84 +111,70 @@ def _extract_text_response(payload):
 
     return ""
 
+def _parse_phala_error(resp):
+    """Extract error type/message per Phala's documented error shape."""
+    try:
+        payload = resp.json()
+        err = payload.get("error", {}) if isinstance(payload, dict) else {}
+        return err.get("type", ""), err.get("message", "") or resp.text[:200]
+    except Exception:
+        return "", resp.text[:200]
 
-def phala_request(messages, model):
-    """Send a chat completion request to Phala Confidential AI."""
 
+def _is_retryable(status_code, error_type):
+    # Per docs: retry 429, 500, 502, 503. Never retry 400/401.
+    if status_code in (429, 500, 502, 503):
+        return True
+    if error_type == "upstream_error":
+        return True
+    return False
+
+
+def phala_request(messages, model, timeout):
     headers = {
         "Authorization": f"Bearer {PHALA_AI_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
-
+    payload = {"model": model, "messages": messages}
     request_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-    response = requests.post(
-        PHALA_AI_URL,
-        headers=headers,
-        data=request_bytes,
-        timeout=AI_TIMEOUT,
-    )
+    response = requests.post(PHALA_AI_URL, headers=headers, data=request_bytes, timeout=timeout)
     response.raise_for_status()
-
     receipt_id = response.headers.get("x-receipt-id", "").strip()
-
-    return {
-        "json": response.json(),
-        "receipt_id": receipt_id,
-    }
-
-
-def _is_upstream_verification_route_failure(exc):
-    """Detect route/provider verification failures that should trigger model fallback."""
-    resp = getattr(exc, "response", None)
-    if resp is None or resp.status_code != 503:
-        return False
-
-    try:
-        payload = resp.json()
-    except Exception:
-        payload = {}
-
-    err = payload.get("error", {}) if isinstance(payload, dict) else {}
-    msg = str(err.get("message", "") or "").lower()
-    err_type = str(err.get("type", "") or "").lower()
-
-    return (
-        "upstream verification failed" in msg
-        or err_type == "service_unavailable"
-    )
+    return {"json": response.json(), "receipt_id": receipt_id}
 
 
 def phala_request_with_fallback(messages, requested_model):
     model = requested_model or DEFAULT_MODEL
     deadline = time.monotonic() + AI_TIMEOUT
-    primary_timeout = min(AI_TIMEOUT, max(AI_TIMEOUT * 0.55, 15))
-
-    def _try(m, timeout):
-        return phala_request(messages, m, timeout)
+    # Give the primary attempt less than half the budget — if it's genuinely
+    # hung (like the 120s case), we want to abandon it and try the fallback
+    # while there's still time left, not burn the whole budget on a dead route.
+    primary_timeout = min(AI_TIMEOUT * 0.4, 25)
 
     try:
-        result = _try(model, primary_timeout)
+        result = phala_request(messages, model, primary_timeout)
         result["used_model"] = model
         return result
-    except (requests.exceptions.HTTPError, requests.exceptions.Timeout) as exc:
+    except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
+             requests.exceptions.ConnectionError) as exc:
         remaining = deadline - time.monotonic()
-        should_fallback = model != FALLBACK_MODEL and remaining > 5 and (
-            isinstance(exc, requests.exceptions.Timeout)
-            or _is_upstream_verification_route_failure(exc)
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        error_type = ""
+        if getattr(exc, "response", None) is not None:
+            error_type, _ = _parse_phala_error(exc.response)
+
+        is_transient = (
+            isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+            or _is_retryable(status_code, error_type)
         )
-        if should_fallback:
+
+        if model != FALLBACK_MODEL and is_transient and remaining > 5:
             log.warning(
-                "Primary model %s failed (%s), retrying fallback %s with %.1fs left",
-                model, type(exc).__name__, FALLBACK_MODEL, remaining,
+                "Primary model %s failed (%s, status=%s, type=%s), falling back to %s with %.1fs left",
+                model, type(exc).__name__, status_code, error_type, FALLBACK_MODEL, remaining,
             )
-            result = _try(FALLBACK_MODEL, remaining)
+            result = phala_request(messages, FALLBACK_MODEL, remaining)
             result["used_model"] = FALLBACK_MODEL
             result["fallback_from"] = model
             return result
@@ -258,19 +245,29 @@ def inference():
                         "receipt_id": result.get("receipt_id", "")})
 
     except requests.exceptions.Timeout:
-        return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
-    except requests.exceptions.HTTPError as exc:
-        if _is_upstream_verification_route_failure(exc):
-            return jsonify({
-                "status": "error",
-                "message": "Selected model route is currently unavailable upstream. Try a different model or wait a moment.",
-            }), 503
-        return jsonify({"status": "error", "message": f"Phala AI returned {exc.response.status_code}: {exc.response.text}"}), 502
+        return jsonify({"status": "error", "message": "AI request timed out. Please try again."}), 504
     except requests.exceptions.ConnectionError:
         return jsonify({"status": "error", "message": "Unable to connect to Phala AI"}), 503
-    except Exception as exc:
-        log.exception("Inference error")
-        return jsonify({"status": "error", "message": str(exc)}), 500
+    except requests.exceptions.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        error_type, error_msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+
+        if error_type == "authentication_error":
+            return jsonify({"status": "error", "message": "AI service authentication failed. Check API key configuration."}), 401
+        if error_type == "model_not_found":
+            return jsonify({"status": "error", "message": f"Model '{requested_model}' is not available. Try a different model."}), 400
+        if status_code == 429:
+            retry_after = exc.response.headers.get("Retry-After", "")
+            msg = "Rate limit reached. Please wait a moment before trying again."
+            if retry_after:
+                msg = f"Rate limit reached. Please wait about {retry_after}s before trying again."
+            return jsonify({"status": "error", "message": msg}), 429
+        if error_type == "upstream_error" or status_code in (500, 502, 503):
+            return jsonify({
+                "status": "error",
+                "message": "The AI model is temporarily unavailable upstream. Try a different model or wait a moment.",
+            }), 503
+        return jsonify({"status": "error", "message": error_msg or f"AI service returned {status_code}"}), status_code
 
 
 @app.route("/chat", methods=["POST"])
@@ -314,7 +311,7 @@ def attestation():
     err = require_api_key()
     if err:
         return err
-    nonce = secrets.token_hex(16)
+    nonce = secrets.token_hex(32)
     try:
         resp = requests.get(
             PHALA_ATTESTATION_URL,

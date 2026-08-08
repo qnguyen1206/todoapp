@@ -376,27 +376,76 @@ async function initAI() {
 async function loadAttestation() {
   const box = document.getElementById('ai-attestation');
   if (!box) return;
-  box.textContent = 'Verifying enclave…';
+  box.innerHTML = 'Verifying enclave…';
   try {
     const d = await api('GET', '/api/ai/attestation', undefined, 15000);
     if (d.status !== 'success') {
+      attestationInfo = null;
       box.innerHTML = `<div class="attn-row attn-bad">⚠ Attestation unavailable${d.message ? `: ${escHtml(d.message)}` : ''}</div>`;
-    } else {
-      attestationInfo = d;
-      const staleAfter = d.stale_after ? new Date(d.stale_after) : null;
-      const fresh = staleAfter ? staleAfter.getTime() > Date.now() : null;
-      const freshText = fresh === null ? 'unknown' : (fresh ? 'fresh' : 'STALE');
-      box.innerHTML = `
-        <div class="attn-row attn-good">✓ TEE attested (${escHtml(d.tee_type || 'tdx')})</div>
-        <div class="attn-row">Workload: <code>${escHtml((d.workload_id||'').slice(0,16))}…</code></div>
-        <div class="attn-row ${fresh === false ? 'attn-bad' : 'attn-good'}">Freshness: ${escHtml(freshText)}</div>
-      `;
+      attestationLoaded = true;
+      return;
     }
+
+    attestationInfo = d;
+    const staleAfter = d.stale_after ? new Date(d.stale_after) : null;
+    const fresh = staleAfter ? staleAfter.getTime() > Date.now() : null;
+    const freshText = staleAfter
+      ? (fresh ? `fresh (until ${staleAfter.toLocaleString()})` : 'STALE')
+      : 'not reported by gateway';
+    const workloadText = d.workload_id ? `${escHtml(d.workload_id.slice(0, 16))}…` : 'not reported by gateway';
+
+    box.innerHTML = `
+      <div class="attn-row attn-good">✓ TEE attested (${escHtml(d.tee_type || 'unknown')})</div>
+      <div class="attn-row">Workload: <code>${workloadText}</code></div>
+      <div class="attn-row ${fresh === false ? 'attn-bad' : ''}">Freshness: ${escHtml(freshText)}</div>
+      <button class="btn btn-sm attn-details-btn" onclick="openAttestationDetails()">View Full Details</button>
+    `;
   } catch (e) {
+    attestationInfo = null;
     box.innerHTML = `<div class="attn-row attn-bad">⚠ ${escHtml(e.message)}</div>`;
   }
   attestationLoaded = true;
 }
+
+function openAttestationDetails() {
+  const body = document.getElementById('attestation-details-body');
+  if (!attestationInfo) {
+    body.innerHTML = '<p class="empty-msg">No attestation data available.</p>';
+  } else {
+    const d = attestationInfo;
+    const prov = d.source_provenance || {};
+    const row = (label, value) =>
+      `<div class="detail-row"><span class="detail-label">${escHtml(label)}</span><code class="detail-value">${value ? escHtml(String(value)) : '<span class="detail-empty">not reported</span>'}</code></div>`;
+
+    body.innerHTML = `
+      ${row('API Version', d.api_version)}
+      ${row('Nonce', d.nonce)}
+      ${row('TEE Type', d.tee_type)}
+      ${row('Workload ID', d.workload_id)}
+      ${row('Workload Keyset Digest', d.workload_keyset_digest)}
+      ${row('Stale After', d.stale_after)}
+      <div class="detail-section-title">Source Provenance</div>
+      ${row('Repo URL', prov.repo_url)}
+      ${row('Repo Commit', prov.repo_commit)}
+      ${row('Image Digest', prov.image_digest)}
+      ${row('Image Provenance', prov.image_provenance)}
+    `;
+  }
+  document.getElementById('attestation-details-modal').style.display = 'flex';
+}
+
+function closeAttestationDetails() {
+  document.getElementById('attestation-details-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeModal();
+    document.getElementById('notes-modal').style.display = 'none';
+    closeFullNotes();
+    closeAttestationDetails();
+  }
+});
 
 async function verifyReceipt(receiptId, metaEl) {
   try {
