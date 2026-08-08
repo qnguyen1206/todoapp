@@ -2,7 +2,7 @@
 AI Inference Service for TODO App CVM
 
 Proxies requests to Phala Confidential AI and returns the model output plus
-receipt metadata. Attestation/session verification is intentionally omitted.
+receipt metadata.
 """
 
 import os
@@ -176,8 +176,6 @@ def phala_request_with_fallback(messages, requested_model):
             return result
         raise
 
-# Attestation support removed: responses now only include receipt metadata.
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -294,7 +292,7 @@ def chat():
         log.exception("Chat error")
         return jsonify({"status": "error", "message": str(exc)}), 500
 
-# Attestation endpoint removed — responses include only receipt metadata.
+ 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=False)

@@ -890,10 +890,6 @@ def ai_models():
         return jsonify({"status": "success", "models": []})
 
 
-@app.route("/api/ai/attestation", methods=["GET"])
-def ai_attestation():
-    return jsonify({"status": "error", "message": "Attestation removed"}), 404
-
 @app.route("/api/ai/health", methods=["GET"])
 def ai_health():
     try:

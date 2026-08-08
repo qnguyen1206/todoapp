@@ -377,7 +377,6 @@ function appendAIMessage(role, text) {
   return div;
 }
 
-// Attestation support removed: frontend no longer fetches or renders attestations.
 
 function appendAIBotResponse(text, payload) {
   const chat = document.getElementById('ai-chat');
@@ -389,7 +388,6 @@ function appendAIBotResponse(text, payload) {
   body.textContent = text || '(no response)';
   div.appendChild(body);
 
-  // Attestation removed; only show receipt metadata below.
 
   const receiptId = payload?.receipt_id || '';
   if (receiptId) {
@@ -404,7 +402,7 @@ function appendAIBotResponse(text, payload) {
   return div;
 }
 
-// loadAttestationForMessage removed.
+ 
 
 async function sendAI() {
   const input = document.getElementById('ai-input');
@@ -425,7 +423,7 @@ async function sendAI() {
       ? appendAIBotResponse(d.response || '(no response)', d)
       : appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
 
-    // No attestation fetching; receipt-id (if any) is already rendered.
+    // Receipt-id (if any) is already rendered.
   } catch (e) {
     thinking.remove();
     appendAIBotResponse(`✗ Error: ${e.message}`, {});
