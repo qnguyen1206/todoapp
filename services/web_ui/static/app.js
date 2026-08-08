@@ -377,22 +377,7 @@ function appendAIMessage(role, text) {
   return div;
 }
 
-function normalizeAttestation(attestation) {
-  if (!attestation) return '';
-  if (typeof attestation === 'string') {
-    try {
-      const parsed = JSON.parse(attestation);
-      return JSON.stringify(parsed, null, 2);
-    } catch {
-      return attestation;
-    }
-  }
-  try {
-    return JSON.stringify(attestation, null, 2);
-  } catch {
-    return String(attestation);
-  }
-}
+// Attestation support removed: frontend no longer fetches or renders attestations.
 
 function appendAIBotResponse(text, payload) {
   const chat = document.getElementById('ai-chat');
@@ -404,21 +389,7 @@ function appendAIBotResponse(text, payload) {
   body.textContent = text || '(no response)';
   div.appendChild(body);
 
-  const attestationText = normalizeAttestation(payload?.attestation);
-  if (attestationText) {
-    const details = document.createElement('details');
-    details.className = 'ai-attestation';
-
-    const summary = document.createElement('summary');
-    summary.textContent = 'Attestation';
-
-    const pre = document.createElement('pre');
-    pre.textContent = attestationText;
-
-    details.appendChild(summary);
-    details.appendChild(pre);
-    div.appendChild(details);
-  }
+  // Attestation removed; only show receipt metadata below.
 
   const receiptId = payload?.receipt_id || '';
   if (receiptId) {
@@ -433,36 +404,7 @@ function appendAIBotResponse(text, payload) {
   return div;
 }
 
-async function loadAttestationForMessage(messageNode, nonce) {
-  if (!messageNode || !nonce) return;
-
-  const existing = messageNode.querySelector('.ai-attestation');
-  if (existing) existing.remove();
-
-  const details = document.createElement('details');
-  details.className = 'ai-attestation';
-
-  const summary = document.createElement('summary');
-  summary.textContent = 'Attestation';
-
-  const pre = document.createElement('pre');
-  pre.textContent = 'Loading attestation...';
-
-  details.appendChild(summary);
-  details.appendChild(pre);
-  messageNode.appendChild(details);
-
-  try {
-    const attestation = await api('GET', `/api/ai/attestation?nonce=${encodeURIComponent(nonce)}`, undefined, 30000);
-    if (attestation.status === 'error') {
-      pre.textContent = attestation.message || 'Attestation request failed';
-      return;
-    }
-    pre.textContent = normalizeAttestation(attestation);
-  } catch (e) {
-    pre.textContent = `Attestation fetch failed: ${e.message}`;
-  }
-}
+// loadAttestationForMessage removed.
 
 async function sendAI() {
   const input = document.getElementById('ai-input');
@@ -483,15 +425,7 @@ async function sendAI() {
       ? appendAIBotResponse(d.response || '(no response)', d)
       : appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
 
-    if (d.status === 'success') {
-      // If backend included attestation, it's already rendered. Otherwise
-      // fetch it once via the attestation endpoint using the returned nonce.
-      if (!d.attestation && d.nonce) {
-        loadAttestationForMessage(messageNode, d.nonce);
-      }
-    } else if (!d.attestation && d.nonce) {
-      loadAttestationForMessage(messageNode, d.nonce);
-    }
+    // No attestation fetching; receipt-id (if any) is already rendered.
   } catch (e) {
     thinking.remove();
     appendAIBotResponse(`✗ Error: ${e.message}`, {});
