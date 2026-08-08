@@ -310,7 +310,16 @@ def attestation():
             headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            log.warning("Attestation upstream %s: %s", resp.status_code, resp.text[:500])
+            try:
+                upstream_msg = resp.json().get("error", {}).get("message") or resp.json().get("message")
+            except Exception:
+                upstream_msg = resp.text[:200]
+            return jsonify({
+                "status": "error",
+                "message": f"Attestation service returned {resp.status_code}: {upstream_msg}",
+            }), resp.status_code
         data = resp.json()
         att = data.get("attestation", {}) or {}
         return jsonify({
@@ -325,9 +334,6 @@ def attestation():
         })
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Attestation request timed out"}), 504
-    except requests.exceptions.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else 502
-        return jsonify({"status": "error", "message": f"Attestation service returned {code}"}), code
     except requests.exceptions.ConnectionError:
         return jsonify({"status": "error", "message": "Unable to reach attestation service"}), 503
     except Exception:
@@ -346,7 +352,16 @@ def get_receipt(receipt_id):
             headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            log.warning("Receipt upstream %s: %s", resp.status_code, resp.text[:500])
+            try:
+                upstream_msg = resp.json().get("error", {}).get("message") or resp.json().get("message")
+            except Exception:
+                upstream_msg = resp.text[:200]
+            return jsonify({
+                "status": "error",
+                "message": f"Receipt service returned {resp.status_code}: {upstream_msg}",
+            }), resp.status_code
         data = resp.json()
         upstream = next(
             (e for e in data.get("event_log", []) if e.get("type") == "upstream.verified"),
@@ -365,9 +380,6 @@ def get_receipt(receipt_id):
         })
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Receipt request timed out"}), 504
-    except requests.exceptions.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else 502
-        return jsonify({"status": "error", "message": f"Receipt service returned {code}"}), code
     except requests.exceptions.ConnectionError:
         return jsonify({"status": "error", "message": "Unable to reach receipt service"}), 503
     except Exception:
