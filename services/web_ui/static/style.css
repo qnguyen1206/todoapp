@@ -181,7 +181,15 @@ header {
 .ai-input-row { display: flex; gap: 8px; align-items: flex-end; }
 .ai-textarea { resize: none; flex: 1; }
 
- 
+.ai-attestation-box {
+  font-size: 12px; padding: 8px; background: #f5f5f5;
+  border-radius: var(--radius); display: flex; flex-direction: column; gap: 3px;
+}
+.attn-row { color: var(--muted); }
+.attn-row.attn-good { color: #2e7d32; }
+.attn-row.attn-bad  { color: var(--overdue); }
+.ai-receipt.receipt-verified   { color: #2e7d32; }
+.ai-receipt.receipt-unverified { color: var(--overdue); }
 
 /* ── Calendar ─────────────────────────────────────────────── */
 .cal-nav { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }

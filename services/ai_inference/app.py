@@ -34,6 +34,13 @@ PHALA_AI_URL = os.getenv(
     "https://inference.phala.com/v1/chat/completions",
 )
 
+PHALA_ATTESTATION_URL = os.getenv(
+    "PHALA_ATTESTATION_URL", "https://inference.phala.com/v1/aci/attestation"
+)
+PHALA_RECEIPTS_URL = os.getenv(
+    "PHALA_RECEIPTS_URL", "https://inference.phala.com/v1/aci/receipts"
+)
+
 PHALA_AI_API_KEY = os.getenv("PHALA_AI_API_KEY", "")
 
 DEFAULT_MODEL = os.getenv(
@@ -51,8 +58,6 @@ FALLBACK_MODEL = os.getenv(
 AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "55"))
 
 SYSTEM_PROMPT = "You are a helpful task management assistant."
-
-
 
 @app.errorhandler(Exception)
 def handle_unexpected_exception(exc):
@@ -292,7 +297,82 @@ def chat():
         log.exception("Chat error")
         return jsonify({"status": "error", "message": str(exc)}), 500
 
- 
+@app.route("/attestation", methods=["GET"])
+def attestation():
+    err = require_api_key()
+    if err:
+        return err
+    nonce = secrets.token_hex(16)
+    try:
+        resp = requests.get(
+            PHALA_ATTESTATION_URL,
+            params={"nonce": nonce},
+            headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        att = data.get("attestation", {}) or {}
+        return jsonify({
+            "status": "success",
+            "nonce": nonce,
+            "api_version": data.get("api_version"),
+            "workload_id": data.get("workload_id"),
+            "workload_keyset_digest": data.get("workload_keyset_digest"),
+            "tee_type": att.get("tee_type"),
+            "stale_after": (att.get("freshness") or {}).get("stale_after"),
+            "source_provenance": att.get("source_provenance"),
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "Attestation request timed out"}), 504
+    except requests.exceptions.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"status": "error", "message": f"Attestation service returned {code}"}), code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to reach attestation service"}), 503
+    except Exception:
+        log.exception("Attestation error")
+        return jsonify({"status": "error", "message": "Internal error fetching attestation"}), 500
+
+
+@app.route("/receipts/<receipt_id>", methods=["GET"])
+def get_receipt(receipt_id):
+    err = require_api_key()
+    if err:
+        return err
+    try:
+        resp = requests.get(
+            f"{PHALA_RECEIPTS_URL}/{receipt_id}",
+            headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        upstream = next(
+            (e for e in data.get("event_log", []) if e.get("type") == "upstream.verified"),
+            {},
+        )
+        return jsonify({
+            "status": "success",
+            "receipt_id": data.get("receipt_id", receipt_id),
+            "workload_id": data.get("workload_id"),
+            "workload_keyset_digest": data.get("workload_keyset_digest"),
+            "verified": upstream.get("result") == "verified",
+            "required": upstream.get("required"),
+            "provider": upstream.get("provider"),
+            "model_id": upstream.get("model_id"),
+            "session_id": upstream.get("session_id"),
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "Receipt request timed out"}), 504
+    except requests.exceptions.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"status": "error", "message": f"Receipt service returned {code}"}), code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to reach receipt service"}), 503
+    except Exception:
+        log.exception("Receipt fetch error")
+        return jsonify({"status": "error", "message": "Internal error fetching receipt"}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=False)

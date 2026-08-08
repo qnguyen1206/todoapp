@@ -9,6 +9,8 @@ let use24Hour     = true;
 let selectedAiModelSetting = '';
 let activeAiModelChoice = '';
 let savedAiModels = [];
+let attestationInfo = null;
+let attestationLoaded = false;
 let currentNotesFull = '';
 const NOTES_PREVIEW_LIMIT = 500;
 
@@ -37,7 +39,10 @@ async function api(method, path, body, timeoutMs = 20000) {
     const opts = { method, headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const r = await fetch(path, opts);
-    return r.json();
+    return await r.json();
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Request timed out. Please try again.');
+    throw new Error('Network error. Please check your connection and try again.');
   } finally {
     clearTimeout(timer);
   }
@@ -297,6 +302,7 @@ async function clearAllDaily() {
 async function initAI() {
   const statusBox = document.getElementById('ai-status');
   statusBox.textContent = 'Checking…';
+  if (!attestationLoaded) loadAttestation();
   if (!selectedAiModelSetting && savedAiModels.length === 0) {
     try {
       const s = await api('GET', '/api/settings');
@@ -367,6 +373,47 @@ async function initAI() {
   }
 }
 
+async function loadAttestation() {
+  const box = document.getElementById('ai-attestation');
+  if (!box) return;
+  box.textContent = 'Verifying enclave…';
+  try {
+    const d = await api('GET', '/api/ai/attestation', undefined, 15000);
+    if (d.status !== 'success') {
+      box.innerHTML = `<div class="attn-row attn-bad">⚠ Attestation unavailable${d.message ? `: ${escHtml(d.message)}` : ''}</div>`;
+    } else {
+      attestationInfo = d;
+      const staleAfter = d.stale_after ? new Date(d.stale_after) : null;
+      const fresh = staleAfter ? staleAfter.getTime() > Date.now() : null;
+      const freshText = fresh === null ? 'unknown' : (fresh ? 'fresh' : 'STALE');
+      box.innerHTML = `
+        <div class="attn-row attn-good">✓ TEE attested (${escHtml(d.tee_type || 'tdx')})</div>
+        <div class="attn-row">Workload: <code>${escHtml((d.workload_id||'').slice(0,16))}…</code></div>
+        <div class="attn-row ${fresh === false ? 'attn-bad' : 'attn-good'}">Freshness: ${escHtml(freshText)}</div>
+      `;
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="attn-row attn-bad">⚠ ${escHtml(e.message)}</div>`;
+  }
+  attestationLoaded = true;
+}
+
+async function verifyReceipt(receiptId, metaEl) {
+  try {
+    const d = await api('GET', `/api/ai/receipt/${encodeURIComponent(receiptId)}`, undefined, 15000);
+    if (d.status === 'success') {
+      const badge = d.verified ? '✓ verified' : '⚠ unverified';
+      metaEl.textContent = `Receipt: ${receiptId} · ${badge}${d.model_id ? ` · ${d.model_id}` : ''}`;
+      metaEl.classList.toggle('receipt-verified', !!d.verified);
+      metaEl.classList.toggle('receipt-unverified', !d.verified);
+    } else {
+      metaEl.textContent = `Receipt: ${receiptId}`;
+    }
+  } catch {
+    metaEl.textContent = `Receipt: ${receiptId}`;
+  }
+}
+
 function appendAIMessage(role, text) {
   const chat = document.getElementById('ai-chat');
   const div  = document.createElement('div');
@@ -393,8 +440,9 @@ function appendAIBotResponse(text, payload) {
   if (receiptId) {
     const meta = document.createElement('div');
     meta.className = 'ai-receipt';
-    meta.textContent = `Receipt: ${receiptId}`;
+    meta.textContent = `Receipt: ${receiptId} · checking…`;
     div.appendChild(meta);
+    verifyReceipt(receiptId, meta);
   }
 
   chat.appendChild(div);

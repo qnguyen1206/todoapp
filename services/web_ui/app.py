@@ -898,6 +898,43 @@ def ai_health():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
+@app.route("/api/ai/attestation", methods=["GET"])
+def ai_attestation():
+    try:
+        r = _ai("GET", "/attestation", timeout=12)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {}
+        return jsonify({"status": "error", "message": payload.get("message", "Attestation unavailable")}), r.status_code
+    except req.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "Attestation request timed out"}), 504
+    except req.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "AI service not available"}), 503
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
+
+
+@app.route("/api/ai/receipt/<receipt_id>", methods=["GET"])
+def ai_receipt(receipt_id):
+    try:
+        r = _ai("GET", f"/receipts/{receipt_id}", timeout=12)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {}
+        return jsonify({"status": "error", "message": payload.get("message", "Receipt unavailable")}), r.status_code
+    except req.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "Receipt request timed out"}), 504
+    except req.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "AI service not available"}), 503
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
+
 # ---------------------------------------------------------------------------
 # Calendar / Weekly (computed from tasks)
 # ---------------------------------------------------------------------------
