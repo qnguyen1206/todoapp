@@ -46,7 +46,7 @@ AI_URL           = os.getenv("AI_URL",         "http://ai_inference:5001")
 SYNC_URL         = os.getenv("SYNC_URL",       "http://task_sync:5002")
 SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 API_KEY          = os.getenv("API_KEY",        "")
-AI_PROXY_TIMEOUT = int(os.getenv("AI_PROXY_TIMEOUT", "60"))
+AI_PROXY_TIMEOUT = int(os.getenv("AI_PROXY_TIMEOUT", "100"))
 
 TASK_ENCRYPTION_PREFIX = "ENC2:"
 DAILY_NOTES_PREFIX = "[CVM_DAILY]"

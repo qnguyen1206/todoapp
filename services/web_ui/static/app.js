@@ -465,7 +465,7 @@ async function sendAI() {
   const thinking = appendAIMessage('bot thinking', '…thinking…');
 
   try {
-    const d = await api('POST', '/api/ai/chat', { prompt, model }, 90000);
+    const d = await api('POST', '/api/ai/chat', { prompt, model }, 120000);
     thinking.remove();
     const messageNode = d.status === 'success'
       ? appendAIBotResponse(d.response || '(no response)', d)

@@ -55,7 +55,7 @@ FALLBACK_MODEL = os.getenv(
 # Keep the default AI timeout shorter than the web-ui proxy timeout so
 # callers (web UI) don't get an upstream 504 while the inference request
 # is still in progress. These can be overridden via env vars in deploys.
-AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "55"))
+AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "90"))
 
 SYSTEM_PROMPT = "You are a helpful task management assistant."
 
@@ -165,17 +165,29 @@ def _is_upstream_verification_route_failure(exc):
 
 
 def phala_request_with_fallback(messages, requested_model):
-    """Try requested model first; retry once on route verification failure."""
     model = requested_model or DEFAULT_MODEL
+    deadline = time.monotonic() + AI_TIMEOUT
+    primary_timeout = min(AI_TIMEOUT, max(AI_TIMEOUT * 0.55, 15))
+
+    def _try(m, timeout):
+        return phala_request(messages, m, timeout)
+
     try:
-        result = phala_request(messages, model)
+        result = _try(model, primary_timeout)
         result["used_model"] = model
         return result
-    except requests.exceptions.HTTPError as exc:
-        # Retry only when the selected route is unavailable and fallback is different.
-        if model != FALLBACK_MODEL and _is_upstream_verification_route_failure(exc):
-            log.warning("Primary model route unavailable, retrying fallback model: %s", FALLBACK_MODEL)
-            result = phala_request(messages, FALLBACK_MODEL)
+    except (requests.exceptions.HTTPError, requests.exceptions.Timeout) as exc:
+        remaining = deadline - time.monotonic()
+        should_fallback = model != FALLBACK_MODEL and remaining > 5 and (
+            isinstance(exc, requests.exceptions.Timeout)
+            or _is_upstream_verification_route_failure(exc)
+        )
+        if should_fallback:
+            log.warning(
+                "Primary model %s failed (%s), retrying fallback %s with %.1fs left",
+                model, type(exc).__name__, FALLBACK_MODEL, remaining,
+            )
+            result = _try(FALLBACK_MODEL, remaining)
             result["used_model"] = FALLBACK_MODEL
             result["fallback_from"] = model
             return result
