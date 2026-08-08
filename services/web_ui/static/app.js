@@ -404,14 +404,6 @@ function appendAIBotResponse(text, payload) {
   body.textContent = text || '(no response)';
   div.appendChild(body);
 
-  const receiptId = payload?.receipt_id || '';
-  if (receiptId) {
-    const meta = document.createElement('div');
-    meta.className = 'ai-receipt';
-    meta.textContent = `Receipt: ${receiptId}`;
-    div.appendChild(meta);
-  }
-
   const attestationText = normalizeAttestation(payload?.attestation);
   if (attestationText) {
     const details = document.createElement('details');
@@ -426,6 +418,14 @@ function appendAIBotResponse(text, payload) {
     details.appendChild(summary);
     details.appendChild(pre);
     div.appendChild(details);
+  }
+
+  const receiptId = payload?.receipt_id || '';
+  if (receiptId) {
+    const meta = document.createElement('div');
+    meta.className = 'ai-receipt';
+    meta.textContent = `Receipt: ${receiptId}`;
+    div.appendChild(meta);
   }
 
   chat.appendChild(div);
@@ -484,10 +484,12 @@ async function sendAI() {
       : appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
 
     if (d.status === 'success') {
-      if (d.nonce) {
+      // If backend included attestation, it's already rendered. Otherwise
+      // fetch it once via the attestation endpoint using the returned nonce.
+      if (!d.attestation && d.nonce) {
         loadAttestationForMessage(messageNode, d.nonce);
       }
-    } else if (d.nonce) {
+    } else if (!d.attestation && d.nonce) {
       loadAttestationForMessage(messageNode, d.nonce);
     }
   } catch (e) {

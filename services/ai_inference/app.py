@@ -11,6 +11,7 @@ import json
 import secrets
 import requests
 from datetime import datetime, timezone
+import threading
 
 import requests
 from flask import Flask, request, jsonify
@@ -51,6 +52,37 @@ ATTESTATION_TIMEOUT = int(os.getenv("ATTESTATION_TIMEOUT", "1200"))
 SYSTEM_PROMPT = "You are a helpful task management assistant."
 
 ATTESTATION_BASE = "https://inference.phala.com"
+
+# In-memory cache for attestation reports to ensure we fetch each nonce only once.
+ATT_CACHE = {}
+
+
+def _background_fetch_attestation(nonce, timeout=10):
+    """Background fetch that populates ATT_CACHE without blocking the main request.
+
+    Uses a short timeout to avoid long-running blocking fetches.
+    """
+    if not nonce or nonce in ATT_CACHE:
+        return
+    try:
+        url = f"{ATTESTATION_BASE}/v1/aci/attestation"
+        r = requests.get(
+            url,
+            params={"nonce": nonce},
+            headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}", "Accept": "application/json"},
+            timeout=timeout,
+        )
+        if r.ok:
+            try:
+                payload = r.json()
+            except Exception:
+                payload = {"status": "error", "message": "invalid json from attestation endpoint"}
+        else:
+            payload = {"status": "error", "message": f"HTTP {r.status_code}", "upstream": r.text}
+        ATT_CACHE[nonce] = payload
+    except Exception as exc:
+        log.exception("Background attestation fetch failed for nonce %s", nonce)
+        ATT_CACHE[nonce] = {"status": "error", "message": str(exc)}
 
 @app.errorhandler(Exception)
 def handle_unexpected_exception(exc):
@@ -198,6 +230,28 @@ def get_attestation(nonce):
     r.raise_for_status()
     return r.json()
 
+
+def get_attestation_cached(nonce):
+    """Return cached attestation if available; otherwise fetch and cache it.
+
+    This helper never raises for common HTTP errors to avoid failing the AI
+    response flow — callers can inspect the returned dict for error shapes.
+    """
+    if not nonce:
+        raise ValueError("nonce required")
+
+    if nonce in ATT_CACHE:
+        return ATT_CACHE[nonce]
+
+    try:
+        report = get_attestation(nonce)
+        ATT_CACHE[nonce] = report
+        return report
+    except Exception as exc:
+        # Log and return an error-shaped dict so callers can decide what to do.
+        log.exception("Failed to fetch attestation for nonce %s", nonce)
+        return {"status": "error", "message": str(exc)}
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -260,8 +314,19 @@ def inference():
                             "message": "Provider returned an unexpected response format",
                             "receipt_id": result.get("receipt_id", "")}), 502
 
+        # Kick off a background attestation fetch (short timeout) so the
+        # response is returned immediately and the attestation is cached for
+        # subsequent /attestation requests or client fetches.
+        try:
+            t = threading.Thread(target=_background_fetch_attestation, args=(nonce, min(10, ATTESTATION_TIMEOUT)))
+            t.daemon = True
+            t.start()
+        except Exception:
+            log.exception("Failed to start background attestation fetch for nonce %s", nonce)
+
         return jsonify({"status": "success", "response": response_text,
                         "model": result.get("used_model", requested_model),
+                        "nonce": result.get("nonce", ""),
                         "receipt_id": result.get("receipt_id", "")})
 
     except requests.exceptions.Timeout:
@@ -296,9 +361,19 @@ def chat():
     try:
         nonce = secrets.token_urlsafe(32)
         result = phala_request_with_fallback(messages, requested_model, nonce)
+
+        # Start background attestation fetch and return the chat response
+        try:
+            t = threading.Thread(target=_background_fetch_attestation, args=(nonce, min(10, ATTESTATION_TIMEOUT)))
+            t.daemon = True
+            t.start()
+        except Exception:
+            log.exception("Failed to start background attestation fetch for nonce %s", nonce)
+
         return jsonify({"status": "success",
                         "message": result["json"].get("choices", [{}])[0].get("message", {}),
                         "model": result.get("used_model", requested_model),
+                        "nonce": result.get("nonce", ""),
                         "receipt_id": result.get("receipt_id", "")})
 
     except requests.exceptions.Timeout:
@@ -330,8 +405,14 @@ def attestation():
             "message": "nonce is required"
         }), 400
 
+    # If background fetch already populated the cache, return it immediately.
+    if nonce in ATT_CACHE:
+        return jsonify(ATT_CACHE[nonce])
+
     try:
         report = get_attestation(nonce)
+        # Cache the fetched report for subsequent requests.
+        ATT_CACHE[nonce] = report
         return jsonify(report)
 
     except requests.exceptions.Timeout:
