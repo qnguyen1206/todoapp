@@ -893,20 +893,60 @@ def ai_models():
 @app.route("/api/ai/attestation", methods=["GET"])
 def ai_attestation():
     nonce = (request.args.get("nonce") or "").strip()
+
     if not nonce:
-        return jsonify({"status": "error", "message": "nonce required"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "nonce required"
+        }), 400
 
     try:
-        r = _ai("GET", "/attestation", params={"nonce": nonce}, timeout=15)
+        r = _ai(
+            "GET",
+            "/attestation",
+            params={"nonce": nonce},
+            timeout=15
+        )
+
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {"message": r.text}
+
         if r.status_code == 200:
-            return jsonify(r.json())
-        return jsonify({"status": "error", "message": r.text}), r.status_code
+            return jsonify(payload), 200
+
+        log.error(
+            "AI attestation failed: status=%s body=%s",
+            r.status_code,
+            r.text
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": payload.get("message", "Attestation request failed"),
+            "upstream_status": r.status_code,
+            "upstream": payload
+        }), r.status_code
+
     except req.exceptions.Timeout:
-        return jsonify({"status": "error", "message": "attestation request timed out"}), 504
+        return jsonify({
+            "status": "error",
+            "message": "Attestation request timed out"
+        }), 504
+
     except req.exceptions.ConnectionError:
-        return jsonify({"status": "error", "message": "attestation service unavailable"}), 503
+        return jsonify({
+            "status": "error",
+            "message": "AI inference service unavailable"
+        }), 503
+
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 503
+        log.exception("AI attestation proxy error")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 503
 
 @app.route("/api/ai/health", methods=["GET"])
 def ai_health():

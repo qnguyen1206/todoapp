@@ -45,8 +45,8 @@ FALLBACK_MODEL = os.getenv(
     "phala/qwen3.5-27b",
 )
 
-AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "45"))
-ATTESTATION_TIMEOUT = int(os.getenv("ATTESTATION_TIMEOUT", "120"))
+AI_TIMEOUT    = int(os.getenv("AI_TIMEOUT", "1200"))
+ATTESTATION_TIMEOUT = int(os.getenv("ATTESTATION_TIMEOUT", "1200"))
 
 SYSTEM_PROMPT = "You are a helpful task management assistant."
 
@@ -182,10 +182,18 @@ def get_attestation(nonce):
         url,
         params={"nonce": nonce},
         headers={
-            "Authorization": f"Bearer {PHALA_AI_API_KEY}"
+            "Authorization": f"Bearer {PHALA_AI_API_KEY}",
+            "Accept": "application/json",
         },
-        timeout=ATTESTATION_TIMEOUT
+        timeout=ATTESTATION_TIMEOUT,
     )
+
+    if not r.ok:
+        log.error(
+            "Phala attestation HTTP %s: %s",
+            r.status_code,
+            r.text,
+        )
 
     r.raise_for_status()
     return r.json()
@@ -254,8 +262,7 @@ def inference():
 
         return jsonify({"status": "success", "response": response_text,
                         "model": result.get("used_model", requested_model),
-                        "receipt_id": result.get("receipt_id", ""),
-                        "nonce": result.get("nonce", "")})
+                        "receipt_id": result.get("receipt_id", "")})
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
@@ -292,8 +299,7 @@ def chat():
         return jsonify({"status": "success",
                         "message": result["json"].get("choices", [{}])[0].get("message", {}),
                         "model": result.get("used_model", requested_model),
-                        "receipt_id": result.get("receipt_id", ""),
-                        "nonce": result.get("nonce", "")})
+                        "receipt_id": result.get("receipt_id", "")})
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
@@ -312,12 +318,50 @@ def chat():
 
 @app.route("/attestation", methods=["GET"])
 def attestation():
+    err = require_api_key()
+    if err:
+        return err
 
     nonce = request.args.get("nonce")
 
-    report = get_attestation(nonce)
+    if not nonce:
+        return jsonify({
+            "status": "error",
+            "message": "nonce is required"
+        }), 400
 
-    return jsonify(report)
+    try:
+        report = get_attestation(nonce)
+        return jsonify(report)
+
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "status": "error",
+            "message": "Phala attestation request timed out"
+        }), 504
+
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text if exc.response is not None else ""
+
+        log.error(
+            "Phala attestation failed: status=%s body=%s",
+            exc.response.status_code if exc.response else "unknown",
+            body,
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Phala attestation request failed",
+            "upstream_status": exc.response.status_code if exc.response else None,
+            "upstream_response": body,
+        }), 502
+
+    except requests.exceptions.RequestException as exc:
+        log.exception("Phala attestation request failed")
+        return jsonify({
+            "status": "error",
+            "message": str(exc)
+        }), 502
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=False)
