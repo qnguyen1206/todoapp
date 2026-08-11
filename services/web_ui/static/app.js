@@ -13,6 +13,8 @@ let attestationInfo = null;
 let attestationLoaded = false;
 let currentNotesFull = '';
 const NOTES_PREVIEW_LIMIT = 500;
+let zdrEnabled = false;
+let zdrModels = [];
 
 /* ── Tab Switching ─────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(btn => {
@@ -337,33 +339,9 @@ async function initAI() {
     aiModels = [];
   }
 
-  const sel = document.getElementById('ai-model-select');
-  const modelSet = new Set(aiModels.map(m => String(m || '').trim()).filter(Boolean));
-  for (const m of savedAiModels) modelSet.add(m);
-  if (selectedAiModelSetting) modelSet.add(selectedAiModelSetting);
-  const modelOptions = Array.from(modelSet);
-
-  const defaultLabel = selectedAiModelSetting
-    ? `Use default (${selectedAiModelSetting})`
-    : 'Use configured model';
-
-  sel.innerHTML = `<option value="">${escHtml(defaultLabel)}</option>` +
-    modelOptions.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
-
-  // Preserve user choice across tab switches; fallback to saved setting.
-  if (activeAiModelChoice && modelOptions.includes(activeAiModelChoice)) {
-    sel.value = activeAiModelChoice;
-  } else if (selectedAiModelSetting && modelOptions.includes(selectedAiModelSetting)) {
-    sel.value = selectedAiModelSetting;
-    activeAiModelChoice = selectedAiModelSetting;
-  } else {
-    sel.value = '';
-    activeAiModelChoice = '';
-  }
-
-  sel.onchange = () => {
-    activeAiModelChoice = sel.value;
-  };
+  document.getElementById('zdr-toggle').checked = zdrEnabled;
+  document.getElementById('zdr-help-text').style.display = zdrEnabled ? 'block' : 'none';
+  await rebuildModelSelect();
 
   // Initial greeting
   const chat = document.getElementById('ai-chat');
@@ -494,33 +472,39 @@ function appendAIBotResponse(text, payload) {
     verifyReceipt(receiptId, meta);
   }
 
+  if (payload?.zdr) {
+    const badge = document.createElement('div');
+    badge.className = 'ai-zdr-badge';
+    badge.textContent = 'Zero Data Retention';
+    div.appendChild(badge);
+  }
+
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;
 }
 
- 
-
 async function sendAI() {
   const input = document.getElementById('ai-input');
   const prompt = input.value.trim();
   if (!prompt) return;
+
   const selectedModel = document.getElementById('ai-model-select').value;
-  const model = selectedModel; // Empty string intentionally means "use backend default model".
+  if (zdrEnabled && !selectedModel) {
+    alert('Select a Zero Data Retention model first.');
+    return;
+  }
 
   appendAIMessage('user', prompt);
   input.value = '';
-
   const thinking = appendAIMessage('bot thinking', '…thinking…');
 
   try {
-    const d = await api('POST', '/api/ai/chat', { prompt, model }, 120000);
+    const d = await api('POST', '/api/ai/chat', { prompt, model: selectedModel, zdr: zdrEnabled }, 120000);
     thinking.remove();
-    const messageNode = d.status === 'success'
+    d.status === 'success'
       ? appendAIBotResponse(d.response || '(no response)', d)
       : appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
-
-    // Receipt-id (if any) is already rendered.
   } catch (e) {
     thinking.remove();
     appendAIBotResponse(`✗ Error: ${e.message}`, {});
@@ -530,6 +514,66 @@ async function sendAI() {
 document.getElementById('ai-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAI(); }
 });
+
+async function onZdrToggle() {
+  zdrEnabled = document.getElementById('zdr-toggle').checked;
+  document.getElementById('zdr-help-text').style.display = zdrEnabled ? 'block' : 'none';
+  await rebuildModelSelect();
+}
+
+async function loadZdrModels() {
+  try {
+    const d = await api('GET', '/api/ai/models/zdr', undefined, 15000);
+    zdrModels = (d.status === 'success' && Array.isArray(d.models)) ? d.models : [];
+  } catch {
+    zdrModels = [];
+  }
+}
+
+async function rebuildModelSelect() {
+  const sel = document.getElementById('ai-model-select');
+
+  if (zdrEnabled) {
+    sel.disabled = true;
+    sel.innerHTML = '<option value="">Loading ZDR models…</option>';
+    await loadZdrModels();
+    sel.disabled = false;
+
+    if (!zdrModels.length) {
+      sel.innerHTML = '<option value="">No ZDR models available</option>';
+      activeAiModelChoice = '';
+      return;
+    }
+    sel.innerHTML = zdrModels.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
+    sel.value = zdrModels.includes(activeAiModelChoice) ? activeAiModelChoice : zdrModels[0];
+    activeAiModelChoice = sel.value;
+    sel.onchange = () => { activeAiModelChoice = sel.value; };
+    return;
+  }
+
+  const modelSet = new Set(aiModels.map(m => String(m || '').trim()).filter(Boolean));
+  for (const m of savedAiModels) modelSet.add(m);
+  if (selectedAiModelSetting) modelSet.add(selectedAiModelSetting);
+  const modelOptions = Array.from(modelSet);
+
+  const defaultLabel = selectedAiModelSetting
+    ? `Use default (${selectedAiModelSetting})`
+    : 'Use configured model';
+
+  sel.innerHTML = `<option value="">${escHtml(defaultLabel)}</option>` +
+    modelOptions.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
+
+  if (activeAiModelChoice && modelOptions.includes(activeAiModelChoice)) {
+    sel.value = activeAiModelChoice;
+  } else if (selectedAiModelSetting && modelOptions.includes(selectedAiModelSetting)) {
+    sel.value = selectedAiModelSetting;
+    activeAiModelChoice = selectedAiModelSetting;
+  } else {
+    sel.value = '';
+    activeAiModelChoice = '';
+  }
+  sel.onchange = () => { activeAiModelChoice = sel.value; };
+}
 
 /* ══════════════════════════════════════════════════════════════════
    CALENDAR

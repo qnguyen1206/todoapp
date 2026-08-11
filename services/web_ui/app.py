@@ -833,10 +833,11 @@ def ai_chat():
     data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "")
     model  = data.get("model", "")
+    zdr    = bool(data.get("zdr", False))
     if not prompt:
         return jsonify({"status": "error", "message": "prompt required"}), 400
     try:
-        r = _ai("POST", "/inference", json={"prompt": prompt, "model": model})
+        r = _ai("POST", "/inference", json={"prompt": prompt, "model": model, "zdr": zdr})
         if r.status_code == 200:
             return jsonify(r.json())
 
@@ -930,6 +931,24 @@ def ai_receipt(receipt_id):
         return jsonify({"status": "error", "message": payload.get("message", "Receipt unavailable")}), r.status_code
     except req.exceptions.Timeout:
         return jsonify({"status": "error", "message": "Receipt request timed out"}), 504
+    except req.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "AI service not available"}), 503
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
+
+@app.route("/api/ai/models/zdr", methods=["GET"])
+def ai_models_zdr():
+    try:
+        r = _ai("GET", "/models/zdr", timeout=15)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {}
+        return jsonify({"status": "error", "message": payload.get("message", "ZDR model list unavailable")}), r.status_code
+    except req.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "ZDR model list request timed out"}), 504
     except req.exceptions.ConnectionError:
         return jsonify({"status": "error", "message": "AI service not available"}), 503
     except Exception as e:

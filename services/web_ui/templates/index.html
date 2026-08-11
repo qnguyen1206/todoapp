@@ -82,6 +82,16 @@
         <select id="ai-model-select" class="input">
           <option value="">Use configured model</option>
         </select>
+        <div class="zdr-toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="zdr-toggle" onchange="onZdrToggle()"/>
+            <span class="slider"></span>
+          </label>
+          <span class="zdr-toggle-label">Zero Data Retention only</span>
+        </div>
+        <p class="help-text zdr-help-text" id="zdr-help-text" style="display:none;">
+          Restricts to providers that don't retain your prompt after serving it.
+        </p>
         <div id="ai-status" class="ai-status-box">Checking…</div>
         <div id="ai-attestation" class="ai-attestation-box">Verifying enclave…</div>
       </div>

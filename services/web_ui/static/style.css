@@ -216,6 +216,29 @@ header {
   border-top: 1px solid var(--border); padding-top: 8px;
 }
 
+.zdr-toggle-row { display: flex; align-items: center; gap: 8px; }
+.zdr-toggle-label { font-size: 12px; font-weight: 600; color: var(--text); }
+.zdr-help-text { margin: -4px 0 0; }
+
+.switch { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; inset: 0; cursor: pointer; background: #ccc;
+  transition: .15s; border-radius: 20px;
+}
+.slider::before {
+  content: ""; position: absolute; height: 14px; width: 14px;
+  left: 3px; bottom: 3px; background: #fff; transition: .15s; border-radius: 50%;
+}
+.switch input:checked + .slider { background: var(--primary); }
+.switch input:checked + .slider::before { transform: translateX(16px); }
+
+.ai-zdr-badge {
+  display: inline-block; margin-top: 6px; font-size: 10px; font-weight: 700;
+  letter-spacing: .4px; text-transform: uppercase; color: #1565c0;
+  background: #e3f2fd; padding: 2px 8px; border-radius: 10px;
+}
+
 /* ── Calendar ─────────────────────────────────────────────── */
 .cal-nav { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
 .cal-title { font-size: 16px; font-weight: 600; min-width: 160px; text-align: center; }

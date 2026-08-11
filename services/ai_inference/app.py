@@ -35,6 +35,11 @@ PHALA_AI_URL = os.getenv(
     "https://inference.phala.com/v1/chat/completions",
 )
 
+PHALA_MODELS_URL = os.getenv(
+    "PHALA_MODELS_URL", 
+    "https://inference.phala.com/v1/models"
+)
+
 PHALA_ATTESTATION_URL = os.getenv(
     "PHALA_ATTESTATION_URL", "https://inference.phala.com/v1/aci/attestation"
 )
@@ -130,51 +135,54 @@ def _is_retryable(status_code, error_type):
     return False
 
 
-def phala_request(messages, model, timeout):
+def phala_request(messages, model, timeout, zdr=False):
     headers = {
         "Authorization": f"Bearer {PHALA_AI_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     payload = {"model": model, "messages": messages}
+    if zdr:
+        payload["provider"] = {"zdr": True}
     request_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
     response = requests.post(PHALA_AI_URL, headers=headers, data=request_bytes, timeout=timeout)
     response.raise_for_status()
     receipt_id = response.headers.get("x-receipt-id", "").strip()
     return {"json": response.json(), "receipt_id": receipt_id}
 
 
-def phala_request_with_fallback(messages, requested_model):
+def phala_request_with_fallback(messages, requested_model, zdr=False):
     model = requested_model or DEFAULT_MODEL
     deadline = time.monotonic() + AI_TIMEOUT
-    # Give the primary attempt less than half the budget — if it's genuinely
-    # hung (like the 120s case), we want to abandon it and try the fallback
-    # while there's still time left, not burn the whole budget on a dead route.
-    primary_timeout = min(AI_TIMEOUT * 0.4, 25)
+    primary_timeout = max(min(AI_TIMEOUT * 0.4, 25), 5)
 
     try:
-        result = phala_request(messages, model, primary_timeout)
+        result = phala_request(messages, model, primary_timeout, zdr=zdr)
         result["used_model"] = model
         return result
     except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
              requests.exceptions.ConnectionError) as exc:
         remaining = deadline - time.monotonic()
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        status_code = None
         error_type = ""
-        if getattr(exc, "response", None) is not None:
-            error_type, _ = _parse_phala_error(exc.response)
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            status_code = resp.status_code
+            error_type, _ = _parse_phala_error(resp)
 
         is_transient = (
             isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
             or _is_retryable(status_code, error_type)
+            or (zdr and error_type == "not_found_error")
         )
 
         if model != FALLBACK_MODEL and is_transient and remaining > 5:
             log.warning(
-                "Primary model %s failed (%s, status=%s, type=%s), falling back to %s with %.1fs left",
+                "Primary model %s failed (%s, status=%s, type=%s); falling back to %s with %.1fs left",
                 model, type(exc).__name__, status_code, error_type, FALLBACK_MODEL, remaining,
             )
-            result = phala_request(messages, FALLBACK_MODEL, remaining)
+            result = phala_request(messages, FALLBACK_MODEL, remaining, zdr=zdr)
             result["used_model"] = FALLBACK_MODEL
             result["fallback_from"] = model
             return result
@@ -208,6 +216,36 @@ def models():
         "models": list(dict.fromkeys([m for m in [DEFAULT_MODEL, FALLBACK_MODEL] if m]))
     })
 
+@app.route("/models/zdr", methods=["GET"])
+def zdr_models():
+    err = require_api_key()
+    if err:
+        return err
+    try:
+        resp = requests.get(
+            PHALA_MODELS_URL,
+            params={"zdr": "true"},
+            headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
+            timeout=10,
+        )
+        if not resp.ok:
+            log.warning("ZDR models upstream %s: %s", resp.status_code, resp.text[:500])
+            _, upstream_msg = _parse_phala_error(resp)
+            return jsonify({
+                "status": "error",
+                "message": f"ZDR model list returned {resp.status_code}: {upstream_msg}",
+            }), resp.status_code
+
+        data = resp.json()
+        model_ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+        return jsonify({"status": "success", "models": model_ids})
+    except requests.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "ZDR model list request timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to reach model catalog service"}), 503
+    except Exception:
+        log.exception("ZDR model list error")
+        return jsonify({"status": "error", "message": "Internal error fetching ZDR model list"}), 500
 
 @app.route("/inference", methods=["POST"])
 def inference():
@@ -221,6 +259,7 @@ def inference():
         return jsonify({"status": "error", "message": "prompt is required"}), 400
 
     requested_model = data.get("model") or DEFAULT_MODEL
+    zdr = bool(data.get("zdr", False))
     system = data.get("system") or SYSTEM_PROMPT
     context_items = data.get("context", [])
 
@@ -234,15 +273,24 @@ def inference():
     ]
 
     try:
-        result = phala_request_with_fallback(messages, requested_model)
+        result = phala_request_with_fallback(messages, requested_model, zdr=zdr)
         response_text = _extract_text_response(result.get("json", {}))
         if not response_text:
-            return jsonify({"status": "error",
-                            "message": "Provider returned an unexpected response format",
-                            "receipt_id": result.get("receipt_id", "")}), 502
-        return jsonify({"status": "success", "response": response_text,
-                        "model": result.get("used_model", requested_model),
-                        "receipt_id": result.get("receipt_id", "")})
+            return jsonify({
+                "status": "error",
+                "message": "Provider returned an unexpected response format",
+                "receipt_id": result.get("receipt_id", ""),
+            }), 502
+        payload = {
+            "status": "success",
+            "response": response_text,
+            "model": result.get("used_model", requested_model),
+            "receipt_id": result.get("receipt_id", ""),
+            "zdr": zdr,
+        }
+        if result.get("fallback_from"):
+            payload["fallback_from"] = result["fallback_from"]
+        return jsonify(payload)
 
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "AI request timed out. Please try again."}), 504
@@ -250,14 +298,21 @@ def inference():
         return jsonify({"status": "error", "message": "Unable to connect to Phala AI"}), 503
     except requests.exceptions.HTTPError as exc:
         status_code = exc.response.status_code if exc.response is not None else 502
-        error_type, error_msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        error_type, error_msg = (
+            _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        )
 
         if error_type == "authentication_error":
             return jsonify({"status": "error", "message": "AI service authentication failed. Check API key configuration."}), 401
         if error_type == "model_not_found":
             return jsonify({"status": "error", "message": f"Model '{requested_model}' is not available. Try a different model."}), 400
+        if error_type == "not_found_error" or status_code == 404:
+            return jsonify({
+                "status": "error",
+                "message": "No zero-data-retention route is available for this model. Pick a different ZDR model.",
+            }), 404
         if status_code == 429:
-            retry_after = exc.response.headers.get("Retry-After", "")
+            retry_after = exc.response.headers.get("Retry-After", "") if exc.response is not None else ""
             msg = "Rate limit reached. Please wait a moment before trying again."
             if retry_after:
                 msg = f"Rate limit reached. Please wait about {retry_after}s before trying again."
@@ -268,6 +323,9 @@ def inference():
                 "message": "The AI model is temporarily unavailable upstream. Try a different model or wait a moment.",
             }), 503
         return jsonify({"status": "error", "message": error_msg or f"AI service returned {status_code}"}), status_code
+    except Exception as exc:
+        log.exception("Inference error")
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 @app.route("/chat", methods=["POST"])
