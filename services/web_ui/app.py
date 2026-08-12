@@ -883,7 +883,18 @@ def ai_chat():
 @app.route("/api/ai/models", methods=["GET"])
 def ai_models():
     try:
-        r = _ai("GET", "/models")
+        refresh = request.args.get("refresh", "")
+        r = _ai("GET", "/models", params={"refresh": refresh} if refresh else None)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        return jsonify({"status": "success", "models": []})
+    except Exception:
+        return jsonify({"status": "success", "models": []})
+
+@app.route("/api/ai/models/vision", methods=["GET"])
+def ai_models_vision():
+    try:
+        r = _ai("GET", "/models/vision", timeout=15)
         if r.status_code == 200:
             return jsonify(r.json())
         return jsonify({"status": "success", "models": []})
@@ -1026,53 +1037,14 @@ def get_character():
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
-def _normalize_model_list(models):
-    """Normalize model list: trimmed, unique, non-empty strings."""
-    out = []
-    seen = set()
-    for item in models or []:
-        model = str(item or "").strip()
-        if not model or model in seen:
-            continue
-        seen.add(model)
-        out.append(model)
-    return out
-
-
-def _get_saved_ai_models(default_model=""):
-    """Return saved model list from settings storage."""
-    raw = _get_setting("phala_ai_models", "")
-    models = []
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                models = parsed
-        except Exception:
-            models = []
-
-    models = _normalize_model_list(models)
-    if default_model and default_model not in models:
-        models.insert(0, default_model)
-    return models
-
-
-def _save_ai_models(models):
-    """Persist normalized model list as JSON string."""
-    normalized = _normalize_model_list(models)
-    _set_setting("phala_ai_models", json.dumps(normalized, ensure_ascii=False))
-
-
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     workspace_key_ready = bool(_workspace_key_for_user(USER_ID))
     default_model = _get_setting("phala_ai_model", os.getenv("PHALA_AI_MODEL", "")).strip()
-    saved_models = _get_saved_ai_models(default_model)
     return jsonify({"status": "success", "settings": {
         "use_24_hour": _get_setting("use_24_hour", "true") == "true",
         "web_user_id": USER_ID,
         "phala_ai_model": default_model,
-        "phala_ai_models": saved_models,
         "crypto": {
             "device_id": _get_setting("crypto_device_id", "") or None,
             "workspace_key_ready": workspace_key_ready,
@@ -1108,8 +1080,6 @@ def save_settings():
         _set_setting("use_24_hour", str(data["use_24_hour"]).lower())
     if "phala_ai_model" in data:
         _set_setting("phala_ai_model", str(data["phala_ai_model"]).strip())
-    if "phala_ai_models" in data and isinstance(data["phala_ai_models"], list):
-        _save_ai_models(data["phala_ai_models"])
     return jsonify({"status": "success"})
 
 # ---------------------------------------------------------------------------

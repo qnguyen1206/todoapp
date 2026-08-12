@@ -4,17 +4,18 @@ let sortKey       = 'due_date';
 let sortAsc       = true;
 let calYear       = new Date().getFullYear();
 let calMonth      = new Date().getMonth() + 1;  // 1-based
-let aiModels      = [];
 let use24Hour     = true;
 let selectedAiModelSetting = '';
 let activeAiModelChoice = '';
-let savedAiModels = [];
 let attestationInfo = null;
 let attestationLoaded = false;
 let currentNotesFull = '';
 const NOTES_PREVIEW_LIMIT = 500;
 let zdrEnabled = false;
 let zdrModels = [];
+let visionModels = [];
+let attachedImageDataUrl = null;
+let modelCatalog = [];
 
 /* ── Tab Switching ─────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(btn => {
@@ -67,6 +68,34 @@ function priorityPill(p) {
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
                         .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function modelLabel(m) {
+  const badges = [];
+  if (m.is_tee) badges.push('TEE');
+  if ((m.input_modalities || []).includes('image')) badges.push('Vision');
+  return badges.length ? `${m.id} (${badges.join(', ')})` : m.id;
+}
+
+function currentModelEntry() {
+  const selectedId = document.getElementById('ai-model-select').value || selectedAiModelSetting;
+  const pool = zdrEnabled ? zdrModels : modelCatalog;
+  return pool.find(m => m.id === selectedId) || null;
+}
+
+async function loadModelCatalog(refresh = false) {
+  try {
+    const d = await api('GET', `/api/ai/models${refresh ? '?refresh=true' : ''}`, undefined, 15000);
+    modelCatalog = (d.status === 'success' && Array.isArray(d.models)) ? d.models : [];
+    if (!selectedAiModelSetting && d.default_model) selectedAiModelSetting = d.default_model;
+  } catch {
+    modelCatalog = [];
+  }
+}
+
+async function refreshModelCatalog() {
+  await loadModelCatalog(true);
+  await rebuildModelSelect();
 }
 
 /* ── Trust Modal ─────────────────────────────────────────── */
@@ -305,45 +334,30 @@ async function initAI() {
   const statusBox = document.getElementById('ai-status');
   statusBox.textContent = 'Checking…';
   if (!attestationLoaded) loadAttestation();
-  if (!selectedAiModelSetting && savedAiModels.length === 0) {
+
+  if (!selectedAiModelSetting) {
     try {
       const s = await api('GET', '/api/settings');
       selectedAiModelSetting = (s.settings?.phala_ai_model || '').trim();
-      savedAiModels = Array.isArray(s.settings?.phala_ai_models)
-        ? s.settings.phala_ai_models.map(m => String(m || '').trim()).filter(Boolean)
-        : [];
     } catch {}
   }
 
-  aiModels = [];
   try {
     const h = await api('GET', '/api/ai/health');
     const ok = ['ok', 'success', 'healthy'].includes(String(h?.status || '').toLowerCase());
-    if (ok) {
-      statusBox.textContent = selectedAiModelSetting
-        ? `✓ AI service online\nDefault model: ${selectedAiModelSetting}`
-        : '✓ AI service online';
-    } else {
-      const msg = h?.message ? `\n${h.message}` : '';
-      statusBox.textContent = `⚠ AI service reported an issue${msg}`;
-    }
-
-    try {
-      const m = await api('GET', '/api/ai/models');
-      aiModels = Array.isArray(m?.models) ? m.models : [];
-    } catch {
-      aiModels = [];
-    }
+    statusBox.textContent = ok
+      ? (selectedAiModelSetting ? `✓ AI service online\nDefault model: ${selectedAiModelSetting}` : '✓ AI service online')
+      : `⚠ AI service reported an issue${h?.message ? `\n${h.message}` : ''}`;
   } catch {
     statusBox.textContent = '✗ AI service unreachable';
-    aiModels = [];
   }
+
+  if (!modelCatalog.length) await loadModelCatalog();
 
   document.getElementById('zdr-toggle').checked = zdrEnabled;
   document.getElementById('zdr-help-text').style.display = zdrEnabled ? 'block' : 'none';
   await rebuildModelSelect();
 
-  // Initial greeting
   const chat = document.getElementById('ai-chat');
   if (!chat.dataset.greeted) {
     appendAIMessage('bot', "Hello! I'm your task assistant. Ask me anything about your tasks or productivity.");
@@ -487,20 +501,31 @@ function appendAIBotResponse(text, payload) {
 async function sendAI() {
   const input = document.getElementById('ai-input');
   const prompt = input.value.trim();
-  if (!prompt) return;
+  if (!prompt && !attachedImageDataUrl) return;
 
   const selectedModel = document.getElementById('ai-model-select').value;
   if (zdrEnabled && !selectedModel) {
     alert('Select a Zero Data Retention model first.');
     return;
   }
+  if (attachedImageDataUrl) {
+    const entry = currentModelEntry();
+    if (!entry || !(entry.input_modalities || []).includes('image')) {
+      alert('Select a vision-capable model before sending an image.');
+      return;
+    }
+  }
 
-  appendAIMessage('user', prompt);
+  appendAIMessage('user', prompt || '(image)');
   input.value = '';
-  const thinking = appendAIMessage('bot thinking', '…thinking…');
+  const imageToSend = attachedImageDataUrl;
+  removeAttachedImage();
 
+  const thinking = appendAIMessage('bot thinking', '…thinking…');
   try {
-    const d = await api('POST', '/api/ai/chat', { prompt, model: selectedModel, zdr: zdrEnabled }, 120000);
+    const d = await api('POST', '/api/ai/chat', {
+      prompt, model: selectedModel, zdr: zdrEnabled, image_url: imageToSend || '',
+    }, 120000);
     thinking.remove();
     d.status === 'success'
       ? appendAIBotResponse(d.response || '(no response)', d)
@@ -542,37 +567,85 @@ async function rebuildModelSelect() {
     if (!zdrModels.length) {
       sel.innerHTML = '<option value="">No ZDR models available</option>';
       activeAiModelChoice = '';
+      updateAttachButtonVisibility();
       return;
     }
-    sel.innerHTML = zdrModels.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
-    sel.value = zdrModels.includes(activeAiModelChoice) ? activeAiModelChoice : zdrModels[0];
+    sel.innerHTML = zdrModels.map(m => `<option value="${escHtml(m.id)}">${escHtml(modelLabel(m))}</option>`).join('');
+    sel.value = zdrModels.some(m => m.id === activeAiModelChoice) ? activeAiModelChoice : zdrModels[0].id;
     activeAiModelChoice = sel.value;
-    sel.onchange = () => { activeAiModelChoice = sel.value; };
+    sel.onchange = () => { activeAiModelChoice = sel.value; updateAttachButtonVisibility(); };
+    updateAttachButtonVisibility();
     return;
   }
 
-  const modelSet = new Set(aiModels.map(m => String(m || '').trim()).filter(Boolean));
-  for (const m of savedAiModels) modelSet.add(m);
-  if (selectedAiModelSetting) modelSet.add(selectedAiModelSetting);
-  const modelOptions = Array.from(modelSet);
-
-  const defaultLabel = selectedAiModelSetting
-    ? `Use default (${selectedAiModelSetting})`
-    : 'Use configured model';
-
+  const defaultLabel = selectedAiModelSetting ? `Use default (${selectedAiModelSetting})` : 'Use configured model';
   sel.innerHTML = `<option value="">${escHtml(defaultLabel)}</option>` +
-    modelOptions.map(m => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join('');
+    modelCatalog.map(m => `<option value="${escHtml(m.id)}">${escHtml(modelLabel(m))}</option>`).join('');
 
-  if (activeAiModelChoice && modelOptions.includes(activeAiModelChoice)) {
+  if (activeAiModelChoice && modelCatalog.some(m => m.id === activeAiModelChoice)) {
     sel.value = activeAiModelChoice;
-  } else if (selectedAiModelSetting && modelOptions.includes(selectedAiModelSetting)) {
+  } else if (selectedAiModelSetting && modelCatalog.some(m => m.id === selectedAiModelSetting)) {
     sel.value = selectedAiModelSetting;
     activeAiModelChoice = selectedAiModelSetting;
   } else {
     sel.value = '';
     activeAiModelChoice = '';
   }
-  sel.onchange = () => { activeAiModelChoice = sel.value; };
+  sel.onchange = () => { activeAiModelChoice = sel.value; updateAttachButtonVisibility(); };
+  updateAttachButtonVisibility();
+}
+
+function onImageSelected(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    attachedImageDataUrl = reader.result;
+    document.getElementById('image-attach-thumb').src = attachedImageDataUrl;
+    document.getElementById('image-attach-preview').style.display = 'flex';
+    checkVisionCompatibility();
+  };
+  reader.readAsDataURL(file);
+  event.target.value = '';
+}
+
+function removeAttachedImage() {
+  attachedImageDataUrl = null;
+  document.getElementById('image-attach-preview').style.display = 'none';
+  checkVisionCompatibility();
+}
+
+function updateAttachButtonVisibility() {
+  const entry = currentModelEntry();
+  const supportsImage = !!entry && (entry.input_modalities || []).includes('image');
+  const attachBtn = document.getElementById('image-attach-btn');
+  if (attachBtn) attachBtn.style.display = supportsImage ? 'inline-flex' : 'none';
+  if (!supportsImage && attachedImageDataUrl) removeAttachedImage();
+  checkVisionCompatibility();
+}
+
+function checkVisionCompatibility() {
+  const warning = document.getElementById('vision-warning');
+  const sendBtn = document.getElementById('ai-send-btn');
+  if (!attachedImageDataUrl) {
+    warning.style.display = 'none';
+    sendBtn.disabled = false;
+    return;
+  }
+  const entry = currentModelEntry();
+  const supported = entry && (entry.input_modalities || []).includes('image');
+  if (!supported) {
+    const pool = zdrEnabled ? zdrModels : modelCatalog;
+    const visionIds = pool.filter(m => (m.input_modalities || []).includes('image')).map(m => m.id);
+    warning.textContent = entry
+      ? `⚠ "${entry.id}" doesn't support image analysis. Choose one of: ${visionIds.join(', ') || 'no vision models available'}.`
+      : `⚠ Select a vision-capable model to analyze images: ${visionIds.join(', ') || 'none available'}.`;
+    warning.style.display = 'block';
+    sendBtn.disabled = true;
+  } else {
+    warning.style.display = 'none';
+    sendBtn.disabled = false;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -645,93 +718,36 @@ async function loadSettings() {
   const s = d.settings ?? {};
   use24Hour = s.use_24_hour !== false;
   selectedAiModelSetting = (s.phala_ai_model || '').trim();
-  savedAiModels = Array.isArray(s.phala_ai_models)
-    ? s.phala_ai_models.map(m => String(m || '').trim()).filter(Boolean)
-    : [];
   document.getElementById('setting-24h').checked = use24Hour;
   document.getElementById('setting-uid').textContent = s.web_user_id ?? '–';
-  const aiInput = document.getElementById('setting-ai-model');
-  if (aiInput) aiInput.value = '';
-  renderSavedAiModelList();
+  if (!modelCatalog.length) await loadModelCatalog();
+  renderDefaultModelSelect();
+}
+
+function renderDefaultModelSelect() {
+  const sel = document.getElementById('setting-default-model');
+  if (!sel) return;
+  if (!modelCatalog.length) {
+    sel.innerHTML = '<option value="">No models available</option>';
+    return;
+  }
+  sel.innerHTML = modelCatalog.map(m =>
+    `<option value="${escHtml(m.id)}" ${m.id === selectedAiModelSetting ? 'selected' : ''}>${escHtml(modelLabel(m))}</option>`
+  ).join('');
+}
+
+async function saveDefaultModel() {
+  const sel = document.getElementById('setting-default-model');
+  const model = sel.value;
+  if (!model) return;
+  selectedAiModelSetting = model;
+  activeAiModelChoice = model;
+  await saveSetting('phala_ai_model', model);
 }
 
 async function saveSetting(key, value) {
   if (key === 'use_24_hour') use24Hour = value;
   await api('POST', '/api/settings', { [key]: value });
-}
-
-async function addAiModelSetting() {
-  const input = document.getElementById('setting-ai-model');
-  if (!input) return;
-  const model = input.value.trim();
-  if (!model) return;
-
-  if (!savedAiModels.includes(model)) {
-    savedAiModels.push(model);
-    await saveSetting('phala_ai_models', savedAiModels);
-  }
-
-  // If no default is set yet, use the first added model as default.
-  if (!selectedAiModelSetting) {
-    selectedAiModelSetting = model;
-    activeAiModelChoice = model;
-    await saveSetting('phala_ai_model', model);
-  }
-
-  input.value = '';
-  renderSavedAiModelList();
-  await initAI();
-}
-
-async function setDefaultAiModel(model) {
-  selectedAiModelSetting = String(model || '').trim();
-  activeAiModelChoice = selectedAiModelSetting;
-  await saveSetting('phala_ai_model', selectedAiModelSetting);
-  renderSavedAiModelList();
-  await initAI();
-}
-
-async function removeAiModelSetting(model) {
-  const target = String(model || '').trim();
-  if (!target) return;
-
-  savedAiModels = savedAiModels.filter(m => m !== target);
-  await saveSetting('phala_ai_models', savedAiModels);
-
-  if (selectedAiModelSetting === target) {
-    selectedAiModelSetting = savedAiModels[0] || '';
-    activeAiModelChoice = selectedAiModelSetting;
-    await saveSetting('phala_ai_model', selectedAiModelSetting);
-  }
-
-  renderSavedAiModelList();
-  await initAI();
-}
-
-function renderSavedAiModelList() {
-  const list = document.getElementById('saved-model-list');
-  if (!list) return;
-
-  if (!savedAiModels.length) {
-    list.innerHTML = '<div class="empty-msg" style="padding:10px 0;">No saved models yet.</div>';
-    return;
-  }
-
-  list.innerHTML = savedAiModels.map(model => {
-    const isDefault = model === selectedAiModelSetting;
-    const displayModel = escHtml(model);
-    const encodedModel = encodeURIComponent(model);
-    return `
-      <div class="saved-model-item">
-        <code class="saved-model-name">${displayModel}</code>
-        <div class="saved-model-actions">
-          <button class="btn btn-sm ${isDefault ? 'btn-primary' : ''}" onclick="setDefaultAiModel(decodeURIComponent('${encodedModel}'))">
-            ${isDefault ? 'Default' : 'Set Default'}
-          </button>
-          <button class="btn btn-sm btn-danger" onclick="removeAiModelSetting(decodeURIComponent('${encodedModel}'))">Remove</button>
-        </div>
-      </div>`;
-  }).join('');
 }
 
 async function checkHealth() {

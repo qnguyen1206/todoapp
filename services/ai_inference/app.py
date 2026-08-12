@@ -58,6 +58,9 @@ FALLBACK_MODEL = os.getenv(
     "phala/qwen3.5-27b",
 )
 
+_CATALOG_CACHE = {"data": None, "ts": 0.0}
+CATALOG_TTL = 300  # seconds
+
 # Keep the default AI timeout shorter than the web-ui proxy timeout so
 # callers (web UI) don't get an upstream 504 while the inference request
 # is still in progress. These can be overridden via env vars in deploys.
@@ -152,7 +155,7 @@ def phala_request(messages, model, timeout, zdr=False):
     return {"json": response.json(), "receipt_id": receipt_id}
 
 
-def phala_request_with_fallback(messages, requested_model, zdr=False):
+def phala_request_with_fallback(messages, requested_model, zdr=False, has_image=False):
     model = requested_model or DEFAULT_MODEL
     deadline = time.monotonic() + AI_TIMEOUT
     primary_timeout = max(min(AI_TIMEOUT * 0.4, 25), 5)
@@ -176,8 +179,10 @@ def phala_request_with_fallback(messages, requested_model, zdr=False):
             or _is_retryable(status_code, error_type)
             or (zdr and error_type == "not_found_error")
         )
+        # Never fall back to a model that can't handle the image in this request.
+        fallback_is_viable = (not has_image) or _model_supports_image(FALLBACK_MODEL)
 
-        if model != FALLBACK_MODEL and is_transient and remaining > 5:
+        if model != FALLBACK_MODEL and is_transient and fallback_is_viable and remaining > 5:
             log.warning(
                 "Primary model %s failed (%s, status=%s, type=%s); falling back to %s with %.1fs left",
                 model, type(exc).__name__, status_code, error_type, FALLBACK_MODEL, remaining,
@@ -188,6 +193,57 @@ def phala_request_with_fallback(messages, requested_model, zdr=False):
             return result
         raise
 
+def _trim_model(m):
+    return {
+        "id": m.get("id"),
+        "name": m.get("name") or m.get("id"),
+        "is_tee": bool(m.get("is_tee")),
+        "input_modalities": m.get("input_modalities") or [],
+        "context_length": m.get("context_length"),
+    }
+
+
+def _fetch_catalog(extra_params=None):
+    resp = requests.get(
+        PHALA_MODELS_URL,
+        params=extra_params or {},
+        headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return [_trim_model(m) for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+
+
+def _get_catalog_cached(force=False):
+    now = time.monotonic()
+    if not force and _CATALOG_CACHE["data"] is not None and (now - _CATALOG_CACHE["ts"]) < CATALOG_TTL:
+        return _CATALOG_CACHE["data"]
+    catalog = _fetch_catalog()
+    _CATALOG_CACHE["data"] = catalog
+    _CATALOG_CACHE["ts"] = now
+    return catalog
+
+
+def _model_supports_image(model_id):
+    try:
+        catalog = _get_catalog_cached()
+    except Exception:
+        return True  # fail open — let upstream validate if catalog is unreachable
+    entry = next((m for m in catalog if m.get("id") == model_id), None)
+    if entry is None:
+        return True  # unknown model (not yet cached) — don't block, let upstream validate
+    return "image" in (entry.get("input_modalities") or [])
+
+def _model_supports_video(model_id):
+    try:
+        catalog = _get_catalog_cached()
+    except Exception:
+        return True  # fail open — let upstream validate if catalog is unreachable
+    entry = next((m for m in catalog if m.get("id") == model_id), None)
+    if entry is None:
+        return True  # unknown model (not yet cached) — don't block, let upstream validate
+    return "video" in (entry.get("input_modalities") or [])
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -210,11 +266,42 @@ def models():
     err = require_api_key()
     if err:
         return err
+    force = request.args.get("refresh", "").lower() == "true"
+    try:
+        catalog = _get_catalog_cached(force=force)
+        return jsonify({"status": "success", "models": catalog, "default_model": DEFAULT_MODEL})
+    except requests.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "Model catalog request timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to reach model catalog service"}), 503
+    except requests.exceptions.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        _, msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        return jsonify({"status": "error", "message": msg or f"Model catalog returned {status_code}"}), status_code
+    except Exception:
+        log.exception("Model catalog error")
+        return jsonify({"status": "error", "message": "Internal error fetching model catalog"}), 500
 
-    return jsonify({
-        "status": "success",
-        "models": list(dict.fromkeys([m for m in [DEFAULT_MODEL, FALLBACK_MODEL] if m]))
-    })
+@app.route("/models/vision", methods=["GET"])
+def vision_models():
+    err = require_api_key()
+    if err:
+        return err
+    try:
+        catalog = _get_catalog_cached()
+        vision = [m for m in catalog if "image" in (m.get("input_modalities") or [])]
+        return jsonify({"status": "success", "models": vision})
+    except requests.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "Model catalog request timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to reach model catalog service"}), 503
+    except requests.exceptions.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        _, msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        return jsonify({"status": "error", "message": msg or f"Model catalog returned {status_code}"}), status_code
+    except Exception:
+        log.exception("Vision model list error")
+        return jsonify({"status": "error", "message": "Internal error fetching vision model list"}), 500
 
 @app.route("/models/zdr", methods=["GET"])
 def zdr_models():
@@ -222,27 +309,16 @@ def zdr_models():
     if err:
         return err
     try:
-        resp = requests.get(
-            PHALA_MODELS_URL,
-            params={"zdr": "true"},
-            headers={"Authorization": f"Bearer {PHALA_AI_API_KEY}"},
-            timeout=10,
-        )
-        if not resp.ok:
-            log.warning("ZDR models upstream %s: %s", resp.status_code, resp.text[:500])
-            _, upstream_msg = _parse_phala_error(resp)
-            return jsonify({
-                "status": "error",
-                "message": f"ZDR model list returned {resp.status_code}: {upstream_msg}",
-            }), resp.status_code
-
-        data = resp.json()
-        model_ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
-        return jsonify({"status": "success", "models": model_ids})
+        catalog = _fetch_catalog(extra_params={"zdr": "true"})
+        return jsonify({"status": "success", "models": catalog})
     except requests.exceptions.Timeout:
         return jsonify({"status": "error", "message": "ZDR model list request timed out"}), 504
     except requests.exceptions.ConnectionError:
         return jsonify({"status": "error", "message": "Unable to reach model catalog service"}), 503
+    except requests.exceptions.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        _, msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        return jsonify({"status": "error", "message": msg or f"ZDR model list returned {status_code}"}), status_code
     except Exception:
         log.exception("ZDR model list error")
         return jsonify({"status": "error", "message": "Internal error fetching ZDR model list"}), 500
@@ -255,7 +331,8 @@ def inference():
 
     data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "").strip()
-    if not prompt:
+    image_url = (data.get("image_url") or "").strip()
+    if not prompt and not image_url:
         return jsonify({"status": "error", "message": "prompt is required"}), 400
 
     requested_model = data.get("model") or DEFAULT_MODEL
@@ -263,17 +340,38 @@ def inference():
     system = data.get("system") or SYSTEM_PROMPT
     context_items = data.get("context", [])
 
+    if image_url and not _model_supports_image(requested_model):
+        try:
+            vision_ids = [m["id"] for m in _get_catalog_cached() if "image" in (m.get("input_modalities") or [])]
+        except Exception:
+            vision_ids = []
+        return jsonify({
+            "status": "error",
+            "message": (
+                f"'{requested_model}' doesn't support image analysis. "
+                f"Choose a vision-capable model: {', '.join(vision_ids) if vision_ids else 'none currently available'}."
+            ),
+        }), 400
+
     if context_items:
         context_text = "\n".join(str(item) for item in context_items)
         prompt = f"Context:\n{context_text}\n\nUser:\n{prompt}"
 
+    if image_url:
+        user_content = [
+            {"type": "text", "text": prompt or "What is in this image?"},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+    else:
+        user_content = prompt
+
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": user_content},
     ]
 
     try:
-        result = phala_request_with_fallback(messages, requested_model, zdr=zdr)
+        result = phala_request_with_fallback(messages, requested_model, zdr=zdr, has_image=bool(image_url))
         response_text = _extract_text_response(result.get("json", {}))
         if not response_text:
             return jsonify({
@@ -306,6 +404,11 @@ def inference():
             return jsonify({"status": "error", "message": "AI service authentication failed. Check API key configuration."}), 401
         if error_type == "model_not_found":
             return jsonify({"status": "error", "message": f"Model '{requested_model}' is not available. Try a different model."}), 400
+        if error_type == "invalid_request_error" and image_url:
+            return jsonify({
+                "status": "error",
+                "message": f"'{requested_model}' rejected the image input: {error_msg}",
+            }), 400
         if error_type == "not_found_error" or status_code == 404:
             return jsonify({
                 "status": "error",

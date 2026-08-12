@@ -78,10 +78,12 @@
   <section id="tab-ai" class="tab-content">
     <div class="ai-layout">
       <div class="ai-sidebar">
-        <label>Model</label>
-        <select id="ai-model-select" class="input">
-          <option value="">Use configured model</option>
-        </select>
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <label>Model</label>
+          <button class="btn btn-sm" type="button" onclick="refreshModelCatalog()" title="Refresh model list">↻</button>
+        </div>
+        <select id="ai-model-select" class="input"></select>
+        <button class="btn" type="button" id="image-attach-btn" title="Attach image" style="display:none;" onclick="document.getElementById('image-attach-input').click()">📷</button>
         <div class="zdr-toggle-row">
           <label class="switch">
             <input type="checkbox" id="zdr-toggle" onchange="onZdrToggle()"/>
@@ -97,10 +99,17 @@
       </div>
       <div class="ai-main">
         <div id="ai-chat" class="ai-chat"></div>
+        <div id="image-attach-preview" class="image-attach-preview" style="display:none;">
+          <img id="image-attach-thumb" alt="Attached image"/>
+          <button class="btn btn-sm btn-danger" onclick="removeAttachedImage()">✗ Remove</button>
+        </div>
+        <p class="help-text vision-warning" id="vision-warning" style="display:none;"></p>
         <div class="ai-input-row">
+          <input type="file" id="image-attach-input" accept="image/*" style="display:none;" onchange="onImageSelected(event)"/>
+          <button class="btn" type="button" title="Attach image" onclick="document.getElementById('image-attach-input').click()">📷</button>
           <textarea id="ai-input" class="input ai-textarea" rows="2"
                     placeholder="Ask anything about your tasks…"></textarea>
-          <button class="btn btn-primary" onclick="sendAI()">Send</button>
+          <button class="btn btn-primary" id="ai-send-btn" onclick="sendAI()">Send</button>
         </div>
       </div>
     </div>
@@ -141,18 +150,9 @@
     </div>
     <div class="settings-card">
       <h3>AI Model</h3>
-      <p class="help-text">Saved models for this web UI profile.</p>
-      <div id="saved-model-list" class="saved-model-list"></div>
-      <div class="form-row">
-        <div class="form-group" style="margin-bottom: 0;">
-          <label for="setting-ai-model">Add model name</label>
-          <input id="setting-ai-model" class="input" type="text" placeholder="deepseek/deepseek-v4-flash"/>
-        </div>
-        <div class="form-group" style="align-self: end; margin-bottom: 0;">
-          <button class="btn" onclick="addAiModelSetting()">Add Model</button>
-        </div>
-      </div>
-      <p class="help-text">Use "Set Default" to choose the model used by default in AI Assistant.</p>
+      <p class="help-text">Default model for AI Assistant, pulled live from the CVM's model catalog.</p>
+      <select id="setting-default-model" class="input"></select>
+      <button class="btn btn-primary" style="margin-top:8px;" onclick="saveDefaultModel()">Save as Default</button>
     </div>
     <div class="settings-card">
       <h3>Your CVM Identity</h3>
