@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -138,7 +138,7 @@ def _is_retryable(status_code, error_type):
     return False
 
 
-def phala_request(messages, model, timeout, zdr=False):
+def phala_request(messages, model, timeout, zdr=False, tools=None, tool_choice=None, response_format=None):
     headers = {
         "Authorization": f"Bearer {PHALA_AI_API_KEY}",
         "Content-Type": "application/json",
@@ -147,6 +147,12 @@ def phala_request(messages, model, timeout, zdr=False):
     payload = {"model": model, "messages": messages}
     if zdr:
         payload["provider"] = {"zdr": True}
+    if tools:
+        payload["tools"] = tools
+    if tool_choice:
+        payload["tool_choice"] = tool_choice
+    if response_format:
+        payload["response_format"] = response_format
     request_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
     response = requests.post(PHALA_AI_URL, headers=headers, data=request_bytes, timeout=timeout)
@@ -155,13 +161,37 @@ def phala_request(messages, model, timeout, zdr=False):
     return {"json": response.json(), "receipt_id": receipt_id}
 
 
-def phala_request_with_fallback(messages, requested_model, zdr=False, has_image=False):
+def phala_request_stream(messages, model, timeout, zdr=False, tools=None, tool_choice=None, response_format=None):
+    headers = {
+        "Authorization": f"Bearer {PHALA_AI_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    payload = {"model": model, "messages": messages, "stream": True}
+    if zdr:
+        payload["provider"] = {"zdr": True}
+    if tools:
+        payload["tools"] = tools
+    if tool_choice:
+        payload["tool_choice"] = tool_choice
+    if response_format:
+        payload["response_format"] = response_format
+
+    response = requests.post(PHALA_AI_URL, headers=headers, json=payload, timeout=timeout, stream=True)
+    response.raise_for_status()
+    receipt_id = response.headers.get("x-receipt-id", "").strip()
+    return response, receipt_id
+
+
+def phala_request_with_fallback(messages, requested_model, zdr=False, has_image=False,
+                                 tools=None, tool_choice=None, response_format=None):
     model = requested_model or DEFAULT_MODEL
     deadline = time.monotonic() + AI_TIMEOUT
     primary_timeout = max(min(AI_TIMEOUT * 0.4, 25), 5)
 
     try:
-        result = phala_request(messages, model, primary_timeout, zdr=zdr)
+        result = phala_request(messages, model, primary_timeout, zdr=zdr,
+                                tools=tools, tool_choice=tool_choice, response_format=response_format)
         result["used_model"] = model
         return result
     except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
@@ -179,7 +209,6 @@ def phala_request_with_fallback(messages, requested_model, zdr=False, has_image=
             or _is_retryable(status_code, error_type)
             or (zdr and error_type == "not_found_error")
         )
-        # Never fall back to a model that can't handle the image in this request.
         fallback_is_viable = (not has_image) or _model_supports_image(FALLBACK_MODEL)
 
         if model != FALLBACK_MODEL and is_transient and fallback_is_viable and remaining > 5:
@@ -187,7 +216,8 @@ def phala_request_with_fallback(messages, requested_model, zdr=False, has_image=
                 "Primary model %s failed (%s, status=%s, type=%s); falling back to %s with %.1fs left",
                 model, type(exc).__name__, status_code, error_type, FALLBACK_MODEL, remaining,
             )
-            result = phala_request(messages, FALLBACK_MODEL, remaining, zdr=zdr)
+            result = phala_request(messages, FALLBACK_MODEL, remaining, zdr=zdr,
+                                    tools=tools, tool_choice=tool_choice, response_format=response_format)
             result["used_model"] = FALLBACK_MODEL
             result["fallback_from"] = model
             return result
@@ -199,6 +229,7 @@ def _trim_model(m):
         "name": m.get("name") or m.get("id"),
         "is_tee": bool(m.get("is_tee")),
         "input_modalities": m.get("input_modalities") or [],
+        "supported_parameters": m.get("supported_parameters") or [],
         "context_length": m.get("context_length"),
     }
 
@@ -224,6 +255,15 @@ def _get_catalog_cached(force=False):
     _CATALOG_CACHE["ts"] = now
     return catalog
 
+def _model_supports_param(model_id, param):
+    try:
+        catalog = _get_catalog_cached()
+    except Exception:
+        return True
+    entry = next((m for m in catalog if m.get("id") == model_id), None)
+    if entry is None:
+        return True
+    return param in (entry.get("supported_parameters") or [])
 
 def _model_supports_image(model_id):
     try:
@@ -332,11 +372,13 @@ def inference():
     data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "").strip()
     image_url = (data.get("image_url") or "").strip()
+    history = data.get("history") or []
     if not prompt and not image_url:
         return jsonify({"status": "error", "message": "prompt is required"}), 400
 
     requested_model = data.get("model") or DEFAULT_MODEL
     zdr = bool(data.get("zdr", False))
+    response_format = data.get("response_format")
     system = data.get("system") or SYSTEM_PROMPT
     context_items = data.get("context", [])
 
@@ -353,6 +395,12 @@ def inference():
             ),
         }), 400
 
+    if response_format and not _model_supports_param(requested_model, "response_format"):
+        return jsonify({
+            "status": "error",
+            "message": f"'{requested_model}' doesn't support structured output.",
+        }), 400
+
     if context_items:
         context_text = "\n".join(str(item) for item in context_items)
         prompt = f"Context:\n{context_text}\n\nUser:\n{prompt}"
@@ -366,12 +414,18 @@ def inference():
         user_content = prompt
 
     messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_content},
+        {"role": "system", 
+         "content": system}
     ]
+    if isinstance(history, list):
+        messages.extend(h for h in history if isinstance(h, dict) and h.get("role") in ("user", "assistant"))
+    messages.append({"role": "user", "content": user_content})
 
     try:
-        result = phala_request_with_fallback(messages, requested_model, zdr=zdr, has_image=bool(image_url))
+        result = phala_request_with_fallback(
+            messages, requested_model, zdr=zdr, has_image=bool(image_url),
+            response_format=response_format,
+        )
         response_text = _extract_text_response(result.get("json", {}))
         if not response_text:
             return jsonify({
@@ -443,29 +497,80 @@ def chat():
         return jsonify({"status": "error", "message": "messages list is required"}), 400
 
     requested_model = data.get("model") or DEFAULT_MODEL
+    zdr = bool(data.get("zdr", False))
+    tools = data.get("tools")
+    tool_choice = data.get("tool_choice")
+    response_format = data.get("response_format")
 
     try:
-        result = phala_request_with_fallback(messages, requested_model)
-
-        return jsonify({"status": "success",
-                        "message": result["json"].get("choices", [{}])[0].get("message", {}),
-                        "model": result.get("used_model", requested_model),
-                        "receipt_id": result.get("receipt_id", "")})
-
+        result = phala_request_with_fallback(
+            messages, requested_model, zdr=zdr,
+            tools=tools, tool_choice=tool_choice, response_format=response_format,
+        )
+        return jsonify({
+            "status": "success",
+            "message": result["json"].get("choices", [{}])[0].get("message", {}),
+            "model": result.get("used_model", requested_model),
+            "receipt_id": result.get("receipt_id", ""),
+        })
     except requests.exceptions.Timeout:
-        return jsonify({"status": "error", "message": "Phala AI request timed out"}), 504
+        return jsonify({"status": "error", "message": "AI request timed out. Please try again."}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to connect to Phala AI"}), 503
     except requests.exceptions.HTTPError as exc:
-        if _is_upstream_verification_route_failure(exc):
+        status_code = exc.response.status_code if exc.response is not None else 502
+        error_type, error_msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        if error_type == "upstream_error" or status_code in (500, 502, 503):
             return jsonify({
                 "status": "error",
                 "message": "Selected model route is currently unavailable upstream. Try a different model or wait a moment.",
             }), 503
-        return jsonify({"status": "error", "message": f"Phala AI returned {exc.response.status_code}: {exc.response.text}"}), 502
-    except requests.exceptions.ConnectionError:
-        return jsonify({"status": "error", "message": "Unable to connect to Phala AI"}), 503
+        return jsonify({"status": "error", "message": error_msg or f"AI service returned {status_code}"}), status_code
     except Exception as exc:
         log.exception("Chat error")
         return jsonify({"status": "error", "message": str(exc)}), 500
+
+@app.route("/chat/stream", methods=["POST"])
+def chat_stream():
+    err = require_api_key()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    messages = data.get("messages")
+    if not messages:
+        return jsonify({"status": "error", "message": "messages list is required"}), 400
+
+    requested_model = data.get("model") or DEFAULT_MODEL
+    zdr = bool(data.get("zdr", False))
+    response_format = data.get("response_format")
+
+    try:
+        upstream, receipt_id = phala_request_stream(
+            messages, requested_model, AI_TIMEOUT, zdr=zdr, response_format=response_format,
+        )
+    except requests.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "AI request timed out. Please try again."}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "Unable to connect to Phala AI"}), 503
+    except requests.exceptions.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        _, msg = _parse_phala_error(exc.response) if exc.response is not None else ("", "")
+        return jsonify({"status": "error", "message": msg or f"AI service returned {status_code}"}), status_code
+
+    def generate():
+        yield f"event: receipt\ndata: {json.dumps({'receipt_id': receipt_id})}\n\n"
+        try:
+            for line in upstream.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                yield f"{line}\n\n"
+        except Exception:
+            yield f"event: error\ndata: {json.dumps({'message': 'Stream interrupted'})}\n\n"
+        finally:
+            upstream.close()
+
+    return Response(generate(), mimetype="text/event-stream")
 
 @app.route("/attestation", methods=["GET"])
 def attestation():

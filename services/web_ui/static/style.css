@@ -249,6 +249,8 @@ header {
 }
 .vision-warning { color: var(--overdue); font-weight: 600; }
 
+.ai-feature-row { display: flex; align-items: center; gap: 8px; }
+
 /* ── Calendar ─────────────────────────────────────────────── */
 .cal-nav { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
 .cal-title { font-size: 16px; font-weight: 600; min-width: 160px; text-align: center; }

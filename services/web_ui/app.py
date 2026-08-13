@@ -15,7 +15,7 @@ from datetime import datetime, timezone, date
 from pathlib import Path
 
 import requests as req
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask import Flask, render_template, request, jsonify, redirect, url_for, Response
 from flask_cors import CORS
 
 try:
@@ -53,6 +53,17 @@ DAILY_NOTES_PREFIX = "[CVM_DAILY]"
 KEY_WRAP_INFO = b"todoapp-keywrap-v1"
 TASK_INFO_PREFIX = "todoapp-task-v2"
 _WORKSPACE_KEY_CACHE = {}
+
+BUILTIN_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_tasks",
+            "description": "Get the user's current to-do list tasks: title, due date, time, priority, completion status.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+]
 
 # Stable user ID for this web session — override via WEB_USER_ID env var
 # to match your desktop user ID for seamless sync.
@@ -478,6 +489,23 @@ def _split_remote_tasks(tasks):
 
     return regular, daily
 
+def _execute_tool_call(tool_call):
+    name = tool_call.get("function", {}).get("name")
+    if name == "get_tasks":
+        try:
+            r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+            tasks, _daily = _split_remote_tasks(tasks)
+            summary = [{
+                "title": t.get("title"), "due_date": t.get("due_date"),
+                "due_time": t.get("due_time"), "priority": t.get("priority"),
+                "completed": t.get("completed", False),
+            } for t in tasks]
+            return json.dumps(summary)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+    return json.dumps({"error": f"Unknown tool: {name}"})
+
 # ---------------------------------------------------------------------------
 # Page routes
 # ---------------------------------------------------------------------------
@@ -834,10 +862,16 @@ def ai_chat():
     prompt = data.get("prompt", "")
     model  = data.get("model", "")
     zdr    = bool(data.get("zdr", False))
-    if not prompt:
+    image_url = data.get("image_url", "")
+    response_format = data.get("response_format")
+    history = data.get("history") or []
+    if not prompt and not image_url:
         return jsonify({"status": "error", "message": "prompt required"}), 400
     try:
-        r = _ai("POST", "/inference", json={"prompt": prompt, "model": model, "zdr": zdr})
+        payload = {"prompt": prompt, "model": model, "zdr": zdr, "image_url": image_url, "history": history}
+        if response_format:
+            payload["response_format"] = response_format
+        r = _ai("POST", "/inference", json=payload)
         if r.status_code == 200:
             return jsonify(r.json())
 
@@ -877,6 +911,117 @@ def ai_chat():
     except req.exceptions.ConnectionError:
         return jsonify({"status": "error",
                         "message": "AI service not available. Check ai_inference service health in CVM."}), 503
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 503
+
+@app.route("/api/ai/chat/stream", methods=["POST"])
+def ai_chat_stream():
+    data = request.get_json(silent=True) or {}
+    prompt = data.get("prompt", "")
+    model = data.get("model", "")
+    zdr = bool(data.get("zdr", False))
+    image_url = data.get("image_url", "")
+    response_format = data.get("response_format")
+
+    if not prompt and not image_url:
+        return jsonify({"status": "error", "message": "prompt required"}), 400
+
+    if image_url:
+        user_content = [
+            {"type": "text", "text": prompt or "What is in this image?"},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+    else:
+        user_content = prompt
+
+    history = data.get("history") or []
+    messages = [{"role": "system", "content": "You are a helpful task management assistant."}]
+    messages.extend(h for h in history if isinstance(h, dict) and h.get("role") in ("user", "assistant"))
+    messages.append({"role": "user", "content": user_content})
+
+    payload = {"messages": messages, "model": model, "zdr": zdr}
+    if response_format:
+        payload["response_format"] = response_format
+
+    try:
+        upstream = req.post(
+            f"{AI_URL}/chat/stream", json=payload, headers=_headers(),
+            timeout=AI_PROXY_TIMEOUT, stream=True,
+        )
+    except req.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "AI request timed out waiting for ai_inference."}), 504
+    except req.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "AI service not available."}), 503
+
+    if upstream.status_code != 200:
+        try:
+            payload = upstream.json()
+        except Exception:
+            payload = {}
+        return jsonify({"status": "error", "message": payload.get("message", "AI service error")}), upstream.status_code
+
+    def relay():
+        try:
+            for chunk in upstream.iter_content(chunk_size=None):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return Response(relay(), mimetype="text/event-stream",
+                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+@app.route("/api/ai/chat/tools", methods=["POST"])
+def ai_chat_tools():
+    data = request.get_json(silent=True) or {}
+    prompt = data.get("prompt", "").strip()
+    model = data.get("model", "")
+    zdr = bool(data.get("zdr", False))
+    if not prompt:
+        return jsonify({"status": "error", "message": "prompt required"}), 400
+
+    history = data.get("history") or []
+    messages = [
+        {"role": "system", "content": "You are a helpful task management assistant. Use the get_tasks tool when the user asks about their tasks."},
+    ]
+    messages.extend(h for h in history if isinstance(h, dict) and h.get("role") in ("user", "assistant"))
+    messages.append({"role": "user", "content": prompt})
+
+    try:
+        for _ in range(3):
+            r = _ai("POST", "/chat", json={
+                "messages": messages, "model": model, "zdr": zdr,
+                "tools": BUILTIN_TOOLS, "tool_choice": "auto",
+            })
+            if r.status_code != 200:
+                try:
+                    payload = r.json()
+                except Exception:
+                    payload = {}
+                return jsonify({"status": "error", "message": payload.get("message", "AI service error")}), r.status_code
+
+            body = r.json()
+            message = body.get("message", {})
+            tool_calls = message.get("tool_calls") or []
+
+            if not tool_calls:
+                return jsonify({
+                    "status": "success",
+                    "response": message.get("content") or "(no response)",
+                    "model": body.get("model", model),
+                    "receipt_id": body.get("receipt_id", ""),
+                })
+
+            messages.append(message)
+            for tc in tool_calls:
+                result = _execute_tool_call(tc)
+                messages.append({"role": "tool", "content": result, "tool_call_id": tc.get("id")})
+
+        return jsonify({"status": "error", "message": "Too many tool-call rounds; try rephrasing your question."}), 500
+    except req.exceptions.Timeout:
+        return jsonify({"status": "error", "message": "AI request timed out waiting for ai_inference."}), 504
+    except req.exceptions.ConnectionError:
+        return jsonify({"status": "error", "message": "AI service not available."}), 503
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 

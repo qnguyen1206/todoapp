@@ -16,6 +16,10 @@ let zdrModels = [];
 let visionModels = [];
 let attachedImageDataUrl = null;
 let modelCatalog = [];
+let toolsEnabled = false;
+let streamEnabled = false;
+let conversationHistory = [];
+const MAX_HISTORY_MESSAGES = 20; // ~10 exchanges; trims oldest first
 
 /* ── Tab Switching ─────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(btn => {
@@ -96,6 +100,93 @@ async function loadModelCatalog(refresh = false) {
 async function refreshModelCatalog() {
   await loadModelCatalog(true);
   await rebuildModelSelect();
+}
+
+function onFeatureToggle() {
+  toolsEnabled = document.getElementById('tools-toggle').checked;
+  streamEnabled = document.getElementById('stream-toggle').checked;
+  if (toolsEnabled && streamEnabled) {
+    streamEnabled = false;
+    document.getElementById('stream-toggle').checked = false;
+    alert('Streaming is disabled while task tools are on — tool calls need the full response to run.');
+  }
+}
+
+function onFormatChange() {
+  const val = document.getElementById('format-select').value;
+  document.getElementById('format-custom-input').style.display = val === 'other' ? 'block' : 'none';
+}
+
+function buildResponseFormat() {
+  const val = document.getElementById('format-select').value;
+  if (val === 'normal') return null;
+  if (val === 'json') {
+    return { type: 'json_schema', json_schema: { name: 'output', strict: false, schema: { type: 'object', additionalProperties: true } } };
+  }
+  const raw = document.getElementById('format-custom-input').value.trim();
+  if (!raw) return null;
+  try {
+    const schema = JSON.parse(raw);
+    return { type: 'json_schema', json_schema: { name: 'custom_output', strict: true, schema } };
+  } catch {
+    alert('Custom output format must be valid JSON (a JSON Schema object).');
+    return undefined;
+  }
+}
+
+function updateFeatureAvailability() {
+  const entry = currentModelEntry();
+  const params = (entry && entry.supported_parameters) || [];
+  const supportsTools = params.includes('tools');
+  const supportsFormat = params.includes('response_format');
+
+  document.getElementById('tools-toggle').closest('.ai-feature-row').style.display = supportsTools ? 'flex' : 'none';
+  if (!supportsTools) { toolsEnabled = false; document.getElementById('tools-toggle').checked = false; }
+
+  document.getElementById('format-select').closest('.form-group').style.display = supportsFormat ? 'block' : 'none';
+  if (!supportsFormat) {
+    document.getElementById('format-select').value = 'normal';
+    onFormatChange();
+  }
+}
+
+function buildUserContent(prompt, imageDataUrl) {
+  if (!imageDataUrl) return prompt;
+  return [
+    { type: 'text', text: prompt || 'What is in this image?' },
+    { type: 'image_url', image_url: { url: imageDataUrl } },
+  ];
+}
+
+function trimHistory() {
+  if (conversationHistory.length > MAX_HISTORY_MESSAGES) {
+    conversationHistory = conversationHistory.slice(-MAX_HISTORY_MESSAGES);
+  }
+}
+
+// Non-vision models can't accept image_url blocks — degrade old images to a
+// text note instead of dropping the turn or sending something that'll 400.
+function sanitizeHistoryForModel(history, supportsImage) {
+  if (supportsImage) return history;
+  return history.map(m => {
+    if (Array.isArray(m.content)) {
+      const textPart = m.content.find(p => p.type === 'text');
+      const hadImage = m.content.some(p => p.type === 'image_url');
+      return {
+        role: m.role,
+        content: (textPart?.text || '') + (hadImage ? '\n[an image was attached here — not visible to this model]' : ''),
+      };
+    }
+    return m;
+  });
+}
+
+function clearConversation() {
+  conversationHistory = [];
+  const chat = document.getElementById('ai-chat');
+  chat.innerHTML = '';
+  chat.dataset.greeted = '';
+  appendAIMessage('bot', "Conversation cleared. Ask me anything about your tasks or productivity.");
 }
 
 /* ── Trust Modal ─────────────────────────────────────────── */
@@ -504,35 +595,74 @@ async function sendAI() {
   if (!prompt && !attachedImageDataUrl) return;
 
   const selectedModel = document.getElementById('ai-model-select').value;
-  if (zdrEnabled && !selectedModel) {
-    alert('Select a Zero Data Retention model first.');
+  if (zdrEnabled && !selectedModel) { alert('Select a Zero Data Retention model first.'); return; }
+
+  const entry = currentModelEntry();
+  const supportsImage = !!entry && (entry.input_modalities || []).includes('image');
+  if (attachedImageDataUrl && !supportsImage) {
+    alert('Select a vision-capable model before sending an image.');
     return;
   }
-  if (attachedImageDataUrl) {
-    const entry = currentModelEntry();
-    if (!entry || !(entry.input_modalities || []).includes('image')) {
-      alert('Select a vision-capable model before sending an image.');
-      return;
-    }
-  }
+
+  const responseFormat = buildResponseFormat();
+  if (responseFormat === undefined) return;
 
   appendAIMessage('user', prompt || '(image)');
   input.value = '';
   const imageToSend = attachedImageDataUrl;
   removeAttachedImage();
 
+  const userTurn = { role: 'user', content: buildUserContent(prompt, imageToSend) };
+  conversationHistory.push(userTurn);
+  trimHistory();
+
+  const historyForRequest = sanitizeHistoryForModel(conversationHistory.slice(0, -1), supportsImage);
+
+  if (toolsEnabled && !imageToSend) {
+    const thinking = appendAIMessage('bot thinking', '…thinking…');
+    try {
+      const d = await api('POST', '/api/ai/chat/tools', {
+        prompt, model: selectedModel, zdr: zdrEnabled, history: historyForRequest,
+      }, 120000);
+      thinking.remove();
+      if (d.status === 'success') {
+        appendAIBotResponse(d.response || '(no response)', d);
+        conversationHistory.push({ role: 'assistant', content: d.response || '' });
+      } else {
+        appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
+        conversationHistory.pop(); // don't keep a turn that failed
+      }
+    } catch (e) {
+      thinking.remove();
+      appendAIBotResponse(`✗ Error: ${e.message}`, {});
+      conversationHistory.pop();
+    }
+    return;
+  }
+
+  if (streamEnabled) {
+    await sendAIStreaming(prompt, selectedModel, imageToSend, responseFormat, historyForRequest);
+    return;
+  }
+
   const thinking = appendAIMessage('bot thinking', '…thinking…');
   try {
     const d = await api('POST', '/api/ai/chat', {
       prompt, model: selectedModel, zdr: zdrEnabled, image_url: imageToSend || '',
+      response_format: responseFormat || undefined, history: historyForRequest,
     }, 120000);
     thinking.remove();
-    d.status === 'success'
-      ? appendAIBotResponse(d.response || '(no response)', d)
-      : appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
+    if (d.status === 'success') {
+      appendAIBotResponse(d.response || '(no response)', d);
+      conversationHistory.push({ role: 'assistant', content: d.response || '' });
+    } else {
+      appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
+      conversationHistory.pop();
+    }
   } catch (e) {
     thinking.remove();
     appendAIBotResponse(`✗ Error: ${e.message}`, {});
+    conversationHistory.pop();
   }
 }
 
@@ -622,6 +752,7 @@ function updateAttachButtonVisibility() {
   if (attachBtn) attachBtn.style.display = supportsImage ? 'inline-flex' : 'none';
   if (!supportsImage && attachedImageDataUrl) removeAttachedImage();
   checkVisionCompatibility();
+  updateFeatureAvailability();
 }
 
 function checkVisionCompatibility() {
@@ -645,6 +776,78 @@ function checkVisionCompatibility() {
   } else {
     warning.style.display = 'none';
     sendBtn.disabled = false;
+  }
+}
+
+async function sendAIStreaming(prompt, selectedModel, imageToSend, responseFormat, history) {
+  const chat = document.getElementById('ai-chat');
+  const div = document.createElement('div');
+  div.className = 'ai-msg bot';
+  const body = document.createElement('div');
+  body.className = 'ai-text';
+  div.appendChild(body);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+
+  let receiptId = '', full = '';
+  try {
+    const resp = await fetch('/api/ai/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt, model: selectedModel, zdr: zdrEnabled, image_url: imageToSend || '',
+        response_format: responseFormat || undefined, history,
+      }),
+    });
+    if (!resp.ok || !resp.body) {
+      let msg = 'Stream request failed';
+      try { const j = await resp.json(); msg = j.message || msg; } catch {}
+      body.textContent = `⚠ ${msg}`;
+      conversationHistory.pop();
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? '';
+      for (const evt of events) {
+        for (const line of evt.split('\n').filter(Boolean)) {
+          if (!line.startsWith('data:')) continue;
+          const dataStr = line.slice(5).trim();
+          if (dataStr === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(dataStr);
+            if (parsed.receipt_id) { receiptId = parsed.receipt_id; continue; }
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (delta) { full += delta; body.textContent = full; chat.scrollTop = chat.scrollHeight; }
+          } catch {}
+        }
+      }
+    }
+
+    if (!full) {
+      body.textContent = '(no response)';
+      conversationHistory.pop();
+    } else {
+      conversationHistory.push({ role: 'assistant', content: full });
+    }
+    if (receiptId) {
+      const meta = document.createElement('div');
+      meta.className = 'ai-receipt';
+      meta.textContent = `Receipt: ${receiptId} · checking…`;
+      div.appendChild(meta);
+      verifyReceipt(receiptId, meta);
+    }
+  } catch (e) {
+    body.textContent = `✗ Error: ${e.message}`;
+    conversationHistory.pop();
   }
 }
 
