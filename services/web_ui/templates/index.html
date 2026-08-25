@@ -209,11 +209,15 @@
       <div class="form-row">
         <div class="form-group">
           <label>Due Date * (MM-DD-YYYY)</label>
-          <input id="f-date" class="input" type="text" placeholder="07-13-2026"/>
+          <div class="date-input-wrap">
+            <input id="f-date" class="input" type="text" inputmode="numeric" maxlength="10" placeholder="07-13-2026" autocomplete="off"/>
+            <button id="f-date-picker-btn" class="btn date-picker-btn" type="button" aria-label="Open calendar" title="Choose from calendar">&#128197;</button>
+            <input id="f-date-picker" class="native-date-picker" type="date" tabindex="-1" aria-hidden="true"/>
+          </div>
         </div>
         <div class="form-group">
-          <label>Due Time (HH:MM)</label>
-          <input id="f-time" class="input" type="text" placeholder="09:00"/>
+          <label id="f-time-label">Due Time (24-hour HH:MM)</label>
+          <input id="f-time" class="input" type="text" placeholder="09:00" autocomplete="off"/>
         </div>
       </div>
       <div class="form-group">

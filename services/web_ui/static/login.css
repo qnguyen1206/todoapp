@@ -1,0 +1,15 @@
+.login-body { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: var(--bg); }
+.login-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+              box-shadow: var(--shadow); padding: 32px; width: 380px; max-width: 92vw; }
+.login-card .app-title { text-align: center; font-size: 22px; margin-bottom: 4px; }
+.login-subtitle { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+.login-form .form-group { margin-bottom: 14px; }
+.login-submit { width: 100%; padding: 9px; font-size: 14px; }
+.login-error { background: #fdecea; color: var(--danger); border: 1px solid #f5c6cb;
+               border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-bottom: 14px; }
+.login-toggle, .login-forgot { text-align: center; font-size: 13px; margin-top: 12px; color: var(--muted); }
+.login-toggle a, .login-forgot a { color: var(--primary); text-decoration: none; margin-left: 4px; }
+.login-toggle a:hover, .login-forgot a:hover { text-decoration: underline; }
+.login-divider { display: flex; align-items: center; margin: 18px 0; color: var(--muted); font-size: 12px; }
+.login-divider::before, .login-divider::after { content: ''; flex: 1; border-bottom: 1px solid var(--border); }
+.login-divider span { padding: 0 10px; }

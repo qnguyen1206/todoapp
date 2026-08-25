@@ -12,6 +12,11 @@ from pathlib import Path
 from datetime import datetime
 import hashlib
 import uuid
+import base64
+import secrets
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlencode, urlparse, parse_qs
 
 try:
     from cryptography.fernet import Fernet
@@ -53,6 +58,11 @@ class CVMClient:
         self.encryption_key = None
         self.api_key = ""
         self.user_id = ""  # custom persistent user ID (empty = auto from hostname)
+        self.account_email = ""
+        self.access_token = ""
+        self.refresh_token = ""
+        self.access_expires_at = 0
+        self.google_desktop_client_id = ""
         self.crypto_device_id = ""
         self.crypto_encryption_private_key = ""
         self.crypto_signing_private_key = ""
@@ -69,6 +79,12 @@ class CVMClient:
                     self.encryption_key = config.get('encryption_key', None)
                     self.api_key = config.get('api_key', '')
                     self.user_id = config.get('user_id', '')
+                    account = config.get('account', {})
+                    self.account_email = account.get('email', '')
+                    self.access_token = account.get('access_token', '')
+                    self.refresh_token = account.get('refresh_token', '')
+                    self.access_expires_at = account.get('access_expires_at', 0)
+                    self.google_desktop_client_id = account.get('google_desktop_client_id', '')
                     crypto = config.get('crypto', {})
                     self.crypto_device_id = crypto.get('device_id', '')
                     self.crypto_encryption_private_key = crypto.get('encryption_private_key', '')
@@ -104,6 +120,14 @@ class CVMClient:
                     'encryption_private_key': self.crypto_encryption_private_key,
                     'signing_private_key': self.crypto_signing_private_key,
                 }
+            if self.account_email or self.refresh_token:
+                config['account'] = {
+                    'email': self.account_email,
+                    'access_token': self.access_token,
+                    'refresh_token': self.refresh_token,
+                    'access_expires_at': self.access_expires_at,
+                    'google_desktop_client_id': self.google_desktop_client_id,
+                }
             Path(self.CVM_CONFIG_FILE).parent.mkdir(parents=True, exist_ok=True)
             with open(self.CVM_CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2)
@@ -115,7 +139,108 @@ class CVMClient:
         h = {"Content-Type": "application/json"}
         if self.api_key:
             h["X-API-Key"] = self.api_key
+        if self.access_token:
+            h["Authorization"] = f"Bearer {self.access_token}"
         return h
+
+    def _backend_url(self):
+        return self.cvm_endpoints.get('backend', '').rstrip('/')
+
+    def _store_account_session(self, payload):
+        self.user_id = payload.get('user_id', self.user_id)
+        self.account_email = payload.get('email', self.account_email)
+        self.access_token = payload.get('access_token', '')
+        self.refresh_token = payload.get('refresh_token', '')
+        self.access_expires_at = int(__import__('time').time()) + int(payload.get('expires_in', 900)) - 30
+        self.save_cvm_config()
+
+    def account_login(self, email, password, display_name=None):
+        """Sign in or register with the shared CVM account service."""
+        endpoint = self._backend_url()
+        if not endpoint:
+            return False, 'Configure the Backend Storage endpoint first.'
+        data = {'email': email.strip(), 'password': password}
+        path = '/auth/login'
+        if display_name is not None:
+            path = '/auth/register'
+            data['display_name'] = display_name.strip()
+        try:
+            response = requests.post(endpoint + path, json=data, headers=self._headers(), timeout=15)
+            payload = response.json()
+            if response.status_code not in (200, 201):
+                return False, payload.get('message', 'Sign-in failed')
+            self._store_account_session(payload)
+            return True, payload.get('email', 'Signed in')
+        except (requests.RequestException, ValueError) as exc:
+            return False, f'Could not reach account service: {exc}'
+
+    def account_logout(self):
+        endpoint = self._backend_url()
+        if endpoint and self.refresh_token:
+            try:
+                requests.post(endpoint + '/auth/logout', json={'refresh_token': self.refresh_token}, headers=self._headers(), timeout=10)
+            except requests.RequestException:
+                pass
+        self.account_email = self.access_token = self.refresh_token = ''
+        self.access_expires_at = 0
+        self.save_cvm_config()
+
+    def account_verify_email(self, email, code):
+        endpoint = self._backend_url()
+        if not endpoint:
+            return False, 'Configure the Backend Storage endpoint first.'
+        try:
+            response = requests.post(endpoint + '/auth/verify-email', json={'email': email.strip(), 'code': code.strip()}, headers=self._headers(), timeout=15)
+            payload = response.json()
+            if response.status_code != 200:
+                return False, payload.get('message', 'Verification failed')
+            self._store_account_session(payload)
+            return True, payload.get('email', 'Signed in')
+        except (requests.RequestException, ValueError) as exc:
+            return False, f'Could not reach account service: {exc}'
+
+    def google_desktop_login(self, client_id):
+        """Launch Google's browser sign-in using OAuth PKCE and a loopback callback."""
+        endpoint = self._backend_url()
+        if not endpoint:
+            return False, 'Configure the Backend Storage endpoint first.'
+        if not client_id:
+            return False, 'Enter a Google Desktop OAuth client ID.'
+        state = secrets.token_urlsafe(24)
+        verifier = secrets.token_urlsafe(64)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
+        received = {}
+        class Callback(BaseHTTPRequestHandler):
+            def do_GET(self):
+                query = parse_qs(urlparse(self.path).query)
+                received.update({key: values[0] for key, values in query.items() if values})
+                self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
+                self.wfile.write(b'<h2>TODO App sign-in complete</h2><p>You can close this window and return to the app.</p>')
+            def log_message(self, format, *args):
+                return
+        server = HTTPServer(('127.0.0.1', 0), Callback)
+        redirect_uri = f'http://127.0.0.1:{server.server_port}/callback'
+        auth_url = 'https://accounts.google.com/o/oauth2/v2/auth?' + urlencode({
+            'client_id': client_id, 'redirect_uri': redirect_uri, 'response_type': 'code',
+            'scope': 'openid email profile', 'state': state, 'code_challenge': challenge,
+            'code_challenge_method': 'S256', 'access_type': 'offline',
+        })
+        webbrowser.open(auth_url)
+        server.timeout = 180
+        server.handle_request()
+        if received.get('state') != state or not received.get('code'):
+            return False, received.get('error_description', 'Google sign-in was cancelled or timed out')
+        try:
+            response = requests.post(endpoint + '/auth/google/desktop', json={
+                'code': received['code'], 'code_verifier': verifier, 'redirect_uri': redirect_uri, 'client_id': client_id,
+            }, headers=self._headers(), timeout=20)
+            payload = response.json()
+            if response.status_code != 200:
+                return False, payload.get('message', 'Google sign-in failed')
+            self._store_account_session(payload)
+            return True, payload.get('email', 'Signed in')
+        except (requests.RequestException, ValueError) as exc:
+            return False, f'Could not complete Google sign-in: {exc}'
 
     def _ensure_device_keys(self):
         """Create this computer's local ECDH and signing key pairs once."""

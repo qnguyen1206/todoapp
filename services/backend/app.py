@@ -10,13 +10,21 @@ import re
 import base64
 from datetime import datetime, timezone
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+import secrets
+import smtplib
+import requests as http_requests
+from email.mime.text import MIMEText
+from functools import wraps
+
+import auth as auth_lib
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "info").upper())
 log = logging.getLogger(__name__)
@@ -49,6 +57,395 @@ def require_api_key():
     if key != API_KEY:
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
     return None
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def require_auth(f):
+    """Derive g.user_id from a verified JWT. This is what makes sync per-user
+    instead of per-anyone-with-the-API-key."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return jsonify({"status": "error", "message": "Missing or invalid Authorization header"}), 401
+        token = header[len("Bearer "):].strip()
+        try:
+            claims = auth_lib.decode_access_token(token)
+        except Exception:
+            return jsonify({"status": "error", "message": "Invalid or expired access token"}), 401
+        g.user_id = claims["sub"]
+        g.user_email = claims.get("email", "")
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def _issue_token_pair(conn, user_id, email):
+    access = auth_lib.issue_access_token(user_id, email)
+    plaintext_refresh, refresh_hash = auth_lib.new_refresh_token()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO refresh_tokens (token_hash, user_id, expires_at) "
+            "VALUES (%s, %s, NOW() + (%s || ' seconds')::interval)",
+            (refresh_hash, user_id, auth_lib.REFRESH_TOKEN_TTL_SECONDS),
+        )
+    return access, plaintext_refresh
+
+
+def _send_password_reset_email(email, token):
+    reset_base_url = os.environ.get("PASSWORD_RESET_URL", "")  # e.g. web_ui's /reset-password page
+    link = f"{reset_base_url}?token={token}" if reset_base_url else f"(no PASSWORD_RESET_URL set — token: {token})"
+    if os.environ.get("SMTP_ENABLED", "false").lower() != "true":
+        log.info("SMTP disabled — password reset link for %s: %s", email, link)
+        return
+    try:
+        msg = MIMEText(f"Reset your TODO App password:\n\n{link}\n\nThis link expires in 1 hour.")
+        msg["Subject"] = "Reset your TODO App password"
+        msg["From"] = os.environ.get("SMTP_USER", "")
+        msg["To"] = email
+        with smtplib.SMTP(os.environ.get("SMTP_HOST", ""), int(os.environ.get("SMTP_PORT", "587"))) as server:
+            server.starttls()
+            server.login(os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASSWORD", ""))
+            server.sendmail(msg["From"], [email], msg.as_string())
+    except Exception as exc:
+        log.error("Failed to send password reset email: %s", exc)
+
+
+def _send_verification_code(email, code):
+    """Send a short-lived account-verification code through the configured SMTP account."""
+    if os.environ.get("SMTP_ENABLED", "false").lower() != "true":
+        log.warning("SMTP is disabled; cannot deliver verification email to %s", email)
+        return False
+    try:
+        msg = MIMEText(f"Your TODO App verification code is: {code}\n\nIt expires in 15 minutes.")
+        msg["Subject"] = "Verify your TODO App account"
+        msg["From"] = os.environ.get("SMTP_USER", "")
+        msg["To"] = email
+        with smtplib.SMTP(os.environ.get("SMTP_HOST", ""), int(os.environ.get("SMTP_PORT", "587"))) as server:
+            server.starttls()
+            server.login(os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASSWORD", ""))
+            server.sendmail(msg["From"], [email], msg.as_string())
+        return True
+    except Exception as exc:
+        log.error("Failed to send verification email: %s", exc)
+        return False
+
+
+def _create_verification_code(conn, user_id):
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM email_verifications WHERE user_id = %s", (user_id,))
+        cur.execute(
+            "INSERT INTO email_verifications (code_hash, user_id, expires_at) "
+            "VALUES (%s, %s, NOW() + INTERVAL '15 minutes')",
+            (auth_lib.hash_token(code), user_id),
+        )
+    return code
+
+
+@app.route("/auth/register", methods=["POST"])
+def register():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    display_name = (data.get("display_name") or "").strip()[:80]
+
+    if not EMAIL_RE.match(email):
+        return jsonify({"status": "error", "message": "Valid email required"}), 400
+    if len(password) < 8:
+        return jsonify({"status": "error", "message": "Password must be at least 8 characters"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, email_verified FROM users WHERE email = %s", (email,))
+            existing = cur.fetchone()
+            if existing and existing[1]:
+                return jsonify({"status": "error", "message": "An account with this email already exists"}), 409
+            if existing:
+                user_id = existing[0]
+                cur.execute("UPDATE users SET password_hash = %s, display_name = %s WHERE id = %s",
+                            (auth_lib.hash_password(password), display_name, user_id))
+            else:
+                user_id = auth_lib.new_user_id()
+                cur.execute(
+                    "INSERT INTO users (id, email, password_hash, display_name, email_verified) VALUES (%s, %s, %s, %s, FALSE)",
+                    (user_id, email, auth_lib.hash_password(password), display_name),
+                )
+            code = _create_verification_code(conn, user_id)
+        conn.commit()
+        if not _send_verification_code(email, code):
+            return jsonify({"status": "error", "message": "Could not send verification email. Please try again later."}), 503
+        return jsonify({"status": "verification_required", "email": email, "message": "A verification code was sent to your email."}), 202
+    except Exception as exc:
+        conn.rollback()
+        log.error("register error: %s", exc)
+        return jsonify({"status": "error", "message": "Could not create account"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/auth/login", methods=["POST"])
+def login():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, email, password_hash, email_verified FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
+        if not user or not auth_lib.verify_password(password, user["password_hash"]):
+            return jsonify({"status": "error", "message": "Incorrect email or password"}), 401
+        if not user["email_verified"]:
+            return jsonify({"status": "verification_required", "message": "Verify your email before signing in."}), 403
+
+        access, refresh = _issue_token_pair(conn, user["id"], user["email"])
+        conn.commit()
+        return jsonify({
+            "status": "success", "user_id": user["id"], "email": user["email"],
+            "access_token": access, "refresh_token": refresh,
+            "expires_in": auth_lib.ACCESS_TOKEN_TTL_SECONDS,
+        })
+    except Exception as exc:
+        conn.rollback()
+        log.error("login error: %s", exc)
+        return jsonify({"status": "error", "message": "Login failed"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/auth/verify-email", methods=["POST"])
+def verify_email():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    code = (data.get("code") or "").strip()
+    if not EMAIL_RE.match(email) or not code.isdigit() or len(code) != 6:
+        return jsonify({"status": "error", "message": "Email and six-digit code are required"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, email_verified FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
+            if not user:
+                return jsonify({"status": "error", "message": "Invalid verification code"}), 400
+            if user["email_verified"]:
+                return jsonify({"status": "error", "message": "Email is already verified; sign in instead."}), 400
+            cur.execute("SELECT code_hash FROM email_verifications WHERE user_id = %s AND expires_at > NOW()", (user["id"],))
+            verification = cur.fetchone()
+            if not verification or not secrets.compare_digest(verification["code_hash"], auth_lib.hash_token(code)):
+                return jsonify({"status": "error", "message": "Invalid or expired verification code"}), 400
+            cur.execute("UPDATE users SET email_verified = TRUE WHERE id = %s", (user["id"],))
+            cur.execute("DELETE FROM email_verifications WHERE user_id = %s", (user["id"],))
+            access, refresh = _issue_token_pair(conn, user["id"], email)
+        conn.commit()
+        return jsonify({"status": "success", "user_id": user["id"], "email": email,
+                        "access_token": access, "refresh_token": refresh,
+                        "expires_in": auth_lib.ACCESS_TOKEN_TTL_SECONDS})
+    except Exception as exc:
+        conn.rollback(); log.error("verify_email error: %s", exc)
+        return jsonify({"status": "error", "message": "Could not verify email"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/auth/google", methods=["POST"])
+def google_login():
+    return _google_login_from_data(request.get_json(silent=True) or {})
+
+
+def _google_login_from_data(data):
+    """Verify a Google ID token and create/link the corresponding TODO account."""
+    try:
+        google_sub, email, name = auth_lib.verify_google_id_token(data.get("id_token") or "")
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 401
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, email FROM users WHERE google_sub = %s", (google_sub,))
+            user = cur.fetchone()
+            if not user:
+                # Link to an existing password account with the same email, else create new.
+                cur.execute("SELECT id, email FROM users WHERE email = %s", (email,))
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute("UPDATE users SET google_sub = %s WHERE id = %s", (google_sub, existing["id"]))
+                    user = existing
+                else:
+                    user_id = auth_lib.new_user_id()
+                    cur.execute(
+                        "INSERT INTO users (id, email, google_sub, display_name) VALUES (%s, %s, %s, %s)",
+                        (user_id, email, google_sub, name[:80]),
+                    )
+                    user = {"id": user_id, "email": email}
+
+            access, refresh = _issue_token_pair(conn, user["id"], user["email"])
+        conn.commit()
+        return jsonify({
+            "status": "success", "user_id": user["id"], "email": user["email"],
+            "access_token": access, "refresh_token": refresh,
+            "expires_in": auth_lib.ACCESS_TOKEN_TTL_SECONDS,
+        })
+    except Exception as exc:
+        conn.rollback()
+        log.error("google_login error: %s", exc)
+        return jsonify({"status": "error", "message": "Google sign-in failed"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/auth/google/desktop", methods=["POST"])
+def google_desktop_login():
+    """Exchange an OAuth authorization code from the desktop loopback flow.
+
+    The desktop never stores a Google client secret; it supplies a PKCE verifier,
+    and this service issues the application's ordinary session tokens.
+    """
+    data = request.get_json(silent=True) or {}
+    code = data.get("code") or ""
+    verifier = data.get("code_verifier") or ""
+    redirect_uri = data.get("redirect_uri") or ""
+    client_id = data.get("client_id") or ""
+    if not code or not verifier or not redirect_uri or client_id not in auth_lib.GOOGLE_CLIENT_IDS:
+        return jsonify({"status": "error", "message": "Invalid desktop Google sign-in request"}), 400
+    try:
+        token_response = http_requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={"code": code, "client_id": client_id, "redirect_uri": redirect_uri,
+                  "grant_type": "authorization_code", "code_verifier": verifier},
+            timeout=15,
+        )
+        token_data = token_response.json()
+        if token_response.status_code != 200 or not token_data.get("id_token"):
+            return jsonify({"status": "error", "message": "Google authorization could not be completed"}), 401
+        data["id_token"] = token_data["id_token"]
+    except (ValueError, http_requests.RequestException):
+        return jsonify({"status": "error", "message": "Could not contact Google"}), 503
+    # Reuse the same verified-ID-token account-linking flow as the web client.
+    return _google_login_from_data(data)
+
+
+@app.route("/auth/refresh", methods=["POST"])
+def refresh_token():
+    data = request.get_json(silent=True) or {}
+    plaintext = data.get("refresh_token") or ""
+    if not plaintext:
+        return jsonify({"status": "error", "message": "refresh_token required"}), 400
+    token_hash = auth_lib.hash_token(plaintext)
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT rt.user_id, u.email FROM refresh_tokens rt "
+                "JOIN users u ON u.id = rt.user_id "
+                "WHERE rt.token_hash = %s AND rt.revoked = FALSE AND rt.expires_at > NOW()",
+                (token_hash,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Session expired — please log in again"}), 401
+
+            cur.execute("UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = %s", (token_hash,))
+            access, new_refresh = _issue_token_pair(conn, row["user_id"], row["email"])
+        conn.commit()
+        return jsonify({
+            "status": "success", "access_token": access, "refresh_token": new_refresh,
+            "expires_in": auth_lib.ACCESS_TOKEN_TTL_SECONDS,
+        })
+    except Exception as exc:
+        conn.rollback()
+        log.error("refresh_token error: %s", exc)
+        return jsonify({"status": "error", "message": "Could not refresh session"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/auth/logout", methods=["POST"])
+def logout():
+    data = request.get_json(silent=True) or {}
+    plaintext = data.get("refresh_token") or ""
+    if plaintext:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = %s",
+                            (auth_lib.hash_token(plaintext),))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        finally:
+            conn.close()
+    return jsonify({"status": "success"})
+
+
+@app.route("/auth/me", methods=["GET"])
+@require_auth
+def me():
+    return jsonify({"status": "success", "user_id": g.user_id, "email": g.user_email})
+
+
+@app.route("/auth/password-reset/request", methods=["POST"])
+def password_reset_request():
+    email = ((request.get_json(silent=True) or {}).get("email") or "").strip().lower()
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
+            if user:
+                plaintext = secrets.token_urlsafe(32)
+                cur.execute(
+                    "INSERT INTO password_resets (token_hash, user_id, expires_at) "
+                    "VALUES (%s, %s, NOW() + INTERVAL '1 hour')",
+                    (auth_lib.hash_token(plaintext), user["id"]),
+                )
+                conn.commit()
+                _send_password_reset_email(email, plaintext)
+        return jsonify({"status": "success", "message": "If that email exists, a reset link has been sent."})
+    except Exception as exc:
+        conn.rollback()
+        log.error("password_reset_request error: %s", exc)
+        return jsonify({"status": "success", "message": "If that email exists, a reset link has been sent."})
+    finally:
+        conn.close()
+
+
+@app.route("/auth/password-reset/confirm", methods=["POST"])
+def password_reset_confirm():
+    data = request.get_json(silent=True) or {}
+    plaintext = data.get("token") or ""
+    new_password = data.get("password") or ""
+    if len(new_password) < 8:
+        return jsonify({"status": "error", "message": "Password must be at least 8 characters"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            token_hash = auth_lib.hash_token(plaintext)
+            cur.execute(
+                "SELECT user_id FROM password_resets WHERE token_hash = %s AND used = FALSE AND expires_at > NOW()",
+                (token_hash,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Reset link is invalid or expired"}), 400
+
+            cur.execute("UPDATE users SET password_hash = %s WHERE id = %s",
+                        (auth_lib.hash_password(new_password), row["user_id"]))
+            cur.execute("UPDATE password_resets SET used = TRUE WHERE token_hash = %s", (token_hash,))
+            cur.execute("UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = %s", (row["user_id"],))
+        conn.commit()
+        return jsonify({"status": "success"})
+    except Exception as exc:
+        conn.rollback()
+        log.error("password_reset_confirm error: %s", exc)
+        return jsonify({"status": "error", "message": "Could not reset password"}), 500
+    finally:
+        conn.close()
 
 
 def _b64url_decode(value):
@@ -177,6 +574,46 @@ def init_db():
                 );
                 CREATE INDEX IF NOT EXISTS idx_crypto_devices_user_status
                     ON crypto_devices(user_id, status);
+                
+                CREATE TABLE IF NOT EXISTS users (
+                    id             TEXT PRIMARY KEY,
+                    email          TEXT UNIQUE NOT NULL,
+                    password_hash  TEXT,
+                    google_sub     TEXT UNIQUE,
+                    display_name   TEXT,
+                    email_verified BOOLEAN,
+                    created_at     TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    token_hash   TEXT PRIMARY KEY,
+                    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at   TIMESTAMPTZ NOT NULL,
+                    revoked      BOOLEAN DEFAULT FALSE
+                );
+                CREATE INDEX IF NOT EXISTS idx_refresh_user ON refresh_tokens(user_id);
+
+                CREATE TABLE IF NOT EXISTS password_resets (
+                    token_hash  TEXT PRIMARY KEY,
+                    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    expires_at  TIMESTAMPTZ NOT NULL,
+                    used        BOOLEAN DEFAULT FALSE
+                );
+
+                CREATE TABLE IF NOT EXISTS email_verifications (
+                    code_hash   TEXT PRIMARY KEY,
+                    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    expires_at  TIMESTAMPTZ NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications(user_id);
+
+                -- Existing accounts predate verification, so preserve their ability to sign in.
+                -- New registrations explicitly start with FALSE and must verify a code.
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN;
+                UPDATE users SET email_verified = TRUE WHERE email_verified IS NULL;
+                ALTER TABLE users ALTER COLUMN email_verified SET DEFAULT FALSE;
+                ALTER TABLE users ALTER COLUMN email_verified SET NOT NULL;
             """)
         conn.commit()
         log.info("Database initialised")
@@ -207,13 +644,14 @@ def health():
 # ---------------------------------------------------------------------------
 
 @app.route("/crypto/devices", methods=["GET"])
+@require_auth
 def list_crypto_devices():
     """List public device records and each device's encrypted key envelope."""
     err = require_api_key()
     if err:
         return err
 
-    user_id = (request.args.get("user_id") or "").strip()
+    user_id = g.user_id
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
 
@@ -240,6 +678,7 @@ def list_crypto_devices():
 
 
 @app.route("/crypto/devices/register", methods=["POST"])
+@require_auth
 def register_crypto_device():
     """Register a device public key.  Only the first device becomes active."""
     err = require_api_key()
@@ -247,7 +686,7 @@ def register_crypto_device():
         return err
 
     data = request.get_json(silent=True) or {}
-    user_id = str(data.get("user_id") or "").strip()
+    user_id = g.user_id
     device_id = str(data.get("device_id") or "").strip()
     encryption_public_key = data.get("encryption_public_key")
     signing_public_key = data.get("signing_public_key")
@@ -320,6 +759,7 @@ def register_crypto_device():
 
 
 @app.route("/crypto/devices/<device_id>/approve", methods=["POST"])
+@require_auth
 def approve_crypto_device(device_id):
     """Activate a pending device after an active device signs its key envelope."""
     err = require_api_key()
@@ -327,7 +767,7 @@ def approve_crypto_device(device_id):
         return err
 
     data = request.get_json(silent=True) or {}
-    user_id = str(data.get("user_id") or "").strip()
+    user_id = g.user_id
     approver_device_id = str(data.get("approver_device_id") or "").strip()
     wrapped_workspace_key = data.get("wrapped_workspace_key")
     signature = data.get("signature")
@@ -410,6 +850,7 @@ def approve_crypto_device(device_id):
 
 
 @app.route("/tasks/store", methods=["POST"])
+@require_auth
 def store_tasks():
     """Upsert a list of tasks for a user."""
     err = require_api_key()
@@ -417,7 +858,7 @@ def store_tasks():
         return err
 
     data = request.get_json(silent=True) or {}
-    user_id = data.get("user_id")
+    user_id = g.user_id
     tasks = data.get("tasks", [])
 
     if not user_id:
@@ -459,13 +900,14 @@ def store_tasks():
 
 
 @app.route("/tasks/retrieve", methods=["GET"])
+@require_auth
 def retrieve_tasks():
     """Return all tasks for a user."""
     err = require_api_key()
     if err:
         return err
 
-    user_id = request.args.get("user_id")
+    user_id = g.user_id
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
 
@@ -492,6 +934,7 @@ def retrieve_tasks():
 
 
 @app.route("/tasks/sync", methods=["POST"])
+@require_auth
 def sync_tasks():
     """Merge local tasks with server; return the unified list."""
     err = require_api_key()
@@ -499,7 +942,7 @@ def sync_tasks():
         return err
 
     data = request.get_json(silent=True) or {}
-    user_id = data.get("user_id")
+    user_id = g.user_id
     local_tasks = data.get("local_tasks", [])
 
     if not user_id:
@@ -552,13 +995,14 @@ def sync_tasks():
 
 
 @app.route("/tasks/<task_id>", methods=["DELETE"])
+@require_auth
 def delete_task(task_id):
     """Delete a specific task for a user."""
     err = require_api_key()
     if err:
         return err
 
-    user_id = request.args.get("user_id")
+    user_id = g.user_id
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
 
@@ -577,6 +1021,7 @@ def delete_task(task_id):
 
 
 @app.route("/tasks/replace", methods=["POST"])
+@require_auth
 def replace_tasks():
     """Delete ALL existing tasks for a user then insert the provided list.
     This is the force-push / overwrite operation."""
@@ -585,7 +1030,7 @@ def replace_tasks():
         return err
 
     data = request.get_json(silent=True) or {}
-    user_id = data.get("user_id")
+    user_id = g.user_id
     tasks = data.get("tasks", [])
 
     if not user_id:

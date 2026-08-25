@@ -410,6 +410,10 @@ header {
                     color: var(--muted); margin-bottom: 4px; }
 .form-row { display: flex; gap: 12px; }
 .form-row .form-group { flex: 1; }
+.date-input-wrap { display: flex; gap: 6px; position: relative; }
+.date-input-wrap .input { flex: 1; min-width: 0; }
+.date-picker-btn { flex: 0 0 auto; padding-inline: 10px; }
+.native-date-picker { position: absolute; right: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .notes-body {
   background: #f5f5f5; padding: 12px; border-radius: var(--radius);

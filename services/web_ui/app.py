@@ -18,6 +18,8 @@ import requests as req
 from flask import Flask, render_template, request, jsonify, redirect, url_for, Response
 from flask_cors import CORS
 
+from auth import auth_bp, login_required, current_user_id, is_logged_in, get_valid_access_token
+
 try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -37,6 +39,17 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+# ---------------------------------------------------------------------------
+# Session / auth configuration
+# ---------------------------------------------------------------------------
+app.secret_key = os.environ.get("SECRET_KEY", "")
+if not app.secret_key:
+    log.warning("SECRET_KEY is not set — sessions will not survive a restart. Set it in the CVM env vars.")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 30  # 30 days, matches refresh token TTL
+app.register_blueprint(auth_bp)
 
 # ---------------------------------------------------------------------------
 # Internal service URLs (same CVM, internal Docker network)
@@ -63,13 +76,58 @@ BUILTIN_TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_task",
+            "description": "Add a task to the user's to-do list. Dates must use MM-DD-YYYY.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "due_date": {"type": "string", "description": "Due date in MM-DD-YYYY format"},
+                    "due_time": {"type": "string", "description": "Optional time such as 03:30 PM"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "notes": {"type": "string"},
+                },
+                "required": ["title", "due_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_task",
+            "description": "Update an existing task. Call get_tasks first to obtain its task_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"}, "title": {"type": "string"},
+                    "due_date": {"type": "string"}, "due_time": {"type": "string"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "notes": {"type": "string"},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_task",
+            "description": "Mark an existing task complete. Call get_tasks first to obtain its task_id.",
+            "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_task",
+            "description": "Delete an existing task. Call get_tasks first to obtain its task_id.",
+            "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
+        },
+    },
 ]
-
-# Stable user ID for this web session — override via WEB_USER_ID env var
-# to match your desktop user ID for seamless sync.
-import socket
-_default_uid = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:16]
-USER_ID = os.getenv("WEB_USER_ID", _default_uid)
 
 DATA_DIR = Path("/app/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -121,9 +179,14 @@ def _set_setting(key, value):
 # Helpers
 # ---------------------------------------------------------------------------
 def _headers():
+    """Attach the shared deployment API key plus this session's bearer token.
+    get_valid_access_token() transparently refreshes an expiring access token."""
     h = {"Content-Type": "application/json"}
     if API_KEY:
         h["X-API-Key"] = API_KEY
+    token = get_valid_access_token()
+    if token:
+        h["Authorization"] = f"Bearer {token}"
     return h
 
 def _backend(method, path, **kwargs):
@@ -346,7 +409,7 @@ def _workspace_key_for_user(user_id):
         return None
 
     try:
-        resp = _backend("GET", "/crypto/devices", params={"user_id": user_id})
+        resp = _backend("GET", "/crypto/devices")
     except Exception:
         return None
 
@@ -368,7 +431,6 @@ def _workspace_key_for_user(user_id):
             material["device_id"],
         )
         register_payload = {
-            "user_id": user_id,
             "device_id": material["device_id"],
             "encryption_public_key": material["enc_public"],
             "signing_public_key": material["sign_public"],
@@ -491,37 +553,112 @@ def _split_remote_tasks(tasks):
 
 def _execute_tool_call(tool_call):
     name = tool_call.get("function", {}).get("name")
+    raw_arguments = tool_call.get("function", {}).get("arguments") or {}
+    try:
+        arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        if not isinstance(arguments, dict):
+            raise ValueError("Tool arguments must be an object")
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return json.dumps({"status": "error", "message": f"Invalid tool arguments: {exc}"})
+
+    def load_regular_tasks():
+        user_id = current_user_id()
+        response = _backend("GET", "/tasks/retrieve")
+        if response.status_code != 200:
+            raise RuntimeError(f"Task backend returned {response.status_code}")
+        all_tasks = _decrypt_tasks(response.json().get("tasks", []), user_id)
+        regular, _daily = _split_remote_tasks(all_tasks)
+        return user_id, regular
+
     if name == "get_tasks":
         try:
-            r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
-            tasks, _daily = _split_remote_tasks(tasks)
+            _user_id, tasks = load_regular_tasks()
             summary = [{
+                "task_id": str(t.get("task_id") or t.get("id") or ""),
                 "title": t.get("title"), "due_date": t.get("due_date"),
                 "due_time": t.get("due_time"), "priority": t.get("priority"),
-                "completed": t.get("completed", False),
+                "notes": t.get("notes", ""), "completed": t.get("completed", False),
             } for t in tasks]
-            return json.dumps(summary)
+            return json.dumps({"status": "success", "tasks": summary})
         except Exception as e:
-            return json.dumps({"error": str(e)})
+            return json.dumps({"status": "error", "message": str(e)})
+
+    if name == "add_task":
+        try:
+            user_id = current_user_id()
+            title = str(arguments.get("title", "")).strip()
+            due_date = str(arguments.get("due_date", "")).strip()
+            if not title or not due_date:
+                raise ValueError("title and due_date are required")
+            datetime.strptime(due_date, "%m-%d-%Y")
+            priority = max(1, min(5, int(arguments.get("priority", 1))))
+            task_id = uuid.uuid4().hex[:12]
+            task = {"id": task_id, "title": title, "due_date": due_date,
+                    "due_time": str(arguments.get("due_time", "")), "priority": str(priority),
+                    "notes": str(arguments.get("notes", "No notes")), "completed": False}
+            response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
+            if response.status_code != 200:
+                raise RuntimeError(response.text)
+            return json.dumps({"status": "success", "message": f"Added task: {title}", "task_id": task_id})
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)})
+
+    if name in ("update_task", "complete_task", "delete_task"):
+        try:
+            task_id = str(arguments.get("task_id", "")).strip()
+            if not task_id:
+                raise ValueError("task_id is required")
+            user_id, tasks = load_regular_tasks()
+            task = next((t for t in tasks if str(t.get("task_id") or t.get("id")) == task_id), None)
+            if not task:
+                raise ValueError("Task not found; call get_tasks and use its exact task_id")
+            title = task.get("title", "")
+            if name == "delete_task":
+                response = _backend("DELETE", f"/tasks/{task_id}")
+                if response.status_code != 200:
+                    raise RuntimeError(response.text)
+                return json.dumps({"status": "success", "message": f"Deleted task: {title}"})
+            updated = dict(task)
+            updated["id"] = task_id
+            updated.pop("task_id", None)
+            if name == "complete_task":
+                updated["completed"] = True
+            else:
+                for field in ("title", "due_date", "due_time", "notes"):
+                    if field in arguments:
+                        updated[field] = str(arguments[field])
+                if "priority" in arguments:
+                    updated["priority"] = str(max(1, min(5, int(arguments["priority"]))))
+                if "due_date" in arguments:
+                    datetime.strptime(updated["due_date"], "%m-%d-%Y")
+            response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
+            if response.status_code != 200:
+                raise RuntimeError(response.text)
+            action = "Completed" if name == "complete_task" else "Updated"
+            return json.dumps({"status": "success", "message": f"{action} task: {updated.get('title', title)}"})
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)})
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 # ---------------------------------------------------------------------------
 # Page routes
 # ---------------------------------------------------------------------------
 @app.route("/")
+@login_required
 def index():
-    return render_template("index.html", user_id=USER_ID)
+    return render_template("index.html", user_id=current_user_id())
 
 # ---------------------------------------------------------------------------
 # Task API (proxy → backend service)
 # ---------------------------------------------------------------------------
 @app.route("/api/tasks", methods=["GET"])
+@login_required
 def get_tasks():
     try:
-        r = _backend("GET", f"/tasks/retrieve", params={"user_id": USER_ID})
+        user_id = current_user_id()
+        r = _backend("GET", "/tasks/retrieve")
         if r.status_code == 200:
-            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
+            tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
             tasks, _daily = _split_remote_tasks(tasks)
             # Annotate with color
             for t in tasks:
@@ -546,6 +683,7 @@ def get_tasks():
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/tasks", methods=["POST"])
+@login_required
 def add_task():
     data = request.get_json(silent=True) or {}
     title    = data.get("title", "").strip()
@@ -557,11 +695,12 @@ def add_task():
     if not title or not due_date:
         return jsonify({"status": "error", "message": "title and due_date required"}), 400
 
+    user_id = current_user_id()
     task_id = hashlib.md5(f"{title}|{due_date}".encode()).hexdigest()[:12]
     task = {"id": task_id, "title": title, "due_date": due_date,
             "due_time": due_time, "priority": priority, "notes": notes, "completed": False}
     try:
-        r = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": _encrypt_tasks([task], USER_ID),
+        r = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
         if r.status_code == 200:
             return jsonify({"status": "success", "task": task})
@@ -570,8 +709,10 @@ def add_task():
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/tasks/<task_id>", methods=["PUT"])
+@login_required
 def edit_task(task_id):
     data = request.get_json(silent=True) or {}
+    user_id = current_user_id()
     task = {
         "id":       task_id,
         "title":    data.get("title", ""),
@@ -582,7 +723,7 @@ def edit_task(task_id):
         "completed": data.get("completed", False),
     }
     try:
-        r = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": _encrypt_tasks([task], USER_ID),
+        r = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
         if r.status_code == 200:
             return jsonify({"status": "success"})
@@ -591,17 +732,19 @@ def edit_task(task_id):
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/tasks/<task_id>/complete", methods=["POST"])
+@login_required
 def complete_task(task_id):
     # Fetch current task, mark completed, upsert back
     try:
-        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        user_id = current_user_id()
+        r = _backend("GET", "/tasks/retrieve")
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
         task = next((t for t in tasks if t.get("task_id") == task_id), None)
         if not task:
             return jsonify({"status": "error", "message": "Task not found"}), 404
         task["completed"] = True
         task["id"] = task.pop("task_id", task_id)
-        r2 = _backend("POST", "/tasks/store", json={"user_id": USER_ID, "tasks": [task],
+        r2 = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                      "timestamp": datetime.now(timezone.utc).isoformat()})
         # Also update character stats
         conn = get_db()
@@ -616,9 +759,10 @@ def complete_task(task_id):
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/tasks/<task_id>", methods=["DELETE"])
+@login_required
 def delete_task(task_id):
     try:
-        r = _backend("DELETE", f"/tasks/{task_id}", params={"user_id": USER_ID})
+        r = _backend("DELETE", f"/tasks/{task_id}")
         if r.status_code == 200:
             return jsonify({"status": "success"})
         return jsonify({"status": "error", "message": r.text}), r.status_code
@@ -626,11 +770,13 @@ def delete_task(task_id):
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/tasks/clear", methods=["POST"])
+@login_required
 def clear_tasks_only():
     """Clear only regular tasks while preserving remote daily tasks."""
     try:
-        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        user_id = current_user_id()
+        r = _backend("GET", "/tasks/retrieve")
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
 
         preserved_daily = []
         for task in tasks:
@@ -644,8 +790,7 @@ def clear_tasks_only():
             "POST",
             "/tasks/replace",
             json={
-                "user_id": USER_ID,
-                "tasks": _encrypt_tasks(preserved_daily, USER_ID),
+                "tasks": _encrypt_tasks(preserved_daily, user_id),
             },
         )
         if r2.status_code == 200:
@@ -658,8 +803,10 @@ def clear_tasks_only():
 # Daily Tasks API (local SQLite)
 # ---------------------------------------------------------------------------
 @app.route("/api/daily", methods=["GET"])
+@login_required
 def get_daily():
     today = date.today().isoformat()
+    user_id = current_user_id()
 
     # Local web-only daily items
     conn = get_db()
@@ -677,9 +824,9 @@ def get_daily():
     # Remote daily items synced from desktop app
     remote_daily = []
     try:
-        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+        r = _backend("GET", "/tasks/retrieve")
         if r.status_code == 200:
-            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
+            tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
             _regular, remote_daily = _split_remote_tasks(tasks)
     except Exception:
         remote_daily = []
@@ -697,11 +844,13 @@ def get_daily():
     return jsonify({"status": "success", "tasks": deduped})
 
 @app.route("/api/daily", methods=["POST"])
+@login_required
 def add_daily():
     data = request.get_json(silent=True) or {}
     title = data.get("title", "").strip()
     if not title:
         return jsonify({"status": "error", "message": "title required"}), 400
+    user_id = current_user_id()
     today = date.today().isoformat()
     conn = get_db()
     conn.execute("INSERT INTO daily_tasks(title,date) VALUES(?,?)", (title, today))
@@ -725,8 +874,7 @@ def add_daily():
             "POST",
             "/tasks/store",
             json={
-                "user_id": USER_ID,
-                "tasks": _encrypt_tasks([remote_task], USER_ID),
+                "tasks": _encrypt_tasks([remote_task], user_id),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -736,15 +884,17 @@ def add_daily():
     return jsonify({"status": "success", "id": f"local:{row_id}"})
 
 @app.route("/api/daily/<task_id>/toggle", methods=["POST"])
+@login_required
 def toggle_daily(task_id):
+    user_id = current_user_id()
     if task_id.startswith("remote:"):
         remote_task_id = task_id.split(":", 1)[1]
         try:
-            r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
+            r = _backend("GET", "/tasks/retrieve")
             if r.status_code != 200:
                 return jsonify({"status": "error", "message": r.text}), r.status_code
 
-            tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID)
+            tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
             match = next((t for t in tasks if str(t.get("task_id") or t.get("id") or "") == remote_task_id), None)
             if not match:
                 return jsonify({"status": "error", "message": "Daily task not found"}), 404
@@ -766,8 +916,7 @@ def toggle_daily(task_id):
                 "POST",
                 "/tasks/store",
                 json={
-                    "user_id": USER_ID,
-                    "tasks": _encrypt_tasks([updated], USER_ID),
+                    "tasks": _encrypt_tasks([updated], user_id),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
             )
@@ -792,11 +941,12 @@ def toggle_daily(task_id):
     return jsonify({"status": "success"})
 
 @app.route("/api/daily/<task_id>", methods=["DELETE"])
+@login_required
 def delete_daily(task_id):
     if task_id.startswith("remote:"):
         remote_task_id = task_id.split(":", 1)[1]
         try:
-            r = _backend("DELETE", f"/tasks/{remote_task_id}", params={"user_id": USER_ID})
+            r = _backend("DELETE", f"/tasks/{remote_task_id}")
             if r.status_code == 200:
                 return jsonify({"status": "success"})
             return jsonify({"status": "error", "message": r.text}), r.status_code
@@ -818,11 +968,13 @@ def delete_daily(task_id):
     return jsonify({"status": "success"})
 
 @app.route("/api/daily/clear", methods=["POST"])
+@login_required
 def clear_daily_only():
     """Clear all daily tasks (remote + local) while preserving regular tasks."""
     try:
-        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        user_id = current_user_id()
+        r = _backend("GET", "/tasks/retrieve")
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
 
         preserved_regular = []
         for task in tasks:
@@ -837,8 +989,7 @@ def clear_daily_only():
             "POST",
             "/tasks/replace",
             json={
-                "user_id": USER_ID,
-                "tasks": _encrypt_tasks(preserved_regular, USER_ID),
+                "tasks": _encrypt_tasks(preserved_regular, user_id),
             },
         )
         if r2.status_code != 200:
@@ -857,6 +1008,7 @@ def clear_daily_only():
 # AI API (proxy → ai_inference service)
 # ---------------------------------------------------------------------------
 @app.route("/api/ai/chat", methods=["POST"])
+@login_required
 def ai_chat():
     data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "")
@@ -915,6 +1067,7 @@ def ai_chat():
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/ai/chat/stream", methods=["POST"])
+@login_required
 def ai_chat_stream():
     data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "")
@@ -972,6 +1125,7 @@ def ai_chat_stream():
                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.route("/api/ai/chat/tools", methods=["POST"])
+@login_required
 def ai_chat_tools():
     data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "").strip()
@@ -982,12 +1136,18 @@ def ai_chat_tools():
 
     history = data.get("history") or []
     messages = [
-        {"role": "system", "content": "You are a helpful task management assistant. Use the get_tasks tool when the user asks about their tasks."},
+        {"role": "system", "content": (
+            "You are a task management assistant. Use the provided tools when the user asks to view, add, "
+            "update, complete, or delete tasks. Before changing an existing task, call get_tasks and use its "
+            "exact task_id. Never claim a task was changed unless the corresponding tool returned success. "
+            f"Today's UTC date is {date.today().strftime('%m-%d-%Y')}."
+        )},
     ]
     messages.extend(h for h in history if isinstance(h, dict) and h.get("role") in ("user", "assistant"))
     messages.append({"role": "user", "content": prompt})
 
     try:
+        tasks_changed = False
         for _ in range(3):
             r = _ai("POST", "/chat", json={
                 "messages": messages, "model": model, "zdr": zdr,
@@ -1010,11 +1170,17 @@ def ai_chat_tools():
                     "response": message.get("content") or "(no response)",
                     "model": body.get("model", model),
                     "receipt_id": body.get("receipt_id", ""),
+                    "tasks_changed": tasks_changed,
                 })
 
             messages.append(message)
             for tc in tool_calls:
                 result = _execute_tool_call(tc)
+                if tc.get("function", {}).get("name") in ("add_task", "update_task", "complete_task", "delete_task"):
+                    try:
+                        tasks_changed = tasks_changed or json.loads(result).get("status") == "success"
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
                 messages.append({"role": "tool", "content": result, "tool_call_id": tc.get("id")})
 
         return jsonify({"status": "error", "message": "Too many tool-call rounds; try rephrasing your question."}), 500
@@ -1114,10 +1280,12 @@ def ai_models_zdr():
 # Calendar / Weekly (computed from tasks)
 # ---------------------------------------------------------------------------
 @app.route("/api/calendar/<int:year>/<int:month>", methods=["GET"])
+@login_required
 def calendar_data(year, month):
     try:
-        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        user_id = current_user_id()
+        r = _backend("GET", "/tasks/retrieve")
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
         tasks, _daily = _split_remote_tasks(tasks)
     except Exception:
         tasks = []
@@ -1138,11 +1306,13 @@ def calendar_data(year, month):
     return jsonify({"status": "success", "tasks_by_day": by_date})
 
 @app.route("/api/weekly", methods=["GET"])
+@login_required
 def weekly_data():
     from datetime import timedelta
     try:
-        r = _backend("GET", "/tasks/retrieve", params={"user_id": USER_ID})
-        tasks = _decrypt_tasks(r.json().get("tasks", []), USER_ID) if r.status_code == 200 else []
+        user_id = current_user_id()
+        r = _backend("GET", "/tasks/retrieve")
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
         tasks, _daily = _split_remote_tasks(tasks)
     except Exception:
         tasks = []
@@ -1167,6 +1337,7 @@ def weekly_data():
 # Character / Stats
 # ---------------------------------------------------------------------------
 @app.route("/api/character", methods=["GET"])
+@login_required
 def get_character():
     conn = get_db()
     rows = conn.execute("SELECT key,value FROM character").fetchall()
@@ -1183,12 +1354,14 @@ def get_character():
 # Settings
 # ---------------------------------------------------------------------------
 @app.route("/api/settings", methods=["GET"])
+@login_required
 def get_settings():
-    workspace_key_ready = bool(_workspace_key_for_user(USER_ID))
+    user_id = current_user_id()
+    workspace_key_ready = bool(_workspace_key_for_user(user_id))
     default_model = _get_setting("phala_ai_model", os.getenv("PHALA_AI_MODEL", "")).strip()
     return jsonify({"status": "success", "settings": {
         "use_24_hour": _get_setting("use_24_hour", "true") == "true",
-        "web_user_id": USER_ID,
+        "web_user_id": user_id,
         "phala_ai_model": default_model,
         "crypto": {
             "device_id": _get_setting("crypto_device_id", "") or None,
@@ -1199,10 +1372,12 @@ def get_settings():
 
 
 @app.route("/api/crypto/status", methods=["GET"])
+@login_required
 def crypto_status():
     """Return web-ui device encryption status for troubleshooting ENC2 access."""
+    user_id = current_user_id()
     try:
-        resp = _backend("GET", "/crypto/devices", params={"user_id": USER_ID})
+        resp = _backend("GET", "/crypto/devices")
         devices = resp.json().get("devices", []) if resp.status_code == 200 else []
     except Exception:
         devices = []
@@ -1214,11 +1389,12 @@ def crypto_status():
         "enc2_supported": ASYMMETRIC_CRYPTO_AVAILABLE,
         "device_id": device_id or None,
         "device_status": own.get("status") if own else "not_registered",
-        "workspace_key_ready": bool(_workspace_key_for_user(USER_ID)),
-        "user_id": USER_ID,
+        "workspace_key_ready": bool(_workspace_key_for_user(user_id)),
+        "user_id": user_id,
     })
 
 @app.route("/api/settings", methods=["POST"])
+@login_required
 def save_settings():
     data = request.get_json(silent=True) or {}
     if "use_24_hour" in data:
@@ -1234,7 +1410,7 @@ def save_settings():
 def health():
     return jsonify({"status": "ok", "service": "web_ui",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "user_id": USER_ID})
+                    "user_id": current_user_id() if is_logged_in() else None})
 
 
 @app.route("/api/health/all", methods=["GET"])
@@ -1258,7 +1434,7 @@ def health_all():
         if svc.get("url") is None:
             continue
         try:
-            resp = req.get(svc["url"], headers=_headers(), timeout=5)
+            resp = req.get(svc["url"], headers={"Content-Type": "application/json", **({"X-API-Key": API_KEY} if API_KEY else {})}, timeout=5)
             payload = {}
             try:
                 payload = resp.json()

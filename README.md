@@ -70,6 +70,12 @@ If you have Ollama:
 3. Setup endpoints in "Configure Endpoints" in the app's Phala CVM meny
 4. Test the connection to make sure everything works
 
+**For shared Web + Desktop Accounts**
+
+1. Set `JWT_SECRET` and `WEB_SECRET_KEY` to separate strong random values in the CVM environment.
+2. For email/password accounts, open the web app's Sign In page or select `Phala CVM → Sign In / Account` in the desktop app.
+3. Set `SMTP_ENABLED=true`, `SMTP_USER=kylenguyen1206@gmail.com`, and a Gmail App Password as `SMTP_PASSWORD`. New accounts must enter the six-digit code sent to their email before they can sign in.
+
 ---
 
 **NOTES:**

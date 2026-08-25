@@ -57,12 +57,63 @@ async function api(method, path, body, timeoutMs = 20000) {
 
 function fmtTime(t) {
   if (!t || t === '' || t === '--:--') return '–';
-  if (!use24Hour) {
-    const [h, m] = t.split(':').map(Number);
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${ampm}`;
+  const normalized = normalizeDueTime(t);
+  if (normalized === null) return String(t);
+  if (use24Hour) return normalized;
+  const [hourText, minute] = normalized.split(':');
+  const hour = Number(hourText);
+  return `${hour % 12 || 12}:${minute} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
+function normalizeDueTime(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (!raw) return '';
+  let match = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/);
+  if (match) {
+    let hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour < 1 || hour > 12 || minute > 59) return null;
+    if (match[3] === 'AM') hour = hour === 12 ? 0 : hour;
+    else hour = hour === 12 ? 12 : hour + 12;
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
   }
-  return t;
+  match = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) return null;
+  return `${String(Number(match[1])).padStart(2, '0')}:${match[2]}`;
+}
+
+function timeForTaskInput(value) {
+  const normalized = normalizeDueTime(value);
+  if (!normalized) return value || '';
+  if (use24Hour) return normalized;
+  const [hourText, minute] = normalized.split(':');
+  const hour = Number(hourText);
+  return `${hour % 12 || 12}:${minute} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
+function configureTaskTimeInput() {
+  const input = document.getElementById('f-time');
+  const label = document.getElementById('f-time-label');
+  if (!input || !label) return;
+  const normalized = normalizeDueTime(input.value);
+  if (normalized !== null) input.value = timeForTaskInput(normalized);
+  label.textContent = use24Hour ? 'Due Time (24-hour HH:MM)' : 'Due Time (12-hour HH:MM AM/PM)';
+  input.placeholder = use24Hour ? '09:00' : '9:00 AM';
+}
+
+function isValidDueDate(value) {
+  const match = String(value).match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!match) return false;
+  const month = Number(match[1]), day = Number(match[2]), year = Number(match[3]);
+  const parsed = new Date(year, month - 1, day);
+  return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day;
+}
+
+function formatDueDateTyping(value) {
+  const digits = String(value).replace(/\D/g, '').slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}-${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}-${digits.slice(2, 4)}-${digits.slice(4)}`;
 }
 
 function priorityPill(p) {
@@ -325,6 +376,7 @@ function openAddTask() {
   document.getElementById('edit-task-id').value = '';
   ['f-title','f-date','f-time','f-notes'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('f-priority').value = '3';
+  configureTaskTimeInput();
   document.getElementById('task-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('f-title').focus(), 50);
 }
@@ -336,7 +388,7 @@ function openEditTask(id) {
   document.getElementById('edit-task-id').value  = id;
   document.getElementById('f-title').value        = t.title    || '';
   document.getElementById('f-date').value         = t.due_date || '';
-  document.getElementById('f-time').value         = t.due_time || '';
+  document.getElementById('f-time').value         = timeForTaskInput(t.due_time || '');
   document.getElementById('f-priority').value     = t.priority || '3';
   document.getElementById('f-notes').value        = t.notes    || '';
   document.getElementById('task-modal').style.display = 'flex';
@@ -350,12 +402,18 @@ async function saveTask() {
   const id       = document.getElementById('edit-task-id').value;
   const title    = document.getElementById('f-title').value.trim();
   const due_date = document.getElementById('f-date').value.trim();
-  const due_time = document.getElementById('f-time').value.trim();
+  const dueTimeInput = document.getElementById('f-time').value.trim();
+  const due_time = normalizeDueTime(dueTimeInput);
   const priority = document.getElementById('f-priority').value;
   const notes    = document.getElementById('f-notes').value.trim() || 'No notes';
 
   if (!title) { alert('Task name is required.'); return; }
   if (!due_date) { alert('Due date is required (MM-DD-YYYY).'); return; }
+  if (!isValidDueDate(due_date)) { alert('Enter a valid due date in MM-DD-YYYY format.'); return; }
+  if (due_time === null) {
+    alert(use24Hour ? 'Enter time as HH:MM (for example, 09:30 or 17:30).' : 'Enter time as HH:MM AM/PM (for example, 9:30 AM or 5:30 PM).');
+    return;
+  }
 
   if (id) {
     await api('PUT', `/api/tasks/${id}`, { title, due_date, due_time, priority, notes });
@@ -365,6 +423,30 @@ async function saveTask() {
   closeModal();
   loadTasks();
 }
+
+const taskDateInput = document.getElementById('f-date');
+const nativeTaskDatePicker = document.getElementById('f-date-picker');
+taskDateInput.addEventListener('input', () => {
+  taskDateInput.value = formatDueDateTyping(taskDateInput.value);
+});
+taskDateInput.addEventListener('blur', () => {
+  taskDateInput.setCustomValidity(taskDateInput.value && !isValidDueDate(taskDateInput.value)
+    ? 'Enter a valid date in MM-DD-YYYY format.' : '');
+});
+nativeTaskDatePicker.addEventListener('change', () => {
+  if (!nativeTaskDatePicker.value) return;
+  const [year, month, day] = nativeTaskDatePicker.value.split('-');
+  taskDateInput.value = `${month}-${day}-${year}`;
+  taskDateInput.setCustomValidity('');
+});
+document.getElementById('f-date-picker-btn').addEventListener('click', () => {
+  if (isValidDueDate(taskDateInput.value)) {
+    const [month, day, year] = taskDateInput.value.split('-');
+    nativeTaskDatePicker.value = `${year}-${month}-${day}`;
+  }
+  if (typeof nativeTaskDatePicker.showPicker === 'function') nativeTaskDatePicker.showPicker();
+  else nativeTaskDatePicker.click();
+});
 
 /* ══════════════════════════════════════════════════════════════════
    DAILY TASKS
@@ -628,6 +710,7 @@ async function sendAI() {
       if (d.status === 'success') {
         appendAIBotResponse(d.response || '(no response)', d);
         conversationHistory.push({ role: 'assistant', content: d.response || '' });
+        if (d.tasks_changed) await loadTasks();
       } else {
         appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
         conversationHistory.pop(); // don't keep a turn that failed
@@ -922,6 +1005,8 @@ async function loadSettings() {
   use24Hour = s.use_24_hour !== false;
   selectedAiModelSetting = (s.phala_ai_model || '').trim();
   document.getElementById('setting-24h').checked = use24Hour;
+  configureTaskTimeInput();
+  if (allTasks.length) renderTasks();
   document.getElementById('setting-uid').textContent = s.web_user_id ?? '–';
   if (!modelCatalog.length) await loadModelCatalog();
   renderDefaultModelSelect();
@@ -949,7 +1034,11 @@ async function saveDefaultModel() {
 }
 
 async function saveSetting(key, value) {
-  if (key === 'use_24_hour') use24Hour = value;
+  if (key === 'use_24_hour') {
+    use24Hour = value;
+    configureTaskTimeInput();
+    renderTasks();
+  }
   await api('POST', '/api/settings', { [key]: value });
 }
 
@@ -1008,3 +1097,4 @@ document.addEventListener('keydown', e => {
 /* ── Boot ───────────────────────────────────────────────────────── */
 loadTasks();
 loadCharacter();
+loadSettings();

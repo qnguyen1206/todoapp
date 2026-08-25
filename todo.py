@@ -863,6 +863,7 @@ The app will continue to work normally for task management without AI features."
         if self.cvm_available and self.cvm_manager:
             cvm_menu.add_command(label="Configure Endpoints",        command=self.cvm_manager.open_endpoint_config)
             cvm_menu.add_command(label="Test Connections",           command=self.cvm_manager.test_all_connections)
+            cvm_menu.add_command(label="Sign In / Account",          command=self.cvm_manager.show_account_dialog)
             cvm_menu.add_command(label="View / Change User ID",      command=self.cvm_manager.show_user_id_dialog)
             cvm_menu.add_separator()
             cvm_menu.add_command(label="Push Tasks to CVM",         command=self.cvm_manager.push_tasks_to_cvm)

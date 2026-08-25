@@ -61,6 +61,35 @@ class CVMManager:
         cvm_menu.add_command(label="View CVM Status", command=self.show_cvm_status)
         
         return cvm_menu
+
+    def show_account_dialog(self):
+        """Sign in to the same account used by the web UI."""
+        win = tk.Toplevel(self.parent_app.root)
+        win.title("TODO Account")
+        win.geometry("440x300")
+        win.transient(self.parent_app.root)
+        ttk.Label(win, text="Sign in to sync this desktop app with the web app", font=("Arial", 11, "bold")).pack(pady=(16, 10))
+        status = tk.StringVar(value=(f"Signed in as {self.cvm_client.account_email}" if self.cvm_client.account_email else "Not signed in"))
+        ttk.Label(win, textvariable=status, wraplength=390).pack(padx=20, pady=(0, 10))
+        form = ttk.Frame(win); form.pack(fill=tk.X, padx=24)
+        email = tk.StringVar(value=self.cvm_client.account_email)
+        password = tk.StringVar()
+        ttk.Label(form, text="Email").pack(anchor=tk.W); ttk.Entry(form, textvariable=email, width=48).pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(form, text="Password").pack(anchor=tk.W); ttk.Entry(form, textvariable=password, show="•", width=48).pack(fill=tk.X, pady=(0, 10))
+        actions = ttk.Frame(win); actions.pack(pady=4)
+        def sign_in(register=False):
+            ok, msg = self.cvm_client.account_login(email.get(), password.get(), '' if register else None)
+            status.set(("Signed in as " if ok else "Error: ") + msg)
+        ttk.Button(actions, text="Sign In", command=sign_in).pack(side=tk.LEFT, padx=4)
+        ttk.Button(actions, text="Create Account", command=lambda: sign_in(True)).pack(side=tk.LEFT, padx=4)
+        verification_code = tk.StringVar()
+        ttk.Label(win, text="After creating an account, enter the six-digit email code").pack(anchor=tk.W, padx=24, pady=(12, 0))
+        ttk.Entry(win, textvariable=verification_code, width=20).pack(anchor=tk.W, padx=24)
+        def verify():
+            ok, msg = self.cvm_client.account_verify_email(email.get(), verification_code.get())
+            status.set(("Signed in as " if ok else "Error: ") + msg)
+        ttk.Button(win, text="Verify Email", command=verify).pack(pady=8)
+        ttk.Button(win, text="Sign Out", command=lambda: (self.cvm_client.account_logout(), status.set("Not signed in"))).pack()
     
     def open_endpoint_config(self):
         """Open endpoint configuration dialog"""
