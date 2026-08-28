@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>TODO App</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📋</text></svg>"/>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -41,6 +42,7 @@
       <button class="btn btn-danger" onclick="clearAllTasks()">Clear All Tasks</button>
     </div>
 
+    <div class="task-table-wrap">
     <table class="task-table" id="task-table">
       <thead>
         <tr>
@@ -55,6 +57,7 @@
         <tr><td colspan="5" class="empty-msg">Loading…</td></tr>
       </tbody>
     </table>
+    </div>
   </section>
 
   <!-- ══════════════════════════════════════════════════════════════ -->
@@ -62,14 +65,11 @@
   <!-- ══════════════════════════════════════════════════════════════ -->
   <section id="tab-daily" class="tab-content">
     <div class="toolbar">
-      <input id="daily-input" class="input" type="text" placeholder="New daily task…" style="flex:1"/>
-      <button class="btn btn-primary" onclick="addDailyTask()">+ Add</button>
+      <button class="btn btn-primary" onclick="openDailyModal()">+ Add Daily Task</button>
       <button class="btn" onclick="loadDaily()">↻ Refresh</button>
-      <button class="btn btn-danger" onclick="clearAllDaily()">Clear All Daily</button>
+      <button class="btn btn-danger" onclick="clearAllDaily()">Clear Today's Daily</button>
     </div>
-    <ul id="daily-list" class="daily-list">
-      <li class="empty-msg">Loading…</li>
-    </ul>
+    <div id="daily-list" class="daily-list"><div class="empty-msg">Loading...</div></div>
   </section>
 
   <!-- ══════════════════════════════════════════════════════════════ -->
@@ -234,6 +234,31 @@
         <label>Notes</label>
         <textarea id="f-notes" class="input" rows="3" placeholder="Optional notes…"></textarea>
       </div>
+      <fieldset class="reminder-options">
+        <legend>Reminders</legend>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="setting-row"><input id="f-reminder-email-enabled" type="checkbox" onchange="configureReminderInputs()"/> Email reminder</label>
+            <input id="f-reminder-email" class="input" type="email" placeholder="recipient@example.com" disabled/>
+          </div>
+          <div class="form-group">
+            <label>Send before due time</label>
+            <select id="f-reminder-minutes" class="input">
+              <option value="0">At due time</option>
+              <option value="5">5 minutes before</option>
+              <option value="15" selected>15 minutes before</option>
+              <option value="30">30 minutes before</option>
+              <option value="60">1 hour before</option>
+              <option value="1440">1 day before</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="setting-row"><input id="f-reminder-sms-enabled" type="checkbox" onchange="configureReminderInputs()"/> Text-message reminder (optional SMS provider)</label>
+          <input id="f-reminder-phone" class="input" type="tel" placeholder="+15551234567" disabled/>
+          <small class="help-text">Use international E.164 format. SMS requires Twilio credentials on the scheduler.</small>
+        </div>
+      </fieldset>
       <div class="modal-actions">
         <button class="btn btn-primary" onclick="saveTask()">Save</button>
         <button class="btn" onclick="closeModal()">Cancel</button>
@@ -241,9 +266,57 @@
     </div>
   </div>
 
+  <div id="daily-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <h2 id="daily-modal-title">Add Daily Task</h2>
+      <input type="hidden" id="edit-daily-id"/>
+      <div class="form-group"><label>Task Name *</label><input id="daily-title" class="input" type="text"/></div>
+      <div class="form-group">
+        <label>Days *</label>
+        <div class="weekday-picker">
+          <label><input type="checkbox" name="daily-day" value="Mon" checked/> Mon</label>
+          <label><input type="checkbox" name="daily-day" value="Tue" checked/> Tue</label>
+          <label><input type="checkbox" name="daily-day" value="Wed" checked/> Wed</label>
+          <label><input type="checkbox" name="daily-day" value="Thu" checked/> Thu</label>
+          <label><input type="checkbox" name="daily-day" value="Fri" checked/> Fri</label>
+          <label><input type="checkbox" name="daily-day" value="Sat" checked/> Sat</label>
+          <label><input type="checkbox" name="daily-day" value="Sun" checked/> Sun</label>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label id="daily-start-label">Start Time *</label><input id="daily-start" class="input" type="text"/></div>
+        <div class="form-group"><label id="daily-end-label">End Time (optional)</label><input id="daily-end" class="input" type="text"/></div>
+      </div>
+      <div id="daily-form-error" class="login-error" style="display:none"></div>
+      <div class="modal-actions"><button type="button" class="btn btn-primary" onclick="saveDailyTask()">Save</button><button type="button" class="btn" onclick="closeDailyModal()">Cancel</button></div>
+    </div>
+  </div>
+
   <!-- ══════════════════════════════════════════════════════════════ -->
   <!-- Modal: Task Notes                                             -->
   <!-- ══════════════════════════════════════════════════════════════ -->
+  <div id="meeting-proposal-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <h2>Meeting found in your email</h2>
+      <p class="help-text">Review the details before adding this meeting to your encrypted task list.</p>
+      <input id="meeting-proposal-id" type="hidden"/>
+      <div class="form-group"><label>Meeting title</label><input id="meeting-title" class="input" type="text"/></div>
+      <div class="form-row">
+        <div class="form-group"><label>Date (MM-DD-YYYY)</label><input id="meeting-date" class="input" type="text"/></div>
+        <div class="form-group"><label>Start time</label><input id="meeting-time" class="input" type="text"/></div>
+      </div>
+      <div class="form-group"><label>Organizer</label><input id="meeting-organizer" class="input" type="text" readonly/></div>
+      <div class="form-group"><label>Meeting link</label><input id="meeting-link" class="input" type="text" readonly/></div>
+      <div class="form-group"><label>Notes</label><textarea id="meeting-notes" class="input" rows="5"></textarea></div>
+      <div id="meeting-proposal-error" class="login-error" style="display:none"></div>
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="acceptMeetingProposal()">Add to Tasks</button>
+        <button class="btn btn-danger" onclick="ignoreMeetingProposal()">Ignore</button>
+        <button class="btn" onclick="closeMeetingProposal()">Later</button>
+      </div>
+    </div>
+  </div>
+
   <div id="notes-modal" class="modal-overlay" style="display:none">
     <div class="modal">
       <h2 id="notes-title">Task Notes</h2>

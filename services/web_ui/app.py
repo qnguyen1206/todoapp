@@ -11,11 +11,12 @@ import base64
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone, date
+import re
+from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 
 import requests as req
-from flask import Flask, render_template, request, jsonify, redirect, url_for, Response
+from flask import Flask, render_template, request, jsonify, redirect, url_for, Response, g
 from flask_cors import CORS
 
 from auth import auth_bp, login_required, current_user_id, is_logged_in, get_valid_access_token
@@ -66,6 +67,7 @@ DAILY_NOTES_PREFIX = "[CVM_DAILY]"
 KEY_WRAP_INFO = b"todoapp-keywrap-v1"
 TASK_INFO_PREFIX = "todoapp-task-v2"
 _WORKSPACE_KEY_CACHE = {}
+MAX_AI_TOOL_ROUNDS = 12
 
 BUILTIN_TOOLS = [
     {
@@ -127,6 +129,55 @@ BUILTIN_TOOLS = [
             "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
         },
     },
+    {
+        "type": "function", "function": {
+            "name": "get_daily_tasks",
+            "description": "Get recurring daily tasks. Returns schedule IDs, weekdays, start/end times, and today's completion state.",
+            "parameters": {"type": "object", "properties": {
+                "day": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], "description": "Optional weekday filter"},
+                "date": {"type": "string", "description": "Local date in YYYY-MM-DD"}
+            }},
+        },
+    },
+    {
+        "type": "function", "function": {
+            "name": "add_daily_task",
+            "description": "Add a recurring daily task schedule. Times use 24-hour HH:MM storage format.",
+            "parameters": {"type": "object", "properties": {
+                "title": {"type": "string"},
+                "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
+                "start_time": {"type": "string", "description": "HH:MM"},
+                "end_time": {"type": "string", "description": "Optional HH:MM"}
+            }, "required": ["title", "days", "start_time"]},
+        },
+    },
+    {
+        "type": "function", "function": {
+            "name": "update_daily_task",
+            "description": "Update a recurring daily task. Call get_daily_tasks first and use its exact task_id.",
+            "parameters": {"type": "object", "properties": {
+                "task_id": {"type": "string"}, "title": {"type": "string"},
+                "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
+                "start_time": {"type": "string"}, "end_time": {"type": "string"}
+            }, "required": ["task_id"]},
+        },
+    },
+    {
+        "type": "function", "function": {
+            "name": "complete_daily_task",
+            "description": "Mark a recurring daily task completed for the specified local date. Call get_daily_tasks first.",
+            "parameters": {"type": "object", "properties": {
+                "task_id": {"type": "string"}, "date": {"type": "string", "description": "Local date in YYYY-MM-DD"}
+            }, "required": ["task_id", "date"]},
+        },
+    },
+    {
+        "type": "function", "function": {
+            "name": "delete_daily_task",
+            "description": "Delete a recurring daily task schedule. Call get_daily_tasks first.",
+            "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
+        },
+    },
 ]
 
 DATA_DIR = Path("/app/data")
@@ -160,6 +211,14 @@ def init_db():
             value TEXT
         );
     """)
+    daily_columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_tasks)").fetchall()}
+    if "user_id" not in daily_columns:
+        try:
+            conn.execute("ALTER TABLE daily_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as exc:
+            # Multiple Gunicorn workers can race on the one-time migration.
+            if "duplicate column name" not in str(exc).lower():
+                raise
     conn.commit()
     conn.close()
 
@@ -517,13 +576,43 @@ def _decode_daily_payload(notes_text):
     return None
 
 
-def _encode_daily_payload(raw_text, completed=False):
+def _encode_daily_payload(raw_text, completed=False, completed_date=None):
     payload = {
         "kind": "daily",
         "raw": raw_text,
         "completed": bool(completed),
+        "completed_date": completed_date if completed else None,
     }
     return DAILY_NOTES_PREFIX + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+DAILY_RAW_RE = re.compile(
+    r"^(?P<days>[A-Za-z,]+)\s+(?P<start>\d{2}:\d{2})(?:-(?P<end>\d{2}:\d{2}))?\s+-\s+(?P<title>.+)$"
+)
+
+
+def _parse_daily_raw(raw_text):
+    """Parse the desktop's `Mon,Wed 09:00-10:00 - Task` storage format."""
+    raw = str(raw_text or "").strip()
+    match = DAILY_RAW_RE.match(raw)
+    if not match:
+        return {"raw": raw, "title": raw, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                "start_time": "00:00", "end_time": ""}
+    parsed = match.groupdict()
+    return {"raw": raw, "title": parsed["title"], "days": parsed["days"].split(","),
+            "start_time": parsed["start"], "end_time": parsed.get("end") or ""}
+
+
+def _build_daily_raw(title, days, start_time, end_time=""):
+    day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    selected = [day for day in day_order if day in days]
+    if not str(title).strip() or not selected:
+        raise ValueError("Task name and at least one day are required")
+    datetime.strptime(start_time, "%H:%M")
+    if end_time:
+        datetime.strptime(end_time, "%H:%M")
+    time_text = start_time + (f"-{end_time}" if end_time else "")
+    return f"{','.join(selected)} {time_text} - {str(title).strip()}"
 
 
 def _split_remote_tasks(tasks):
@@ -538,20 +627,32 @@ def _split_remote_tasks(tasks):
             raw = (daily_payload.get("raw") or task.get("title") or "").strip()
             if not raw:
                 continue
-            done = bool(daily_payload.get("completed", task.get("completed", False)))
+            completed_date = daily_payload.get("completed_date")
+            if not completed_date and daily_payload.get("completed") and task.get("updated_at"):
+                completed_date = str(task["updated_at"])[:10]
+            requested_date = getattr(g, "daily_date", None) or date.today().isoformat()
+            done = bool(daily_payload.get("completed", task.get("completed", False))) and completed_date == requested_date
+            parsed = _parse_daily_raw(raw)
+            requested_day = getattr(g, "daily_day", None) or datetime.now().strftime("%a")
             daily.append({
                 "id": f"remote:{remote_task_id}",
-                "title": raw,
+                **parsed,
                 "done": done,
+                "scheduled_today": requested_day in parsed["days"],
                 "source": "remote",
                 "remote_task_id": remote_task_id,
             })
         else:
             regular.append(task)
 
+    daily.sort(key=lambda item: (
+        not item.get("scheduled_today", False),
+        item.get("start_time", "00:00"),
+        item.get("title", "").lower(),
+    ))
     return regular, daily
 
-def _execute_tool_call(tool_call):
+def _execute_tool_call(tool_call, local_date=None, local_day=None):
     name = tool_call.get("function", {}).get("name")
     raw_arguments = tool_call.get("function", {}).get("arguments") or {}
     try:
@@ -560,6 +661,11 @@ def _execute_tool_call(tool_call):
             raise ValueError("Tool arguments must be an object")
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return json.dumps({"status": "error", "message": f"Invalid tool arguments: {exc}"})
+    if name == "get_daily_tasks":
+        arguments.setdefault("date", local_date or date.today().isoformat())
+        arguments.setdefault("day", local_day or datetime.now().strftime("%a"))
+    elif name == "complete_daily_task":
+        arguments.setdefault("date", local_date or date.today().isoformat())
 
     def load_regular_tasks():
         user_id = current_user_id()
@@ -569,6 +675,13 @@ def _execute_tool_call(tool_call):
         all_tasks = _decrypt_tasks(response.json().get("tasks", []), user_id)
         regular, _daily = _split_remote_tasks(all_tasks)
         return user_id, regular
+
+    def load_all_remote_tasks():
+        user_id = current_user_id()
+        response = _backend("GET", "/tasks/retrieve")
+        if response.status_code != 200:
+            raise RuntimeError(f"Task backend returned {response.status_code}: {response.text}")
+        return user_id, _decrypt_tasks(response.json().get("tasks", []), user_id)
 
     if name == "get_tasks":
         try:
@@ -638,6 +751,90 @@ def _execute_tool_call(tool_call):
             return json.dumps({"status": "success", "message": f"{action} task: {updated.get('title', title)}"})
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
+
+    if name == "get_daily_tasks":
+        try:
+            _user_id, tasks = load_all_remote_tasks()
+            requested_day = arguments.get("day")
+            requested_date = str(arguments.get("date") or date.today().isoformat())
+            schedules = []
+            for task in tasks:
+                payload = _decode_daily_payload(task.get("notes", ""))
+                if not payload:
+                    continue
+                parsed = _parse_daily_raw(payload.get("raw") or task.get("title"))
+                if requested_day and requested_day not in parsed["days"]:
+                    continue
+                completed_date = payload.get("completed_date")
+                if not completed_date and payload.get("completed") and task.get("updated_at"):
+                    completed_date = str(task["updated_at"])[:10]
+                schedules.append({
+                    "task_id": str(task.get("task_id") or task.get("id") or ""),
+                    "title": parsed["title"], "days": parsed["days"],
+                    "start_time": parsed["start_time"], "end_time": parsed["end_time"],
+                    "completed_today": bool(payload.get("completed")) and completed_date == requested_date,
+                })
+            schedules.sort(key=lambda item: item["start_time"])
+            return json.dumps({"status": "success", "daily_tasks": schedules})
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)})
+
+    if name == "add_daily_task":
+        try:
+            raw = _build_daily_raw(arguments.get("title", ""), arguments.get("days") or [],
+                                   arguments.get("start_time", ""), arguments.get("end_time", ""))
+            user_id = current_user_id()
+            task_id = "daily:" + uuid.uuid4().hex[:20]
+            task = {"id": task_id, "title": raw, "due_date": "", "due_time": "", "priority": "1",
+                    "notes": _encode_daily_payload(raw, False), "completed": False}
+            response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
+            if response.status_code != 200:
+                raise RuntimeError(response.text)
+            return json.dumps({"status": "success", "message": f"Added daily task: {arguments.get('title')}", "task_id": task_id})
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)})
+
+    if name in ("update_daily_task", "complete_daily_task", "delete_daily_task"):
+        try:
+            task_id = str(arguments.get("task_id", "")).strip()
+            if not task_id:
+                raise ValueError("task_id is required")
+            user_id, tasks = load_all_remote_tasks()
+            task = next((item for item in tasks if str(item.get("task_id") or item.get("id") or "") == task_id), None)
+            if not task:
+                raise ValueError("Daily task not found; call get_daily_tasks and use its exact task_id")
+            payload = _decode_daily_payload(task.get("notes", ""))
+            if not payload:
+                raise ValueError("The selected task is not a daily task")
+            parsed = _parse_daily_raw(payload.get("raw") or task.get("title"))
+            if name == "delete_daily_task":
+                response = _backend("DELETE", f"/tasks/{task_id}")
+                if response.status_code != 200:
+                    raise RuntimeError(response.text)
+                return json.dumps({"status": "success", "message": f"Deleted daily task: {parsed['title']}"})
+            updated = dict(task)
+            updated["id"] = task_id
+            updated.pop("task_id", None)
+            if name == "complete_daily_task":
+                completed_date = str(arguments.get("date") or date.today().isoformat())
+                datetime.strptime(completed_date, "%Y-%m-%d")
+                updated["completed"] = True
+                updated["notes"] = _encode_daily_payload(parsed["raw"], True, completed_date)
+                action = "Completed"
+            else:
+                raw = _build_daily_raw(
+                    arguments.get("title", parsed["title"]), arguments.get("days", parsed["days"]),
+                    arguments.get("start_time", parsed["start_time"]), arguments.get("end_time", parsed["end_time"]),
+                )
+                updated["title"] = raw
+                updated["notes"] = _encode_daily_payload(raw, bool(payload.get("completed")), payload.get("completed_date"))
+                action = "Updated"
+            response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
+            if response.status_code != 200:
+                raise RuntimeError(response.text)
+            return json.dumps({"status": "success", "message": f"{action} daily task: {parsed['title']}"})
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)})
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 # ---------------------------------------------------------------------------
@@ -651,6 +848,41 @@ def index():
 # ---------------------------------------------------------------------------
 # Task API (proxy → backend service)
 # ---------------------------------------------------------------------------
+@app.route("/api/integrations/meetings", methods=["GET"])
+@login_required
+def meeting_proposals():
+    try:
+        response = _backend("GET", "/integrations/meetings")
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/integrations/meetings/<proposal_id>", methods=["PATCH"])
+@login_required
+def decide_meeting(proposal_id):
+    try:
+        response = _backend("PATCH", f"/integrations/meetings/{proposal_id}",
+                            json=request.get_json(silent=True) or {})
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+def _store_reminder_preferences(task_id, task_title, data):
+    reminder = data.get("reminder") or {}
+    payload = {
+        "task_label": task_title,
+        "email_enabled": bool(reminder.get("email_enabled", False)),
+        "email": str(reminder.get("email") or "").strip(),
+        "sms_enabled": bool(reminder.get("sms_enabled", False)),
+        "phone": str(reminder.get("phone") or "").strip(),
+        "minutes_before": reminder.get("minutes_before", 15),
+        "timezone": str(reminder.get("timezone") or "UTC"),
+    }
+    return _backend("PUT", f"/tasks/{task_id}/reminder", json=payload)
+
+
 @app.route("/api/tasks", methods=["GET"])
 @login_required
 def get_tasks():
@@ -703,6 +935,9 @@ def add_task():
         r = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
         if r.status_code == 200:
+            reminder_response = _store_reminder_preferences(task_id, title, data)
+            if reminder_response.status_code != 200:
+                return jsonify({"status": "error", "message": reminder_response.text}), reminder_response.status_code
             return jsonify({"status": "success", "task": task})
         return jsonify({"status": "error", "message": r.text}), r.status_code
     except Exception as e:
@@ -726,6 +961,9 @@ def edit_task(task_id):
         r = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
         if r.status_code == 200:
+            reminder_response = _store_reminder_preferences(task_id, task["title"], data)
+            if reminder_response.status_code != 200:
+                return jsonify({"status": "error", "message": reminder_response.text}), reminder_response.status_code
             return jsonify({"status": "success"})
         return jsonify({"status": "error", "message": r.text}), r.status_code
     except Exception as e:
@@ -734,27 +972,30 @@ def edit_task(task_id):
 @app.route("/api/tasks/<task_id>/complete", methods=["POST"])
 @login_required
 def complete_task(task_id):
-    # Fetch current task, mark completed, upsert back
     try:
-        user_id = current_user_id()
-        r = _backend("GET", "/tasks/retrieve")
-        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
-        task = next((t for t in tasks if t.get("task_id") == task_id), None)
-        if not task:
-            return jsonify({"status": "error", "message": "Task not found"}), 404
-        task["completed"] = True
-        task["id"] = task.pop("task_id", task_id)
-        r2 = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
-                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
+        response = _backend("POST", f"/tasks/{task_id}/complete")
+        if response.status_code != 200:
+            try:
+                message = response.json().get("message", response.text)
+            except Exception:
+                message = response.text
+            return jsonify({"status": "error", "message": message}), response.status_code
+
+        backend_result = response.json()
+        if not backend_result.get("updated"):
+            return jsonify({"status": "success", "task_id": task_id, "already_completed": True})
+
         # Also update character stats
         conn = get_db()
-        completed = int(conn.execute("SELECT value FROM character WHERE key='tasks_completed'",).fetchone() or [0])[0] if conn.execute("SELECT value FROM character WHERE key='tasks_completed'").fetchone() else 0
-        level = completed // 5
-        conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('tasks_completed',?)", (str(completed + 1),))
+        row = conn.execute("SELECT value FROM character WHERE key='tasks_completed'").fetchone()
+        completed = int(row[0]) if row else 0
+        new_completed = completed + 1
+        level = new_completed // 5
+        conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('tasks_completed',?)", (str(new_completed),))
         conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('level',?)", (str(level),))
         conn.commit()
         conn.close()
-        return jsonify({"status": "success"})
+        return jsonify({"status": "success", "task_id": task_id})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
@@ -805,19 +1046,29 @@ def clear_tasks_only():
 @app.route("/api/daily", methods=["GET"])
 @login_required
 def get_daily():
-    today = date.today().isoformat()
+    today = request.args.get("date", date.today().isoformat())
+    requested_day = request.args.get("day", datetime.now().strftime("%a"))
+    if requested_day not in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+        return jsonify({"status": "error", "message": "Invalid weekday"}), 400
+    g.daily_day = requested_day
+    g.daily_date = today
     user_id = current_user_id()
 
     # Local web-only daily items
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM daily_tasks WHERE date=? ORDER BY id", (today,)).fetchall()
+        "SELECT * FROM daily_tasks WHERE date=? AND user_id=? ORDER BY id", (today, user_id)).fetchall()
     conn.close()
 
     local_tasks = [{
         "id": f"local:{r['id']}",
         "title": r["title"],
+        "raw": r["title"],
+        "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "start_time": "00:00",
+        "end_time": "",
         "done": bool(r["done"]),
+        "scheduled_today": True,
         "source": "local",
     } for r in rows]
 
@@ -825,17 +1076,19 @@ def get_daily():
     remote_daily = []
     try:
         r = _backend("GET", "/tasks/retrieve")
-        if r.status_code == 200:
-            tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
-            _regular, remote_daily = _split_remote_tasks(tasks)
-    except Exception:
-        remote_daily = []
+        if r.status_code != 200:
+            return jsonify({"status": "error", "message": f"Task backend returned {r.status_code}: {r.text}"}), r.status_code
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
+        _regular, remote_daily = _split_remote_tasks(tasks)
+    except Exception as exc:
+        log.exception("daily task retrieval failed")
+        return jsonify({"status": "error", "message": str(exc)}), 503
 
     combined = remote_daily + local_tasks
     deduped = []
     seen = set()
     for item in combined:
-        key = (str(item.get("title", "")).strip().lower(), bool(item.get("done", False)))
+        key = str(item.get("id", ""))
         if key in seen:
             continue
         seen.add(key)
@@ -848,29 +1101,26 @@ def get_daily():
 def add_daily():
     data = request.get_json(silent=True) or {}
     title = data.get("title", "").strip()
-    if not title:
-        return jsonify({"status": "error", "message": "title required"}), 400
-    user_id = current_user_id()
-    today = date.today().isoformat()
-    conn = get_db()
-    conn.execute("INSERT INTO daily_tasks(title,date) VALUES(?,?)", (title, today))
-    conn.commit()
-    row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
-
-    # Best-effort mirror into remote backend so desktop and web daily lists can converge.
+    days = data.get("days") or ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    start_time = data.get("start_time", "00:00")
+    end_time = data.get("end_time", "")
     try:
-        remote_task_id = "daily:" + hashlib.md5(title.encode()).hexdigest()[:20]
+        raw = _build_daily_raw(title, days, start_time, end_time)
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    user_id = current_user_id()
+    try:
+        remote_task_id = "daily:" + uuid.uuid4().hex[:20]
         remote_task = {
             "id": remote_task_id,
-            "title": title,
+            "title": raw,
             "due_date": "",
             "due_time": "",
             "priority": "1",
-            "notes": _encode_daily_payload(title, False),
+            "notes": _encode_daily_payload(raw, False),
             "completed": False,
         }
-        _backend(
+        response = _backend(
             "POST",
             "/tasks/store",
             json={
@@ -878,15 +1128,47 @@ def add_daily():
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
-    except Exception:
-        pass
+        if response.status_code != 200:
+            return jsonify({"status": "error", "message": response.text}), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    return jsonify({"status": "success", "id": f"remote:{remote_task_id}"})
 
-    return jsonify({"status": "success", "id": f"local:{row_id}"})
+
+@app.route("/api/daily/<task_id>", methods=["PUT"])
+@login_required
+def edit_daily(task_id):
+    if not task_id.startswith("remote:"):
+        return jsonify({"status": "error", "message": "Legacy local tasks cannot be edited; recreate this task."}), 400
+    remote_task_id = task_id.split(":", 1)[1]
+    data = request.get_json(silent=True) or {}
+    try:
+        raw = _build_daily_raw(data.get("title", ""), data.get("days") or [],
+                               data.get("start_time", ""), data.get("end_time", ""))
+        user_id = current_user_id()
+        response = _backend("GET", "/tasks/retrieve")
+        tasks = _decrypt_tasks(response.json().get("tasks", []), user_id) if response.status_code == 200 else []
+        match = next((t for t in tasks if str(t.get("task_id") or t.get("id") or "") == remote_task_id), None)
+        if not match:
+            return jsonify({"status": "error", "message": "Daily task not found"}), 404
+        payload = _decode_daily_payload(match.get("notes", "")) or {}
+        updated = dict(match)
+        updated["id"] = remote_task_id
+        updated.pop("task_id", None)
+        updated["title"] = raw
+        updated["notes"] = _encode_daily_payload(raw, bool(payload.get("completed")), payload.get("completed_date"))
+        stored = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
+        if stored.status_code == 200:
+            return jsonify({"status": "success"})
+        return jsonify({"status": "error", "message": stored.text}), stored.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
 
 @app.route("/api/daily/<task_id>/toggle", methods=["POST"])
 @login_required
 def toggle_daily(task_id):
     user_id = current_user_id()
+    client_date = (request.get_json(silent=True) or {}).get("date") or date.today().isoformat()
     if task_id.startswith("remote:"):
         remote_task_id = task_id.split(":", 1)[1]
         try:
@@ -904,12 +1186,15 @@ def toggle_daily(task_id):
                 return jsonify({"status": "error", "message": "Not a daily task"}), 400
 
             raw = (payload.get("raw") or match.get("title") or "").strip()
-            done = bool(payload.get("completed", match.get("completed", False)))
+            completed_date = payload.get("completed_date")
+            if not completed_date and payload.get("completed") and match.get("updated_at"):
+                completed_date = str(match["updated_at"])[:10]
+            done = bool(payload.get("completed", match.get("completed", False))) and completed_date == client_date
             updated = dict(match)
             updated["id"] = remote_task_id
             updated["title"] = raw
             updated["completed"] = not done
-            updated["notes"] = _encode_daily_payload(raw, not done)
+            updated["notes"] = _encode_daily_payload(raw, not done, client_date if not done else None)
             updated.pop("task_id", None)
 
             r2 = _backend(
@@ -935,7 +1220,7 @@ def toggle_daily(task_id):
         return jsonify({"status": "error", "message": "Invalid daily task id"}), 400
 
     conn = get_db()
-    conn.execute("UPDATE daily_tasks SET done = 1 - done WHERE id=?", (local_id,))
+    conn.execute("UPDATE daily_tasks SET done = 1 - done WHERE id=? AND user_id=?", (local_id, user_id))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
@@ -943,6 +1228,7 @@ def toggle_daily(task_id):
 @app.route("/api/daily/<task_id>", methods=["DELETE"])
 @login_required
 def delete_daily(task_id):
+    user_id = current_user_id()
     if task_id.startswith("remote:"):
         remote_task_id = task_id.split(":", 1)[1]
         try:
@@ -962,7 +1248,7 @@ def delete_daily(task_id):
         return jsonify({"status": "error", "message": "Invalid daily task id"}), 400
 
     conn = get_db()
-    conn.execute("DELETE FROM daily_tasks WHERE id=?", (local_id,))
+    conn.execute("DELETE FROM daily_tasks WHERE id=? AND user_id=?", (local_id, user_id))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
@@ -976,10 +1262,16 @@ def clear_daily_only():
         r = _backend("GET", "/tasks/retrieve")
         tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
 
+        data = request.get_json(silent=True) or {}
+        requested_day = data.get("day") or datetime.now().strftime("%a")
+        requested_date = data.get("date") or date.today().isoformat()
         preserved_regular = []
         for task in tasks:
-            if _decode_daily_payload(task.get("notes", "")):
-                continue
+            daily_payload = _decode_daily_payload(task.get("notes", ""))
+            if daily_payload:
+                parsed = _parse_daily_raw(daily_payload.get("raw") or task.get("title"))
+                if requested_day in parsed["days"]:
+                    continue
             kept = dict(task)
             kept["id"] = str(kept.get("task_id") or kept.get("id") or "")
             kept.pop("task_id", None)
@@ -996,7 +1288,7 @@ def clear_daily_only():
             return jsonify({"status": "error", "message": r2.text}), r2.status_code
 
         conn = get_db()
-        conn.execute("DELETE FROM daily_tasks")
+        conn.execute("DELETE FROM daily_tasks WHERE date=? AND user_id=?", (requested_date, user_id))
         conn.commit()
         conn.close()
 
@@ -1131,16 +1423,20 @@ def ai_chat_tools():
     prompt = data.get("prompt", "").strip()
     model = data.get("model", "")
     zdr = bool(data.get("zdr", False))
+    local_date = str(data.get("local_date") or date.today().isoformat())
+    local_day = str(data.get("local_day") or datetime.now().strftime("%a"))
     if not prompt:
         return jsonify({"status": "error", "message": "prompt required"}), 400
 
     history = data.get("history") or []
     messages = [
         {"role": "system", "content": (
-            "You are a task management assistant. Use the provided tools when the user asks to view, add, "
-            "update, complete, or delete tasks. Before changing an existing task, call get_tasks and use its "
-            "exact task_id. Never claim a task was changed unless the corresponding tool returned success. "
-            f"Today's UTC date is {date.today().strftime('%m-%d-%Y')}."
+            "You are a task management assistant. Regular tasks and recurring daily tasks are different lists. "
+            "Use get_tasks before changing a regular task, and get_daily_tasks before changing a daily task; "
+            "always use the exact task_id returned by the matching tool. Daily schedules use weekday arrays and "
+            "24-hour HH:MM tool arguments. When adding multiple independent tasks, issue all add tool calls in "
+            "the same response instead of one per round. Never claim a change unless its tool returned success. "
+            f"The user's local date is {local_date} and weekday is {local_day}."
         )},
     ]
     messages.extend(h for h in history if isinstance(h, dict) and h.get("role") in ("user", "assistant"))
@@ -1148,7 +1444,8 @@ def ai_chat_tools():
 
     try:
         tasks_changed = False
-        for _ in range(3):
+        daily_tasks_changed = False
+        for _ in range(MAX_AI_TOOL_ROUNDS):
             r = _ai("POST", "/chat", json={
                 "messages": messages, "model": model, "zdr": zdr,
                 "tools": BUILTIN_TOOLS, "tool_choice": "auto",
@@ -1171,19 +1468,25 @@ def ai_chat_tools():
                     "model": body.get("model", model),
                     "receipt_id": body.get("receipt_id", ""),
                     "tasks_changed": tasks_changed,
+                    "daily_tasks_changed": daily_tasks_changed,
                 })
 
             messages.append(message)
             for tc in tool_calls:
-                result = _execute_tool_call(tc)
+                result = _execute_tool_call(tc, local_date=local_date, local_day=local_day)
                 if tc.get("function", {}).get("name") in ("add_task", "update_task", "complete_task", "delete_task"):
                     try:
                         tasks_changed = tasks_changed or json.loads(result).get("status") == "success"
                     except (TypeError, ValueError, json.JSONDecodeError):
                         pass
+                if tc.get("function", {}).get("name") in ("add_daily_task", "update_daily_task", "complete_daily_task", "delete_daily_task"):
+                    try:
+                        daily_tasks_changed = daily_tasks_changed or json.loads(result).get("status") == "success"
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
                 messages.append({"role": "tool", "content": result, "tool_call_id": tc.get("id")})
 
-        return jsonify({"status": "error", "message": "Too many tool-call rounds; try rephrasing your question."}), 500
+        return jsonify({"status": "error", "message": f"AI exceeded {MAX_AI_TOOL_ROUNDS} tool-call rounds; split the request into smaller batches."}), 500
     except req.exceptions.Timeout:
         return jsonify({"status": "error", "message": "AI request timed out waiting for ai_inference."}), 504
     except req.exceptions.ConnectionError:
@@ -1286,9 +1589,10 @@ def calendar_data(year, month):
         user_id = current_user_id()
         r = _backend("GET", "/tasks/retrieve")
         tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
-        tasks, _daily = _split_remote_tasks(tasks)
+        tasks, daily_tasks = _split_remote_tasks(tasks)
     except Exception:
         tasks = []
+        daily_tasks = []
 
     by_date = {}
     for t in tasks:
@@ -1299,25 +1603,44 @@ def calendar_data(year, month):
                 key = str(dt.day)
                 by_date.setdefault(key, []).append({
                     "title": t.get("title"), "priority": t.get("priority"),
-                    "color": _task_color(d)
+                    "due_time": t.get("due_time", ""),
+                    "color": _task_color(d), "type": "todo"
                 })
         except Exception:
             pass
+
+    last_day = (datetime(year + (month == 12), 1 if month == 12 else month + 1, 1) -
+                timedelta(days=1)).day
+    for day_number in range(1, last_day + 1):
+        weekday = datetime(year, month, day_number).strftime("%a")
+        for task in daily_tasks:
+            if weekday in task.get("days", []):
+                by_date.setdefault(str(day_number), []).append({
+                    "title": task.get("title"),
+                    "due_time": task.get("start_time", ""),
+                    "end_time": task.get("end_time", ""),
+                    "color": "daily", "type": "daily",
+                })
+    for entries in by_date.values():
+        entries.sort(key=lambda item: (item.get("due_time") or "99:99", item.get("title") or ""))
     return jsonify({"status": "success", "tasks_by_day": by_date})
 
 @app.route("/api/weekly", methods=["GET"])
 @login_required
 def weekly_data():
-    from datetime import timedelta
     try:
         user_id = current_user_id()
         r = _backend("GET", "/tasks/retrieve")
         tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
-        tasks, _daily = _split_remote_tasks(tasks)
+        tasks, daily_tasks = _split_remote_tasks(tasks)
     except Exception:
         tasks = []
+        daily_tasks = []
 
-    today = date.today()
+    try:
+        today = datetime.strptime(request.args.get("date", ""), "%Y-%m-%d").date()
+    except ValueError:
+        today = date.today()
     start = today - timedelta(days=today.weekday())  # Monday
     week_days = [(start + timedelta(days=i)) for i in range(7)]
     week_dates = {d.strftime("%m-%d-%Y"): [] for d in week_days}
@@ -1327,8 +1650,22 @@ def weekly_data():
         if d in week_dates:
             week_dates[d].append({
                 "title": t.get("title"), "priority": t.get("priority"),
-                "due_time": t.get("due_time", ""), "color": _task_color(d)
+                "due_time": t.get("due_time", ""), "color": _task_color(d),
+                "type": "todo"
             })
+    for day_date in week_days:
+        date_key = day_date.strftime("%m-%d-%Y")
+        weekday = day_date.strftime("%a")
+        for task in daily_tasks:
+            if weekday in task.get("days", []):
+                week_dates[date_key].append({
+                    "title": task.get("title"),
+                    "due_time": task.get("start_time", ""),
+                    "end_time": task.get("end_time", ""),
+                    "color": "daily", "type": "daily",
+                })
+    for entries in week_dates.values():
+        entries.sort(key=lambda item: (item.get("due_time") or "99:99", item.get("title") or ""))
     return jsonify({"status": "success", "week": week_dates,
                     "week_days": [d.strftime("%a %b %d") for d in week_days],
                     "week_dates": [d.strftime("%m-%d-%Y") for d in week_days]})

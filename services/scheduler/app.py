@@ -7,10 +7,15 @@ Jobs persist across restarts via the PostgreSQL job store.
 import os
 import json
 import logging
-from datetime import datetime, timezone
+import re
+import smtplib
+from datetime import datetime, timezone, timedelta
+from email.mime.text import MIMEText
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg2
 import psycopg2.extras
+import requests as req
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -25,6 +30,14 @@ CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
+SMTP_ENABLED = os.environ.get("SMTP_ENABLED", "false").lower() == "true"
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "")
 
 # ---------------------------------------------------------------------------
 # APScheduler setup
@@ -72,6 +85,29 @@ def init_db():
                     execution_count INTEGER     DEFAULT 0,
                     active          BOOLEAN     DEFAULT TRUE
                 );
+
+                CREATE TABLE IF NOT EXISTS task_reminders (
+                    user_id        TEXT NOT NULL,
+                    task_id        TEXT NOT NULL,
+                    task_label     TEXT NOT NULL DEFAULT 'Task',
+                    email_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+                    reminder_email TEXT,
+                    sms_enabled    BOOLEAN NOT NULL DEFAULT FALSE,
+                    phone_number   TEXT,
+                    minutes_before INTEGER NOT NULL DEFAULT 15,
+                    timezone_name  TEXT NOT NULL DEFAULT 'UTC',
+                    updated_at     TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, task_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS reminder_deliveries (
+                    user_id       TEXT NOT NULL,
+                    task_id       TEXT NOT NULL,
+                    channel       TEXT NOT NULL,
+                    scheduled_for TIMESTAMPTZ NOT NULL,
+                    sent_at       TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, task_id, channel, scheduled_for)
+                );
             """)
         conn.commit()
         log.info("scheduler DB initialised")
@@ -95,11 +131,112 @@ def parse_cron(cron_expr: str) -> dict:
 # Built-in job handlers
 # ---------------------------------------------------------------------------
 
-def job_reminder(parameters: dict):
-    """Log upcoming deadlines (extend with actual notification logic)."""
-    user_id = parameters.get("user_id", "all")
-    log.info("[reminder] Checking deadlines for user=%s at %s", user_id, datetime.now(timezone.utc).isoformat())
-    # TODO: query backend service and send push / email notification
+def _send_email(recipient, subject, body):
+    if not SMTP_ENABLED or not SMTP_USER or not SMTP_PASSWORD:
+        raise RuntimeError("SMTP is not configured")
+    message = MIMEText(body)
+    message["Subject"] = subject
+    message["From"] = SMTP_USER
+    message["To"] = recipient
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_USER, [recipient], message.as_string())
+
+
+def _send_sms(recipient, body):
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_FROM_NUMBER:
+        raise RuntimeError("Twilio SMS is not configured")
+    response = req.post(
+        f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+        data={"To": recipient, "From": TWILIO_FROM_NUMBER, "Body": body},
+        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=20,
+    )
+    response.raise_for_status()
+
+
+def _claim_delivery(user_id, task_id, channel, scheduled_for):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO reminder_deliveries (user_id, task_id, channel, scheduled_for)
+                VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (user_id, task_id, channel, scheduled_for))
+            claimed = cur.rowcount == 1
+        conn.commit()
+        return claimed
+    finally:
+        conn.close()
+
+
+def _release_delivery(user_id, task_id, channel, scheduled_for):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM reminder_deliveries
+                WHERE user_id = %s AND task_id = %s AND channel = %s AND scheduled_for = %s
+            """, (user_id, task_id, channel, scheduled_for))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def job_reminder(parameters=None):
+    """Send reminders whose timezone-aware delivery minute has arrived."""
+    now_utc = datetime.now(timezone.utc)
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT t.user_id, t.task_id, t.due_date, t.due_time,
+                       r.task_label, r.email_enabled, r.reminder_email,
+                       r.sms_enabled, r.phone_number, r.minutes_before, r.timezone_name
+                FROM tasks t
+                JOIN task_reminders r ON r.user_id = t.user_id AND r.task_id = t.task_id
+                WHERE t.completed = FALSE
+                  AND COALESCE(t.due_date, '') <> '' AND COALESCE(t.due_time, '') <> ''
+                  AND (r.email_enabled = TRUE OR r.sms_enabled = TRUE)
+            """)
+            reminders = cur.fetchall()
+    finally:
+        conn.close()
+
+    for reminder in reminders:
+        try:
+            local_zone = ZoneInfo(reminder["timezone_name"] or "UTC")
+            due_local = datetime.strptime(
+                f'{reminder["due_date"]} {reminder["due_time"]}', "%m-%d-%Y %H:%M"
+            ).replace(tzinfo=local_zone)
+            due_utc = due_local.astimezone(timezone.utc)
+            send_at = due_utc - timedelta(minutes=int(reminder["minutes_before"] or 0))
+            if not send_at <= now_utc < send_at + timedelta(minutes=2):
+                continue
+        except (ValueError, TypeError, ZoneInfoNotFoundError) as exc:
+            log.warning("Invalid reminder schedule for task %s: %s", reminder["task_id"], exc)
+            continue
+
+        label = reminder["task_label"] or "Task"
+        due_display = due_local.strftime("%b %d, %Y at %I:%M %p %Z")
+        body = f'Reminder: "{label}" is due {due_display}.'
+        channels = []
+        if reminder["email_enabled"] and reminder["reminder_email"]:
+            channels.append(("email", reminder["reminder_email"], _send_email))
+        if reminder["sms_enabled"] and reminder["phone_number"]:
+            channels.append(("sms", reminder["phone_number"], _send_sms))
+        for channel, recipient, sender in channels:
+            if not _claim_delivery(reminder["user_id"], reminder["task_id"], channel, due_utc):
+                continue
+            try:
+                if channel == "email":
+                    sender(recipient, f"TODO reminder: {label}", body)
+                else:
+                    sender(recipient, body)
+                log.info("Sent %s reminder for task=%s", channel, reminder["task_id"])
+            except Exception as exc:
+                _release_delivery(reminder["user_id"], reminder["task_id"], channel, due_utc)
+                log.error("Failed %s reminder for task=%s: %s", channel, reminder["task_id"], exc)
 
 
 def job_cleanup(parameters: dict):
@@ -395,6 +532,14 @@ def _startup_with_retry(max_attempts=10, delay=3):
 _startup_with_retry()
 try:
     restore_jobs_from_db()
+    scheduler.add_job(
+        job_reminder,
+        "interval",
+        minutes=1,
+        id="task-reminder-scan",
+        replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
     scheduler.start()
     log.info("APScheduler started with %d jobs", len(scheduler.get_jobs()))
 except Exception as exc:

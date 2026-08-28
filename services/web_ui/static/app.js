@@ -19,7 +19,85 @@ let modelCatalog = [];
 let toolsEnabled = false;
 let streamEnabled = false;
 let conversationHistory = [];
+let currentMeetingProposal = null;
+const snoozedMeetingProposals = new Set();
 const MAX_HISTORY_MESSAGES = 20; // ~10 exchanges; trims oldest first
+
+async function checkMeetingProposals() {
+  if (currentMeetingProposal || document.getElementById('meeting-proposal-modal').style.display === 'flex') return;
+  try {
+    const data = await api('GET', '/api/integrations/meetings');
+    const proposal = (data.proposals || []).find(item => !snoozedMeetingProposals.has(String(item.id)));
+    if (proposal) showMeetingProposal(proposal);
+  } catch (_) {}
+}
+
+function showMeetingProposal(proposal) {
+  currentMeetingProposal = proposal;
+  const start = new Date(proposal.start_at);
+  const pad = value => String(value).padStart(2, '0');
+  document.getElementById('meeting-proposal-id').value = proposal.id;
+  document.getElementById('meeting-title').value = proposal.title || 'Meeting';
+  document.getElementById('meeting-date').value = `${pad(start.getMonth() + 1)}-${pad(start.getDate())}-${start.getFullYear()}`;
+  document.getElementById('meeting-time').value = timeForTaskInput(`${pad(start.getHours())}:${pad(start.getMinutes())}`);
+  document.getElementById('meeting-organizer').value = proposal.organizer || '';
+  document.getElementById('meeting-link').value = proposal.meeting_link || '';
+  const end = proposal.end_at ? new Date(proposal.end_at).toLocaleString() : '';
+  const details = [proposal.notes || '', end ? `Ends: ${end}` : '', proposal.meeting_link ? `Join: ${proposal.meeting_link}` : ''].filter(Boolean);
+  document.getElementById('meeting-notes').value = details.join('\n');
+  document.getElementById('meeting-proposal-error').style.display = 'none';
+  document.getElementById('meeting-proposal-modal').style.display = 'flex';
+}
+
+function closeMeetingProposal() {
+  if (currentMeetingProposal) snoozedMeetingProposals.add(String(currentMeetingProposal.id));
+  currentMeetingProposal = null;
+  document.getElementById('meeting-proposal-modal').style.display = 'none';
+}
+
+async function acceptMeetingProposal() {
+  if (!currentMeetingProposal) return;
+  const error = document.getElementById('meeting-proposal-error');
+  const title = document.getElementById('meeting-title').value.trim();
+  const due_date = document.getElementById('meeting-date').value.trim();
+  const due_time = normalizeDueTime(document.getElementById('meeting-time').value.trim());
+  if (!title || !isValidDueDate(due_date) || !due_time) {
+    error.textContent = 'Enter a valid title, date, and start time.';
+    error.style.display = 'block';
+    return;
+  }
+  try {
+    await api('POST', '/api/tasks', {
+      title, due_date, due_time, priority: '2',
+      notes: document.getElementById('meeting-notes').value.trim() || 'Meeting imported from email',
+      reminder: {email_enabled: false, sms_enabled: false, minutes_before: 15,
+                 timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'},
+    });
+    await api('PATCH', `/api/integrations/meetings/${encodeURIComponent(currentMeetingProposal.id)}`, {decision: 'accepted'});
+    currentMeetingProposal = null;
+    document.getElementById('meeting-proposal-modal').style.display = 'none';
+    await loadTasks();
+    checkMeetingProposals();
+  } catch (exception) {
+    error.textContent = exception.message;
+    error.style.display = 'block';
+  }
+}
+
+async function ignoreMeetingProposal() {
+  if (!currentMeetingProposal) return;
+  const proposalId = currentMeetingProposal.id;
+  try {
+    await api('PATCH', `/api/integrations/meetings/${encodeURIComponent(proposalId)}`, {decision: 'ignored'});
+    currentMeetingProposal = null;
+    document.getElementById('meeting-proposal-modal').style.display = 'none';
+    checkMeetingProposals();
+  } catch (exception) {
+    const error = document.getElementById('meeting-proposal-error');
+    error.textContent = exception.message;
+    error.style.display = 'block';
+  }
+}
 
 /* ── Tab Switching ─────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(btn => {
@@ -46,9 +124,19 @@ async function api(method, path, body, timeoutMs = 20000) {
     const opts = { method, headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const r = await fetch(path, opts);
-    return await r.json();
+    const text = await r.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; }
+    catch { data = { status: 'error', message: text || `Server returned HTTP ${r.status}` }; }
+    if (!r.ok) {
+      const error = new Error(data.message || `Request failed (HTTP ${r.status})`);
+      error.isApiError = true;
+      throw error;
+    }
+    return data;
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('Request timed out. Please try again.');
+    if (e.isApiError) throw e;
     throw new Error('Network error. Please check your connection and try again.');
   } finally {
     clearTimeout(timer);
@@ -325,9 +413,29 @@ function renderTasks() {
   }).join('');
 }
 
+const finishingTaskIds = new Set();
+
 async function finishTask(id) {
-  await api('POST', `/api/tasks/${id}/complete`);
-  loadTasks();
+  if (finishingTaskIds.has(id)) return;
+  const task = allTasks.find(item => String(item.task_id) === String(id));
+  if (!task) return;
+
+  finishingTaskIds.add(id);
+  task.completed = true;
+  renderTasks();
+  document.getElementById('remaining-badge').textContent = `Tasks: ${allTasks.filter(item => !item.completed).length}`;
+
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(id)}/complete`);
+    loadCharacter();
+  } catch (error) {
+    task.completed = false;
+    renderTasks();
+    document.getElementById('remaining-badge').textContent = `Tasks: ${allTasks.filter(item => !item.completed).length}`;
+    alert(`Could not finish task: ${error.message}`);
+  } finally {
+    finishingTaskIds.delete(id);
+  }
 }
 
 async function deleteTask(id) {
@@ -376,6 +484,12 @@ function openAddTask() {
   document.getElementById('edit-task-id').value = '';
   ['f-title','f-date','f-time','f-notes'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('f-priority').value = '3';
+  document.getElementById('f-reminder-email-enabled').checked = false;
+  document.getElementById('f-reminder-email').value = '';
+  document.getElementById('f-reminder-sms-enabled').checked = false;
+  document.getElementById('f-reminder-phone').value = '';
+  document.getElementById('f-reminder-minutes').value = '15';
+  configureReminderInputs();
   configureTaskTimeInput();
   document.getElementById('task-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('f-title').focus(), 50);
@@ -391,7 +505,20 @@ function openEditTask(id) {
   document.getElementById('f-time').value         = timeForTaskInput(t.due_time || '');
   document.getElementById('f-priority').value     = t.priority || '3';
   document.getElementById('f-notes').value        = t.notes    || '';
+  document.getElementById('f-reminder-email-enabled').checked = Boolean(t.reminder_email_enabled);
+  document.getElementById('f-reminder-email').value = t.reminder_email || '';
+  document.getElementById('f-reminder-sms-enabled').checked = Boolean(t.reminder_sms_enabled);
+  document.getElementById('f-reminder-phone').value = t.reminder_phone || '';
+  document.getElementById('f-reminder-minutes').value = String(t.reminder_minutes_before ?? 15);
+  configureReminderInputs();
   document.getElementById('task-modal').style.display = 'flex';
+}
+
+function configureReminderInputs() {
+  const emailEnabled = document.getElementById('f-reminder-email-enabled').checked;
+  const smsEnabled = document.getElementById('f-reminder-sms-enabled').checked;
+  document.getElementById('f-reminder-email').disabled = !emailEnabled;
+  document.getElementById('f-reminder-phone').disabled = !smsEnabled;
 }
 
 function closeModal() {
@@ -406,6 +533,18 @@ async function saveTask() {
   const due_time = normalizeDueTime(dueTimeInput);
   const priority = document.getElementById('f-priority').value;
   const notes    = document.getElementById('f-notes').value.trim() || 'No notes';
+  const emailEnabled = document.getElementById('f-reminder-email-enabled').checked;
+  const reminderEmail = document.getElementById('f-reminder-email').value.trim();
+  const smsEnabled = document.getElementById('f-reminder-sms-enabled').checked;
+  const reminderPhone = document.getElementById('f-reminder-phone').value.trim();
+  const reminder = {
+    email_enabled: emailEnabled,
+    email: reminderEmail,
+    sms_enabled: smsEnabled,
+    phone: reminderPhone,
+    minutes_before: Number(document.getElementById('f-reminder-minutes').value),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+  };
 
   if (!title) { alert('Task name is required.'); return; }
   if (!due_date) { alert('Due date is required (MM-DD-YYYY).'); return; }
@@ -414,11 +553,23 @@ async function saveTask() {
     alert(use24Hour ? 'Enter time as HH:MM (for example, 09:30 or 17:30).' : 'Enter time as HH:MM AM/PM (for example, 9:30 AM or 5:30 PM).');
     return;
   }
+  if ((emailEnabled || smsEnabled) && !due_time) {
+    alert('A due time is required when reminders are enabled.');
+    return;
+  }
+  if (emailEnabled && !document.getElementById('f-reminder-email').checkValidity()) {
+    alert('Enter a valid reminder email address.');
+    return;
+  }
+  if (smsEnabled && !/^\+[1-9]\d{7,14}$/.test(reminderPhone.replace(/[\s().-]/g, ''))) {
+    alert('Enter the phone number in international format, such as +15551234567.');
+    return;
+  }
 
   if (id) {
-    await api('PUT', `/api/tasks/${id}`, { title, due_date, due_time, priority, notes });
+    await api('PUT', `/api/tasks/${id}`, { title, due_date, due_time, priority, notes, reminder });
   } else {
-    await api('POST', '/api/tasks', { title, due_date, due_time, priority, notes });
+    await api('POST', '/api/tasks', { title, due_date, due_time, priority, notes, reminder });
   }
   closeModal();
   loadTasks();
@@ -453,50 +604,123 @@ document.getElementById('f-date-picker-btn').addEventListener('click', () => {
 ══════════════════════════════════════════════════════════════════ */
 async function loadDaily() {
   const list = document.getElementById('daily-list');
-  list.innerHTML = '<li class="empty-msg">Loading…</li>';
-  const data = await api('GET', '/api/daily');
+  list.innerHTML = '<div class="empty-msg">Loading...</div>';
+  const now = new Date();
+  const day = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()];
+  const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  const data = await api('GET', `/api/daily?day=${day}&date=${localDate}`);
   const tasks = data.tasks ?? [];
+  window.currentDailyTasks = tasks;
   if (!tasks.length) {
-    list.innerHTML = '<li class="empty-msg">No daily tasks yet.</li>';
+    list.innerHTML = '<div class="empty-msg">No daily task schedules yet.</div>';
     return;
   }
-  list.innerHTML = tasks.map(t => {
+  const header = '<div class="daily-item daily-header"><span></span><span>Days</span><span>Time</span><span>Task</span><span>Status</span><span>Actions</span></div>';
+  list.innerHTML = header + tasks.map(t => {
     const safeId = encodeURIComponent(String(t.id ?? ''));
+    const status = dailyTaskStatus(t);
+    const time = t.end_time ? `${fmtTime(t.start_time)} - ${fmtTime(t.end_time)}` : fmtTime(t.start_time);
     return `
-    <li class="daily-item ${t.done ? 'done' : ''}">
+    <div class="daily-item ${t.done ? 'done' : ''} ${status.className}">
       <input type="checkbox" class="daily-check" ${t.done ? 'checked' : ''}
              onchange="toggleDaily('${safeId}')"/>
+      <span class="daily-days">${escHtml((t.days || []).join(','))}</span>
+      <span class="daily-time">${escHtml(time)}</span>
       <span class="daily-title">${escHtml(t.title)}</span>
-      <button class="btn btn-sm btn-danger" onclick="deleteDaily('${safeId}')">✗</button>
-    </li>`;
+      <span class="daily-status">${escHtml(status.label)}</span>
+      <span class="daily-actions">
+        ${t.source === 'remote' ? `<button class="btn btn-sm" onclick="openDailyModal('${safeId}')">Edit</button>` : ''}
+        <button class="btn btn-sm btn-danger" onclick="deleteDaily('${safeId}')">Delete</button>
+      </span>
+    </div>`;
   }).join('');
 }
 
-async function addDailyTask() {
-  const input = document.getElementById('daily-input');
-  const title = input.value.trim();
-  if (!title) return;
-  await api('POST', '/api/daily', { title });
-  input.value = '';
-  loadDaily();
+function dailyTaskStatus(task) {
+  if (task.done) return {label: 'Completed', className: 'completed'};
+  if (task.scheduled_today === false) return {label: 'Not Today', className: 'not-today'};
+  const now = new Date();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const toMinutes = value => {
+    const normalized = normalizeDueTime(value);
+    if (!normalized) return 0;
+    const [hour, minute] = normalized.split(':').map(Number);
+    return hour * 60 + minute;
+  };
+  const start = toMinutes(task.start_time);
+  const end = task.end_time ? toMinutes(task.end_time) : start;
+  const deadline = end === 0 ? 1439 : end;
+  if (minutes > deadline) return {label: 'Overdue', className: 'overdue'};
+  if (task.end_time && minutes >= start && minutes <= deadline) return {label: 'In Progress', className: 'in-progress'};
+  return {label: 'Pending', className: 'pending'};
 }
-document.getElementById('daily-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') addDailyTask();
-});
+
+function configureDailyTimeInputs() {
+  document.getElementById('daily-start-label').textContent = use24Hour ? 'Start Time * (HH:MM)' : 'Start Time * (HH:MM AM/PM)';
+  document.getElementById('daily-end-label').textContent = use24Hour ? 'End Time (optional, HH:MM)' : 'End Time (optional, HH:MM AM/PM)';
+  document.getElementById('daily-start').placeholder = use24Hour ? '09:00' : '9:00 AM';
+  document.getElementById('daily-end').placeholder = use24Hour ? '10:00' : '10:00 AM';
+}
+
+function openDailyModal(encodedId = '') {
+  const id = encodedId ? decodeURIComponent(encodedId) : '';
+  const task = id ? (window.currentDailyTasks || []).find(item => String(item.id) === id) : null;
+  document.getElementById('daily-modal-title').textContent = task ? 'Edit Daily Task' : 'Add Daily Task';
+  document.getElementById('edit-daily-id').value = id;
+  document.getElementById('daily-title').value = task?.title || '';
+  document.getElementById('daily-start').value = timeForTaskInput(task?.start_time || '09:00');
+  document.getElementById('daily-end').value = task?.end_time ? timeForTaskInput(task.end_time) : '';
+  document.querySelectorAll('input[name="daily-day"]').forEach(box => { box.checked = task ? task.days.includes(box.value) : true; });
+  document.getElementById('daily-form-error').style.display = 'none';
+  configureDailyTimeInputs();
+  document.getElementById('daily-modal').style.display = 'flex';
+  document.getElementById('daily-title').focus();
+}
+
+function closeDailyModal() { document.getElementById('daily-modal').style.display = 'none'; }
+
+async function saveDailyTask() {
+  const id = document.getElementById('edit-daily-id').value;
+  const title = document.getElementById('daily-title').value.trim();
+  const days = [...document.querySelectorAll('input[name="daily-day"]:checked')].map(box => box.value);
+  const start_time = normalizeDueTime(document.getElementById('daily-start').value);
+  const endInput = document.getElementById('daily-end').value.trim();
+  const end_time = endInput ? normalizeDueTime(endInput) : '';
+  const error = document.getElementById('daily-form-error');
+  let message = '';
+  if (!title) message = 'Task name is required.';
+  else if (!days.length) message = 'Select at least one day.';
+  else if (!start_time) message = 'Enter a valid start time.';
+  else if (endInput && !end_time) message = 'Enter a valid end time or leave it blank.';
+  if (message) { error.textContent = message; error.style.display = 'block'; return; }
+  try {
+    const result = await api(id ? 'PUT' : 'POST', id ? `/api/daily/${encodeURIComponent(id)}` : '/api/daily',
+      {title, days, start_time, end_time});
+    if (result.status !== 'success') throw new Error(result.message || 'Could not save daily task.');
+    closeDailyModal();
+    loadDaily();
+  } catch (e) { error.textContent = e.message; error.style.display = 'block'; }
+}
 
 async function toggleDaily(id) {
-  await api('POST', `/api/daily/${id}/toggle`);
+  const now = new Date();
+  const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  await api('POST', `/api/daily/${id}/toggle`, {date: localDate});
   loadDaily();
 }
 
 async function deleteDaily(id) {
+  if (!confirm('Delete this daily task?')) return;
   await api('DELETE', `/api/daily/${id}`);
   loadDaily();
 }
 
 async function clearAllDaily() {
-  if (!confirm('Clear all daily tasks in the Daily tab? Regular tasks will be kept.')) return;
-  await api('POST', '/api/daily/clear');
+  if (!confirm('Clear all daily tasks shown for today? Regular tasks and schedules for other days will be kept.')) return;
+  const now = new Date();
+  const day = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()];
+  const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  await api('POST', '/api/daily/clear', {day, date: localDate});
   loadDaily();
 }
 
@@ -703,14 +927,19 @@ async function sendAI() {
   if (toolsEnabled && !imageToSend) {
     const thinking = appendAIMessage('bot thinking', '…thinking…');
     try {
+      const localNow = new Date();
+      const localDay = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][localNow.getDay()];
+      const localDate = `${localNow.getFullYear()}-${String(localNow.getMonth()+1).padStart(2,'0')}-${String(localNow.getDate()).padStart(2,'0')}`;
       const d = await api('POST', '/api/ai/chat/tools', {
         prompt, model: selectedModel, zdr: zdrEnabled, history: historyForRequest,
+        local_date: localDate, local_day: localDay,
       }, 120000);
       thinking.remove();
       if (d.status === 'success') {
         appendAIBotResponse(d.response || '(no response)', d);
         conversationHistory.push({ role: 'assistant', content: d.response || '' });
         if (d.tasks_changed) await loadTasks();
+        if (d.daily_tasks_changed) await loadDaily();
       } else {
         appendAIBotResponse(`⚠ ${d.message || 'Unknown AI error'}`, d);
         conversationHistory.pop(); // don't keep a turn that failed
@@ -960,8 +1189,11 @@ async function renderCalendar() {
   for (let day = 1; day <= lastDay; day++) {
     const isToday = today.getFullYear() === calYear && today.getMonth()+1 === calMonth && today.getDate() === day;
     const tasks = byDay[String(day)] ?? [];
-    const dots  = tasks.slice(0, 4).map(t =>
-      `<div class="cal-dot ${t.color||'normal'}">${escHtml(t.title)}</div>`).join('');
+    const dots  = tasks.map(t => {
+      const time = t.due_time ? `${fmtTime(t.due_time)} ` : '';
+      const marker = t.type === 'daily' ? '&#8635; ' : '';
+      return `<div class="cal-dot ${t.color||'normal'}" title="${t.type === 'daily' ? 'Recurring daily task' : 'Todo task'}">${marker}${escHtml(time + t.title)}</div>`;
+    }).join('');
     html += `<div class="cal-cell${isToday?' today-cell':''}">
                <div class="cal-day">${day}</div>${dots}</div>`;
   }
@@ -976,24 +1208,114 @@ function calNext() { calMonth++; if (calMonth > 12) { calMonth = 1;  calYear++; 
    WEEKLY
 ══════════════════════════════════════════════════════════════════ */
 async function loadWeekly() {
-  const data = await api('GET', '/api/weekly');
+  const now = new Date();
+  const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  const data = await api('GET', `/api/weekly?date=${localDate}`);
   const week = data.week ?? {};
   const days = data.week_days ?? [];
   const dates = data.week_dates ?? [];
-  const today = new Date();
+  const today = now;
   const todayStr = `${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}-${today.getFullYear()}`;
 
   const grid = document.getElementById('weekly-grid');
-  grid.innerHTML = dates.map((date, i) => {
-    const isToday = date === todayStr;
-    const tasks   = week[date] ?? [];
-    const taskHtml = tasks.map(t =>
-      `<div class="weekly-task ${t.color||'normal'}">${escHtml(t.title)}</div>`).join('');
-    return `<div class="weekly-day${isToday?' today-col':''}">
-              <div class="weekly-day-header">${escHtml(days[i])}</div>
-              ${taskHtml || '<span style="color:#bbb;font-size:11px">No tasks</span>'}
-            </div>`;
-  }).join('');
+  const toSlot = value => {
+    const normalized = normalizeDueTime(value);
+    if (!normalized) return null;
+    const [hour, minute] = normalized.split(':').map(Number);
+    return Math.max(0, Math.min(95, hour * 4 + Math.floor(minute / 15)));
+  };
+  const layoutOverlaps = tasks => {
+    const events = tasks.filter(task => task.due_time).map(task => {
+      const start = toSlot(task.due_time);
+      const requestedEnd = toSlot(task.end_time);
+      return {...task, _start: start, _end: requestedEnd !== null && requestedEnd > start ? requestedEnd : start + 1};
+    }).filter(event => event._start !== null).sort((a, b) => a._start - b._start || a._end - b._end);
+
+    let group = [];
+    let groupEnd = -1;
+    const finishGroup = () => {
+      if (!group.length) return;
+      const laneEnds = [];
+      group.forEach(event => {
+        let lane = laneEnds.findIndex(end => end <= event._start);
+        if (lane < 0) lane = laneEnds.length;
+        laneEnds[lane] = event._end;
+        event._lane = lane;
+      });
+      group.forEach(event => { event._laneCount = laneEnds.length; });
+    };
+
+    events.forEach(event => {
+      if (group.length && event._start >= groupEnd) {
+        finishGroup();
+        group = [];
+        groupEnd = -1;
+      }
+      group.push(event);
+      groupEnd = Math.max(groupEnd, event._end);
+    });
+    finishGroup();
+    return events;
+  };
+
+  let html = '<div class="weekly-corner">Time</div>';
+  dates.forEach((date, i) => {
+    const allDay = (week[date] ?? []).filter(task => !task.due_time);
+    html += `<div class="weekly-day-header${date === todayStr ? ' today-col' : ''}" style="grid-column:${i + 2};grid-row:1">
+      <strong>${escHtml(days[i])}</strong>
+      <div class="weekly-all-day">${allDay.map(task => `<span class="weekly-all-day-task ${task.color || 'normal'}">${escHtml(task.title)}</span>`).join('')}</div>
+    </div>`;
+  });
+
+  for (let slot = 0; slot < 96; slot++) {
+    const hour = Math.floor(slot / 4);
+    const minute = (slot % 4) * 15;
+    const rawTime = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    const isCurrentSlot = slot === now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+    html += `<div class="weekly-time-label${isCurrentSlot ? ' current-time-label' : ''}" data-slot="${slot}" style="grid-column:1;grid-row:${slot + 2}">${escHtml(fmtTime(rawTime))}</div>`;
+    for (let dayIndex = 0; dayIndex < 7; dayIndex++) {
+      const isToday = dates[dayIndex] === todayStr;
+      html += `<div class="weekly-slot${isToday ? ' today-slot' : ''}${isToday && isCurrentSlot ? ' current-time-slot' : ''}${slot % 4 === 0 ? ' hour-line' : ''}" data-slot="${slot}" data-date="${dates[dayIndex]}" style="grid-column:${dayIndex + 2};grid-row:${slot + 2}"></div>`;
+    }
+  }
+
+  dates.forEach((date, dayIndex) => {
+    layoutOverlaps(week[date] ?? []).forEach(task => {
+      const start = task._start;
+      const span = task._end - task._start;
+      const endLabel = task.end_time ? ` - ${fmtTime(task.end_time)}` : '';
+      const marker = task.type === 'daily' ? '&#8635; ' : '';
+      const laneWidth = 100 / task._laneCount;
+      const laneLeft = laneWidth * task._lane;
+      html += `<div class="weekly-event ${task.color || 'normal'}" style="grid-column:${dayIndex + 2};grid-row:${start + 2} / span ${span};--event-width:${laneWidth}%;--event-left:${laneLeft}%" title="${task.type === 'daily' ? 'Recurring daily task' : 'Todo task'}">
+        <span class="weekly-event-time">${escHtml(fmtTime(task.due_time) + endLabel)}</span>
+        <span>${marker}${escHtml(task.title)}</span>
+      </div>`;
+    });
+  });
+
+  grid.innerHTML = html;
+
+  const currentSlot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+  const currentCell = grid.querySelector(`.weekly-time-label[data-slot="${currentSlot}"]`);
+  if (currentCell) currentCell.scrollIntoView({block: 'center'});
+}
+
+function refreshWeeklyTimeMarker() {
+  const grid = document.getElementById('weekly-grid');
+  if (!grid || !document.getElementById('tab-weekly').classList.contains('active')) return;
+  const now = new Date();
+  const dateKey = `${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}-${now.getFullYear()}`;
+  const slot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+  const currentDaySlot = grid.querySelector(`.weekly-slot[data-date="${dateKey}"][data-slot="${slot}"]`);
+  if (!currentDaySlot) {
+    loadWeekly();
+    return;
+  }
+  grid.querySelectorAll('.current-time-slot').forEach(element => element.classList.remove('current-time-slot'));
+  grid.querySelectorAll('.current-time-label').forEach(element => element.classList.remove('current-time-label'));
+  currentDaySlot.classList.add('current-time-slot');
+  grid.querySelector(`.weekly-time-label[data-slot="${slot}"]`)?.classList.add('current-time-label');
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1006,6 +1328,7 @@ async function loadSettings() {
   selectedAiModelSetting = (s.phala_ai_model || '').trim();
   document.getElementById('setting-24h').checked = use24Hour;
   configureTaskTimeInput();
+  configureDailyTimeInputs();
   if (allTasks.length) renderTasks();
   document.getElementById('setting-uid').textContent = s.web_user_id ?? '–';
   if (!modelCatalog.length) await loadModelCatalog();
@@ -1037,6 +1360,7 @@ async function saveSetting(key, value) {
   if (key === 'use_24_hour') {
     use24Hour = value;
     configureTaskTimeInput();
+    configureDailyTimeInputs();
     renderTasks();
   }
   await api('POST', '/api/settings', { [key]: value });
@@ -1089,6 +1413,7 @@ async function checkHealth() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeModal();
+    closeDailyModal();
     document.getElementById('notes-modal').style.display = 'none';
     closeFullNotes();
   }
@@ -1098,3 +1423,9 @@ document.addEventListener('keydown', e => {
 loadTasks();
 loadCharacter();
 loadSettings();
+checkMeetingProposals();
+setInterval(checkMeetingProposals, 30000);
+setInterval(() => {
+  if (document.getElementById('tab-daily').classList.contains('active')) loadDaily();
+}, 60000);
+setInterval(refreshWeeklyTimeMarker, 60000);

@@ -8,7 +8,9 @@ import os
 import logging
 import re
 import base64
+import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
@@ -34,6 +36,7 @@ CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
+OPENCLAW_WEBHOOK_SECRET = os.environ.get("OPENCLAW_WEBHOOK_SECRET", "")
 
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 KEY_WRAP_INFO = "todoapp-keywrap-v1"
@@ -608,6 +611,48 @@ def init_db():
                 );
                 CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications(user_id);
 
+                CREATE TABLE IF NOT EXISTS task_reminders (
+                    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    task_id        TEXT NOT NULL,
+                    task_label     TEXT NOT NULL DEFAULT 'Task',
+                    email_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+                    reminder_email TEXT,
+                    sms_enabled    BOOLEAN NOT NULL DEFAULT FALSE,
+                    phone_number   TEXT,
+                    minutes_before INTEGER NOT NULL DEFAULT 15 CHECK (minutes_before BETWEEN 0 AND 10080),
+                    timezone_name  TEXT NOT NULL DEFAULT 'UTC',
+                    updated_at     TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, task_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS reminder_deliveries (
+                    user_id     TEXT NOT NULL,
+                    task_id     TEXT NOT NULL,
+                    channel     TEXT NOT NULL,
+                    scheduled_for TIMESTAMPTZ NOT NULL,
+                    sent_at     TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, task_id, channel, scheduled_for)
+                );
+
+                CREATE TABLE IF NOT EXISTS meeting_proposals (
+                    id            UUID PRIMARY KEY,
+                    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    external_id   TEXT NOT NULL,
+                    title         TEXT NOT NULL,
+                    organizer     TEXT NOT NULL DEFAULT '',
+                    start_at      TIMESTAMPTZ NOT NULL,
+                    end_at        TIMESTAMPTZ,
+                    meeting_link  TEXT NOT NULL DEFAULT '',
+                    notes         TEXT NOT NULL DEFAULT '',
+                    status        TEXT NOT NULL DEFAULT 'pending',
+                    created_at    TIMESTAMPTZ DEFAULT NOW(),
+                    decided_at    TIMESTAMPTZ,
+                    UNIQUE (user_id, external_id),
+                    CHECK (status IN ('pending', 'accepted', 'ignored'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_meeting_proposals_user_status
+                    ON meeting_proposals(user_id, status, created_at);
+
                 -- Existing accounts predate verification, so preserve their ability to sign in.
                 -- New registrations explicitly start with FALSE and must verify a code.
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN;
@@ -849,6 +894,112 @@ def approve_crypto_device(device_id):
         conn.close()
 
 
+@app.route("/integrations/openclaw/meetings", methods=["POST"])
+def receive_openclaw_meeting():
+    """Receive a normalized meeting proposal from a trusted OpenClaw hook."""
+    supplied = request.headers.get("X-OpenClaw-Secret", "")
+    if not OPENCLAW_WEBHOOK_SECRET or not secrets.compare_digest(supplied, OPENCLAW_WEBHOOK_SECRET):
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    account_email = str(data.get("account_email") or "").strip().lower()
+    external_id = str(data.get("external_id") or "").strip()[:300]
+    title = str(data.get("title") or "").strip()[:300]
+    if not EMAIL_RE.match(account_email) or not external_id or not title:
+        return jsonify({"status": "error", "message": "account_email, external_id, and title are required"}), 400
+    try:
+        start_at = datetime.fromisoformat(str(data.get("start_at") or "").replace("Z", "+00:00"))
+        if start_at.tzinfo is None:
+            raise ValueError("start_at needs a timezone")
+        end_text = str(data.get("end_at") or "").strip()
+        end_at = datetime.fromisoformat(end_text.replace("Z", "+00:00")) if end_text else None
+        if end_at and (end_at.tzinfo is None or end_at <= start_at):
+            raise ValueError("invalid end_at")
+    except ValueError:
+        return jsonify({"status": "error", "message": "start_at/end_at must be timezone-aware ISO-8601 values"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s AND email_verified = TRUE", (account_email,))
+            user = cur.fetchone()
+            if not user:
+                return jsonify({"status": "error", "message": "Verified TODO account not found"}), 404
+            proposal_id = str(uuid.uuid4())
+            cur.execute("""
+                INSERT INTO meeting_proposals
+                    (id, user_id, external_id, title, organizer, start_at, end_at, meeting_link, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, external_id) DO NOTHING
+                RETURNING id
+            """, (proposal_id, user["id"], external_id, title,
+                  str(data.get("organizer") or "")[:300], start_at, end_at,
+                  str(data.get("meeting_link") or "")[:2000], str(data.get("notes") or "")[:5000]))
+            inserted = cur.fetchone()
+        conn.commit()
+        return jsonify({"status": "success", "proposal_id": str(inserted["id"]) if inserted else None,
+                        "duplicate": inserted is None}), 202 if inserted else 200
+    except Exception as exc:
+        conn.rollback()
+        log.error("receive_openclaw_meeting error: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/integrations/meetings", methods=["GET"])
+@require_auth
+def list_meeting_proposals():
+    err = require_api_key()
+    if err:
+        return err
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, external_id, title, organizer, start_at, end_at, meeting_link, notes, created_at
+                FROM meeting_proposals
+                WHERE user_id = %s AND status = 'pending'
+                ORDER BY start_at, created_at LIMIT 20
+            """, (g.user_id,))
+            rows = cur.fetchall()
+        for row in rows:
+            for field in ("id", "start_at", "end_at", "created_at"):
+                if row.get(field) is not None:
+                    row[field] = str(row[field]) if field == "id" else row[field].isoformat()
+        return jsonify({"status": "success", "proposals": rows})
+    finally:
+        conn.close()
+
+
+@app.route("/integrations/meetings/<proposal_id>", methods=["PATCH"])
+@require_auth
+def decide_meeting_proposal(proposal_id):
+    err = require_api_key()
+    if err:
+        return err
+    decision = str((request.get_json(silent=True) or {}).get("decision") or "").lower()
+    if decision not in ("accepted", "ignored"):
+        return jsonify({"status": "error", "message": "decision must be accepted or ignored"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE meeting_proposals SET status = %s, decided_at = NOW()
+                WHERE id = %s AND user_id = %s AND status = 'pending'
+            """, (decision, proposal_id, g.user_id))
+            updated = cur.rowcount
+        conn.commit()
+        if not updated:
+            return jsonify({"status": "error", "message": "Meeting proposal not found"}), 404
+        return jsonify({"status": "success"})
+    except Exception as exc:
+        conn.rollback()
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
 @app.route("/tasks/store", methods=["POST"])
 @require_auth
 def store_tasks():
@@ -915,10 +1066,18 @@ def retrieve_tasks():
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT task_id, title, due_date, due_time, priority, notes, completed, updated_at
-                FROM tasks
-                WHERE user_id = %s
-                ORDER BY updated_at DESC
+                SELECT t.task_id, t.title, t.due_date, t.due_time, t.priority, t.notes,
+                       t.completed, t.updated_at,
+                       COALESCE(r.email_enabled, FALSE) AS reminder_email_enabled,
+                       COALESCE(r.reminder_email, '') AS reminder_email,
+                       COALESCE(r.sms_enabled, FALSE) AS reminder_sms_enabled,
+                       COALESCE(r.phone_number, '') AS reminder_phone,
+                       COALESCE(r.minutes_before, 15) AS reminder_minutes_before,
+                       COALESCE(r.timezone_name, 'UTC') AS reminder_timezone
+                FROM tasks t
+                LEFT JOIN task_reminders r ON r.user_id = t.user_id AND r.task_id = t.task_id
+                WHERE t.user_id = %s
+                ORDER BY t.updated_at DESC
             """, (user_id,))
             rows = cur.fetchall()
         tasks = [dict(r) for r in rows]
@@ -994,6 +1153,110 @@ def sync_tasks():
         conn.close()
 
 
+@app.route("/tasks/<task_id>/reminder", methods=["PUT"])
+@require_auth
+def save_task_reminder(task_id):
+    """Create, update, or disable delivery preferences for one task."""
+    err = require_api_key()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    user_id = g.user_id
+    email_enabled = bool(data.get("email_enabled", False))
+    sms_enabled = bool(data.get("sms_enabled", False))
+    reminder_email = str(data.get("email") or "").strip().lower()
+    phone = re.sub(r"[\s().-]", "", str(data.get("phone") or "").strip())
+    timezone_name = str(data.get("timezone") or "UTC").strip()
+    task_label = str(data.get("task_label") or "Task").strip()[:200] or "Task"
+    try:
+        minutes_before = int(data.get("minutes_before", 15))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Reminder lead time must be a number"}), 400
+    if not 0 <= minutes_before <= 10080:
+        return jsonify({"status": "error", "message": "Reminder lead time must be between 0 and 10080 minutes"}), 400
+    if email_enabled and not EMAIL_RE.match(reminder_email):
+        return jsonify({"status": "error", "message": "A valid reminder email is required"}), 400
+    if sms_enabled and not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+        return jsonify({"status": "error", "message": "Phone number must use international format, such as +15551234567"}), 400
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return jsonify({"status": "error", "message": "Invalid timezone"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM tasks WHERE user_id = %s AND task_id = %s", (user_id, task_id))
+            if not cur.fetchone():
+                return jsonify({"status": "error", "message": "Task not found"}), 404
+            cur.execute("""
+                INSERT INTO task_reminders
+                    (user_id, task_id, task_label, email_enabled, reminder_email,
+                     sms_enabled, phone_number, minutes_before, timezone_name, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (user_id, task_id) DO UPDATE SET
+                    task_label = EXCLUDED.task_label,
+                    email_enabled = EXCLUDED.email_enabled,
+                    reminder_email = EXCLUDED.reminder_email,
+                    sms_enabled = EXCLUDED.sms_enabled,
+                    phone_number = EXCLUDED.phone_number,
+                    minutes_before = EXCLUDED.minutes_before,
+                    timezone_name = EXCLUDED.timezone_name,
+                    updated_at = NOW()
+            """, (user_id, task_id, task_label, email_enabled,
+                  reminder_email if email_enabled else None, sms_enabled,
+                  phone if sms_enabled else None, minutes_before, timezone_name))
+        conn.commit()
+        return jsonify({"status": "success"})
+    except Exception as exc:
+        conn.rollback()
+        log.error("save_task_reminder error: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/tasks/<task_id>/complete", methods=["POST"])
+@require_auth
+def complete_task(task_id):
+    """Mark one task complete without retrieving or rewriting its encrypted fields."""
+    err = require_api_key()
+    if err:
+        return err
+
+    user_id = g.user_id
+    if not user_id:
+        return jsonify({"status": "error", "message": "user_id required"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
+                "WHERE user_id = %s AND task_id = %s AND completed = FALSE",
+                (user_id, task_id),
+            )
+            updated = cur.rowcount
+            if not updated:
+                cur.execute(
+                    "SELECT completed FROM tasks WHERE user_id = %s AND task_id = %s",
+                    (user_id, task_id),
+                )
+                existing = cur.fetchone()
+                if not existing:
+                    conn.rollback()
+                    return jsonify({"status": "error", "message": "Task not found"}), 404
+        conn.commit()
+        return jsonify({"status": "success", "completed": True, "updated": updated})
+    except Exception as exc:
+        conn.rollback()
+        log.error("complete_task error: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
 @app.route("/tasks/<task_id>", methods=["DELETE"])
 @require_auth
 def delete_task(task_id):
@@ -1011,6 +1274,8 @@ def delete_task(task_id):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM tasks WHERE user_id = %s AND task_id = %s", (user_id, task_id))
             deleted = cur.rowcount
+            cur.execute("DELETE FROM task_reminders WHERE user_id = %s AND task_id = %s", (user_id, task_id))
+            cur.execute("DELETE FROM reminder_deliveries WHERE user_id = %s AND task_id = %s", (user_id, task_id))
         conn.commit()
         return jsonify({"status": "success", "deleted": deleted})
     except Exception as exc:

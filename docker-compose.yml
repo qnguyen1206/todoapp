@@ -70,6 +70,7 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER}
       SMTP_PASSWORD: ${SMTP_PASSWORD}                  # [SECURE] – Gmail App Password
+      OPENCLAW_WEBHOOK_SECRET: ${OPENCLAW_WEBHOOK_SECRET} # [SECURE] – authenticates meeting proposals
       ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
@@ -83,6 +84,48 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # OpenClaw – self-hosted email/meeting automation gateway
+  # Control UI: http://localhost:18789 (protect with gateway token)
+  # Complete onboarding before enabling Gmail Pub/Sub hooks.
+  # ----------------------------------------------------------
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    ports:
+      - "18789:18789"
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}       # [SECURE]
+      OPENCLAW_TZ: ${OPENCLAW_TZ:-America/New_York}
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      TODO_MEETING_WEBHOOK_URL: http://backend:5000/integrations/openclaw/meetings
+      TODO_MEETING_WEBHOOK_SECRET: ${OPENCLAW_WEBHOOK_SECRET} # [SECURE]
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}                     # Optional model provider
+    command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+    init: true
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - openclaw_data:/home/node/.openclaw
+      - openclaw_auth:/home/node/.config/openclaw
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   # ----------------------------------------------------------
@@ -149,7 +192,7 @@ services:
 
   # ----------------------------------------------------------
   # Scheduler Service
-  # Cron-based background jobs (reminders, cleanup, auto-sync)
+  # Background jobs (email/SMS reminders, cleanup, auto-sync)
   # Internal URL: http://scheduler:5003
   # Public HTTPS:  https://<app-id>-5003.dstack-prod5.phala.network
   # ----------------------------------------------------------
@@ -160,6 +203,14 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-cvm_user}:${DB_PASSWORD}@postgres:5432/cvm_todoapp
       API_KEY: ${API_KEY}                              # [SECURE] – Phala dashboard
+      SMTP_ENABLED: ${SMTP_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}                  # [SECURE] – Gmail App Password
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}      # Optional – required only for SMS reminders
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}        # [SECURE] – optional Twilio credential
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}      # Optional E.164 sender, e.g. +15551234567
       ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
@@ -217,3 +268,5 @@ volumes:
   sync_data:
   scheduler_data:
   webui_data:
+  openclaw_data:
+  openclaw_auth:
