@@ -9,6 +9,7 @@ import subprocess
 import hashlib
 import importlib
 import uuid
+from ui_utils import fit_window
 
 class ModularUpdater:
     def __init__(self, auto_check=False):
@@ -115,6 +116,7 @@ class ModularUpdater:
                     "todo_list_manager.py": {"version": self.current_version, "hash": "", "type": "module"},
                     "cvm_client.py": {"version": self.current_version, "hash": "", "type": "module"},
                     "cvm_manager.py": {"version": self.current_version, "hash": "", "type": "module"},
+                    "ui_utils.py": {"version": self.current_version, "hash": "", "type": "module"},
                     "modular_updater.py": {"version": self.current_version, "hash": "", "type": "system"},
                     "clipboard.png": {"version": self.current_version, "hash": "", "type": "asset"},
                     "version.txt": {"version": self.current_version, "hash": "", "type": "config"},
@@ -362,8 +364,7 @@ class ModularUpdater:
         """Create a progress window for updates"""
         progress_window = tk.Toplevel()
         progress_window.title("Updating TODO App")
-        progress_window.geometry("400x150")
-        progress_window.resizable(False, False)
+        fit_window(progress_window, 440, 180, min_width=320, min_height=150)
         
         # Center the window
         progress_window.transient()

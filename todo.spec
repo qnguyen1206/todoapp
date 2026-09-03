@@ -32,6 +32,9 @@ a = Analysis(
         'calendar_view',
         'cvm_manager',
         'cvm_client',
+        'weekly_schedule_view',
+        'e2e_crypto',
+        'ui_utils',
         # Add datetime and other standard modules
         'datetime',
         'pathlib',

@@ -12,6 +12,7 @@ import base64
 import threading
 import webbrowser
 from pathlib import Path
+from ui_utils import fit_window
 
 # Handle missing dependencies gracefully
 try:
@@ -470,8 +471,7 @@ class MySQLLANManager:
         """Show a dialog with MySQL installation instructions"""
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("MySQL Installation Required")
-        dialog.geometry("600x500")
-        dialog.resizable(True, True)
+        fit_window(dialog, 600, 500)
         
         # Create a frame with scrollbar
         frame = ttk.Frame(dialog)
@@ -560,8 +560,7 @@ https://dev.mysql.com/doc/mysql-installation-excerpt/8.0/en/
         """Open dialog to configure MySQL connection with improved validation"""
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("MySQL Configuration")
-        dialog.geometry("350x250")
-        dialog.resizable(False, False)
+        fit_window(dialog, 400, 320, min_width=320, min_height=240)
         
         # Host
         ttk.Label(dialog, text="Host:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
@@ -700,7 +699,7 @@ https://dev.mysql.com/doc/mysql-installation-excerpt/8.0/en/
         # Create a dialog to show sharing status
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Sharing Tasks")
-        dialog.geometry("300x200")
+        fit_window(dialog, 360, 240)
         
         info_label = ttk.Label(dialog, text=share_info, justify=tk.LEFT)
         info_label.pack(padx=10, pady=10)
@@ -749,7 +748,7 @@ https://dev.mysql.com/doc/mysql-installation-excerpt/8.0/en/
         # Ask for connection details
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Import Tasks")
-        dialog.geometry("300x150")
+        fit_window(dialog, 360, 220)
         
         ttk.Label(dialog, text="Host IP:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ip_entry = ttk.Entry(dialog, width=20)

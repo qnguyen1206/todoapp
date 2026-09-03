@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 import win32com.client
 import webbrowser
+from ui_utils import fit_window
 
 # Import our custom modules with error handling
 try:
@@ -106,7 +107,10 @@ class TodoApp(metaclass=SingletonMeta):
     def __init__(self, root):
         self.root = root
         self.root.title("TODO App")
-        self.root.state('zoomed')
+        try:
+            self.root.state('zoomed')
+        except tk.TclError:
+            fit_window(self.root, 1200, 800, min_width=640, min_height=480)
         
         # Configure styles
         self.style = ttk.Style()
@@ -138,7 +142,7 @@ class TodoApp(metaclass=SingletonMeta):
         self.load_time_format_preference()
         
         # Add chatbot visibility state - default to hidden
-        self.chatbot_visible = tk.BooleanVar(value=False)
+        self.chatbot_visible = tk.BooleanVar(master=self.root, value=False)
         
         # Load character data
         self.load_character()
@@ -365,7 +369,7 @@ The app will continue to work normally for task management without AI features."
         toggle_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
         
         # Task view toggle button - switch between Daily Tasks and Todo Tasks
-        self.current_task_view = tk.StringVar(value="todo")  # Start with todo view
+        self.current_task_view = tk.StringVar(master=self.root, value="todo")  # Start with todo view
         self.task_view_toggle_btn = ttk.Button(
             toggle_frame,
             text="📅 Switch to Daily Tasks",
@@ -823,7 +827,7 @@ The app will continue to work normally for task management without AI features."
         ai_menu.add_separator()
         
         # AI Provider selection submenu
-        self.ai_provider_var = tk.StringVar(value=self.load_ai_provider_preference())
+        self.ai_provider_var = tk.StringVar(master=self.root, value=self.load_ai_provider_preference())
         ai_provider_menu = tk.Menu(ai_menu, tearoff=0)
         ai_provider_menu.add_radiobutton(label="Local (Ollama)", value="ollama", 
                                          variable=self.ai_provider_var, command=self.on_ai_provider_change)
@@ -838,7 +842,7 @@ The app will continue to work normally for task management without AI features."
         # AI Model submenu (moved from Options)
         if hasattr(self, 'ai_assistant') and self.ai_assistant:
             ai_model_menu = tk.Menu(ai_menu, tearoff=0)
-            self.selected_model = tk.StringVar(value=self.ai_assistant.current_ai_model)
+            self.selected_model = tk.StringVar(master=self.root, value=self.ai_assistant.current_ai_model)
             
             models_to_show = self.ai_assistant.installed_models if self.ai_assistant.installed_models else self.ai_assistant.available_models
             
@@ -994,9 +998,7 @@ The app will continue to work normally for task management without AI features."
         
         dialog = tk.Toplevel(self.root)
         dialog.title("Configure AI Provider")
-        dialog.geometry("550x600")
-        dialog.resizable(True, True)
-        dialog.minsize(500, 400)
+        fit_window(dialog, 600, 700, min_width=380, min_height=320)
         
         self.register_dialog(dialog)
         
@@ -1250,8 +1252,7 @@ The app will continue to work normally for task management without AI features."
         # Create custom dialog for clickable link
         dialog = tk.Toplevel(self.root)
         dialog.title("About TODO App")
-        dialog.geometry("450x400")
-        dialog.resizable(False, False)
+        fit_window(dialog, 500, 500, min_width=360, min_height=320)
         
         self.register_dialog(dialog)
         
@@ -1338,6 +1339,8 @@ The app will continue to work normally for task management without AI features."
         dialog.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        x = max(0, min(x, dialog.winfo_screenwidth() - dialog.winfo_width()))
+        y = max(0, min(y, dialog.winfo_screenheight() - dialog.winfo_height()))
         dialog.geometry(f"+{x}+{y}")
         
         # Now make it modal after positioning
@@ -1366,16 +1369,7 @@ class LoadingScreen:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Loading TODO App...")
-        self.root.geometry("400x200")
-        self.root.resizable(False, False)
-        
-        # Center the window
-        self.root.update_idletasks()
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width - 400) // 2
-        y = (screen_height - 200) // 2
-        self.root.geometry(f"400x200+{x}+{y}")
+        fit_window(self.root, 400, 220, min_width=320, min_height=180, resizable=False)
         
         # Set icon if available
         try:

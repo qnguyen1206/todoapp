@@ -12,6 +12,7 @@ from tkcalendar import DateEntry
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
+from ui_utils import fit_window
 
 
 class ToDoListManager:
@@ -109,8 +110,7 @@ class ToDoListManager:
         """Open a larger read-only window for very long notes."""
         full_dialog = tk.Toplevel(self.parent_app.root)
         full_dialog.title(f"Full Notes: {task_name}")
-        full_dialog.geometry("760x560")
-        full_dialog.resizable(True, True)
+        fit_window(full_dialog, 760, 560)
 
         self.parent_app.register_dialog(full_dialog)
 
@@ -148,8 +148,7 @@ class ToDoListManager:
             # Create notes display dialog
             notes_dialog = tk.Toplevel(self.parent_app.root)
             notes_dialog.title(f"Task Notes: {task_name}")
-            notes_dialog.geometry("450x350")
-            notes_dialog.resizable(True, True)
+            fit_window(notes_dialog, 450, 350)
             
             # Register this dialog globally
             self.parent_app.register_dialog(notes_dialog)
@@ -304,7 +303,7 @@ class ToDoListManager:
             
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add New Task")
-        dialog.geometry("450x350")
+        fit_window(dialog, 520, 430, min_width=380, min_height=340)
         
         # Register this dialog globally
         self.parent_app.register_dialog(dialog)
@@ -459,8 +458,7 @@ class ToDoListManager:
         # Create a custom dialog with 3 options
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Duplicate Task Found")
-        dialog.geometry("400x200")
-        dialog.resizable(False, False)
+        fit_window(dialog, 520, 240, min_width=360, min_height=200)
         dialog.transient(self.parent_app.root)
         dialog.grab_set()
         
@@ -515,8 +513,7 @@ class ToDoListManager:
         # Create a custom dialog
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Duplicate Tasks Found")
-        dialog.geometry("450x280")
-        dialog.resizable(False, False)
+        fit_window(dialog, 560, 320, min_width=380, min_height=240)
         dialog.transient(self.parent_app.root)
         dialog.grab_set()
         
@@ -585,9 +582,7 @@ class ToDoListManager:
             
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add Multiple Tasks")
-        dialog.geometry("700x700")  # Even larger to ensure buttons show
-        dialog.minsize(600, 600)    # Larger minimum size
-        dialog.resizable(True, True)
+        fit_window(dialog, 700, 700, min_width=420, min_height=360)
         
         # Register this dialog globally
         self.parent_app.register_dialog(dialog)
@@ -1340,7 +1335,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Edit Task")
-        dialog.geometry("450x400")
+        fit_window(dialog, 520, 460, min_width=380, min_height=340)
         
         # Register this dialog globally
         self.parent_app.register_dialog(dialog)

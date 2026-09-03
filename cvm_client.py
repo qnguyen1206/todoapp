@@ -154,6 +154,37 @@ class CVMClient:
         self.access_expires_at = int(__import__('time').time()) + int(payload.get('expires_in', 900)) - 30
         self.save_cvm_config()
 
+    def ensure_account_session(self):
+        """Ensure a usable access token exists, refreshing it when necessary."""
+        import time
+
+        if self.access_token and time.time() < self.access_expires_at:
+            return True, self.account_email or 'Signed in'
+        if not self.refresh_token:
+            return False, 'Sign in to your TODO account before syncing tasks.'
+
+        endpoint = self._backend_url()
+        if not endpoint:
+            return False, 'Configure the Backend Storage endpoint first.'
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        try:
+            response = requests.post(
+                endpoint + '/auth/refresh',
+                json={'refresh_token': self.refresh_token},
+                headers=headers,
+                timeout=15,
+            )
+            payload = response.json()
+            if response.status_code != 200:
+                return False, payload.get('message', 'Your session expired. Sign in again.')
+            self._store_account_session(payload)
+            return True, self.account_email or 'Signed in'
+        except (requests.RequestException, ValueError) as exc:
+            return False, f'Could not refresh account session: {exc}'
+
     def account_login(self, email, password, display_name=None):
         """Sign in or register with the shared CVM account service."""
         endpoint = self._backend_url()
@@ -167,6 +198,8 @@ class CVMClient:
         try:
             response = requests.post(endpoint + path, json=data, headers=self._headers(), timeout=15)
             payload = response.json()
+            if response.status_code == 202 and payload.get('status') == 'verification_required':
+                return None, payload.get('message', 'Check your email for a verification code.')
             if response.status_code not in (200, 201):
                 return False, payload.get('message', 'Sign-in failed')
             self._store_account_session(payload)
@@ -459,6 +492,26 @@ class CVMBackendClient(CVMClient):
         if response.status_code != 200:
             raise RuntimeError(f"Could not approve device: {response.text}")
         return response.json().get('device', {})
+
+    def reset_encryption_devices(self):
+        """Reset server-side device trust after the user confirms key loss."""
+        response = self._crypto_request(
+            'POST',
+            '/crypto/devices/reset',
+            json={'confirmation': 'RESET ENCRYPTION'},
+        )
+        if response is None:
+            return False, 'Backend endpoint not configured'
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if response.status_code == 404:
+            return False, 'The deployed backend must be updated before device recovery is available.'
+        if response.status_code != 200:
+            return False, payload.get('message', f'Device reset failed ({response.status_code})')
+        self._workspace_keys.clear()
+        return True, payload.get('message', 'Encryption devices reset')
 
     def _encrypt_tasks(self, user_id, tasks):
         """Encrypt title+notes of every task before sending to CVM.

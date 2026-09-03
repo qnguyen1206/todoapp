@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 from pathlib import Path
+from ui_utils import fit_window
 
 
 class DailyToDoManager:
@@ -152,8 +153,7 @@ class DailyToDoManager:
             # Create notes display dialog
             notes_dialog = tk.Toplevel(self.parent_app.root)
             notes_dialog.title(f"Daily Task Details: {task_name}")
-            notes_dialog.geometry("450x300")
-            notes_dialog.resizable(True, True)
+            fit_window(notes_dialog, 450, 300)
             
             # Task details
             details_frame = ttk.Frame(notes_dialog)
@@ -748,8 +748,7 @@ class DailyToDoManager:
         # Create edit dialog (similar to add dialog)
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Edit Daily Task")
-        dialog.geometry("500x420")
-        dialog.resizable(False, False)
+        fit_window(dialog, 500, 460, min_width=380, min_height=340)
 
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")
@@ -1060,8 +1059,7 @@ class DailyToDoManager:
         # Create a custom dialog for task with time
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add Daily Task")
-        dialog.geometry("500x420")
-        dialog.resizable(False, False)
+        fit_window(dialog, 500, 460, min_width=380, min_height=340)
 
         # Task name
         ttk.Label(dialog, text="Task:").grid(row=0, column=0, padx=5, pady=10, sticky="w")

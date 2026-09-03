@@ -898,6 +898,45 @@ def approve_crypto_device(device_id):
         conn.close()
 
 
+@app.route("/crypto/devices/reset", methods=["POST"])
+@require_auth
+def reset_crypto_devices():
+    """Reset lost device trust so the next registering device becomes active.
+
+    Existing tasks are deliberately left untouched. The desktop recovery flow
+    immediately replaces them after registering its new workspace key.
+    """
+    err = require_api_key()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    if data.get("confirmation") != "RESET ENCRYPTION":
+        return jsonify({
+            "status": "error",
+            "message": "Explicit RESET ENCRYPTION confirmation is required",
+        }), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM crypto_devices WHERE user_id = %s", (g.user_id,))
+            removed_devices = cur.rowcount
+            cur.execute("DELETE FROM crypto_workspaces WHERE user_id = %s", (g.user_id,))
+        conn.commit()
+        return jsonify({
+            "status": "success",
+            "removed_devices": removed_devices,
+            "message": "Encryption devices reset",
+        })
+    except Exception as exc:
+        conn.rollback()
+        log.error("reset_crypto_devices error: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
 @app.route("/integrations/openclaw/meetings", methods=["POST"])
 def receive_openclaw_meeting():
     """Receive a normalized meeting proposal from a trusted OpenClaw hook."""

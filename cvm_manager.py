@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from pathlib import Path
 import threading
+from ui_utils import ScrollableFrame, fit_window
 
 try:
     from cvm_client import CVMClient, CVMBackendClient, CVMAIClient, CVMSyncClient, CVMSchedulerClient
@@ -36,10 +37,46 @@ class CVMManager:
         self.ai_client = CVMAIClient()
         self.sync_client = CVMSyncClient()
         self.scheduler_client = CVMSchedulerClient()
+        self._propagate_client_state()
         
         # Status tracking
         self.cvm_enabled = tk.BooleanVar(master=parent_app.root, value=False)
         self.endpoint_status = {}
+
+    def _all_cvm_clients(self):
+        return (
+            self.cvm_client,
+            self.backend_client,
+            self.ai_client,
+            self.sync_client,
+            self.scheduler_client,
+        )
+
+    def _propagate_client_state(self):
+        """Keep service-specific clients aligned with the signed-in primary client."""
+        source = self.cvm_client
+        attributes = (
+            'cvm_endpoints', 'encryption_key', 'api_key', 'user_id',
+            'account_email', 'access_token', 'refresh_token',
+            'access_expires_at', 'google_desktop_client_id',
+            'crypto_device_id', 'crypto_encryption_private_key',
+            'crypto_signing_private_key',
+        )
+        for client in self._all_cvm_clients():
+            if client is source:
+                continue
+            for attribute in attributes:
+                value = getattr(source, attribute, None)
+                if attribute == 'cvm_endpoints':
+                    value = dict(value or {})
+                setattr(client, attribute, value)
+
+    def _prepare_backend_session(self):
+        """Refresh the account token and copy it to the upload client."""
+        success, message = self.cvm_client.ensure_account_session()
+        if success:
+            self._propagate_client_state()
+        return success, message
     
     def create_cvm_menu_items(self, menu):
         """Add CVM configuration menu items
@@ -63,34 +100,182 @@ class CVMManager:
         return cvm_menu
 
     def show_account_dialog(self):
+        """Open the account UI and report construction errors inside the window."""
+        try:
+            return self._show_account_dialog()
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            win = getattr(self, "_account_window", None)
+            if win is None or not win.winfo_exists():
+                win = tk.Toplevel(self.parent_app.root)
+                win.title("TODO Account")
+                fit_window(win, 560, 300, min_width=360, min_height=240)
+            for child in win.winfo_children():
+                child.destroy()
+            ttk.Label(
+                win,
+                text="The account window could not be loaded.",
+                font=("Arial", 11, "bold"),
+            ).pack(padx=20, pady=(24, 10))
+            ttk.Label(win, text=str(exc), wraplength=500).pack(padx=20, pady=10)
+            ttk.Button(win, text="Close", command=win.destroy).pack(pady=16)
+            return None
+
+    def _show_account_dialog(self):
         """Sign in to the same account used by the web UI."""
         win = tk.Toplevel(self.parent_app.root)
+        self._account_window = win
         win.title("TODO Account")
-        win.geometry("440x300")
         win.transient(self.parent_app.root)
-        ttk.Label(win, text="Sign in to sync this desktop app with the web app", font=("Arial", 11, "bold")).pack(pady=(16, 10))
-        status = tk.StringVar(value=(f"Signed in as {self.cvm_client.account_email}" if self.cvm_client.account_email else "Not signed in"))
-        ttk.Label(win, textvariable=status, wraplength=390).pack(padx=20, pady=(0, 10))
-        form = ttk.Frame(win); form.pack(fill=tk.X, padx=24)
-        email = tk.StringVar(value=self.cvm_client.account_email)
-        password = tk.StringVar()
+        fit_window(win, 560, 460, min_width=360, min_height=300)
+        content = win
+
+        # A manager can survive a modular hot reload while holding a client
+        # created by an older release. Seed newly-added session fields so the
+        # dialog remains compatible until the next full restart.
+        client_defaults = {
+            "account_email": "",
+            "access_token": "",
+            "refresh_token": "",
+            "access_expires_at": 0,
+            "google_desktop_client_id": "",
+        }
+        for attribute, default in client_defaults.items():
+            if not hasattr(self.cvm_client, attribute):
+                setattr(self.cvm_client, attribute, default)
+
+        ttk.Label(content, text="Sign in to sync this desktop app with the web app", font=("Arial", 11, "bold")).pack(pady=(16, 10))
+        account_email = getattr(self.cvm_client, "account_email", "")
+        status = tk.StringVar(master=win, value=(f"Signed in as {account_email}" if account_email else "Not signed in"))
+        ttk.Label(content, textvariable=status, wraplength=460).pack(padx=20, pady=(0, 10))
+
+        footer = ttk.Frame(content)
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=24, pady=(8, 16))
+
+        def sign_out():
+            self.cvm_client.account_logout()
+            self._propagate_client_state()
+            status.set("Not signed in")
+
+        ttk.Button(
+            footer,
+            text="Sign Out",
+            command=sign_out,
+        ).pack(side=tk.LEFT)
+        ttk.Button(footer, text="Close", command=win.destroy).pack(side=tk.RIGHT)
+
+        account_tabs = ttk.Notebook(content)
+        account_tabs.pack(fill=tk.BOTH, expand=True, padx=24, pady=(0, 8))
+        email_tab = ttk.Frame(account_tabs, padding=14)
+        google_tab = ttk.Frame(account_tabs, padding=14)
+        verify_tab = ttk.Frame(account_tabs, padding=14)
+        account_tabs.add(email_tab, text="Email")
+        account_tabs.add(google_tab, text="Google")
+        account_tabs.add(verify_tab, text="Verify Email")
+
+        form = ttk.Frame(email_tab)
+        form.pack(fill=tk.BOTH, expand=True)
+        email = tk.StringVar(master=win, value=self.cvm_client.account_email)
+        password = tk.StringVar(master=win)
         ttk.Label(form, text="Email").pack(anchor=tk.W); ttk.Entry(form, textvariable=email, width=48).pack(fill=tk.X, pady=(0, 8))
         ttk.Label(form, text="Password").pack(anchor=tk.W); ttk.Entry(form, textvariable=password, show="•", width=48).pack(fill=tk.X, pady=(0, 10))
-        actions = ttk.Frame(win); actions.pack(pady=4)
+        actions = ttk.Frame(form); actions.pack(fill=tk.X, pady=4)
+
+        auth_buttons = []
+
+        def set_busy(busy, message=""):
+            for button in auth_buttons:
+                button.config(state=tk.DISABLED if busy else tk.NORMAL)
+            if message:
+                status.set(message)
+
+        def finish_auth(ok, msg):
+            set_busy(False)
+            if ok is True:
+                self._propagate_client_state()
+                status.set(f"Signed in as {msg}")
+            elif ok is None:
+                status.set(f"Verification required: {msg}")
+            else:
+                status.set(f"Error: {msg}")
+
+        def run_auth(operation, waiting_message):
+            set_busy(True, waiting_message)
+
+            def worker():
+                try:
+                    result = operation()
+                except Exception as exc:
+                    result = (False, str(exc))
+
+                def deliver_result():
+                    if win.winfo_exists():
+                        finish_auth(*result)
+
+                self.parent_app.root.after(0, deliver_result)
+
+            threading.Thread(target=worker, daemon=True).start()
+
         def sign_in(register=False):
-            ok, msg = self.cvm_client.account_login(email.get(), password.get(), '' if register else None)
-            status.set(("Signed in as " if ok else "Error: ") + msg)
-        ttk.Button(actions, text="Sign In", command=sign_in).pack(side=tk.LEFT, padx=4)
-        ttk.Button(actions, text="Create Account", command=lambda: sign_in(True)).pack(side=tk.LEFT, padx=4)
-        verification_code = tk.StringVar()
-        ttk.Label(win, text="After creating an account, enter the six-digit email code").pack(anchor=tk.W, padx=24, pady=(12, 0))
-        ttk.Entry(win, textvariable=verification_code, width=20).pack(anchor=tk.W, padx=24)
+            entered_email = email.get()
+            entered_password = password.get()
+            run_auth(
+                lambda: self.cvm_client.account_login(
+                    entered_email, entered_password, '' if register else None
+                ),
+                "Creating account..." if register else "Signing in...",
+            )
+
+        sign_in_button = ttk.Button(actions, text="Sign In", command=sign_in)
+        sign_in_button.pack(side=tk.LEFT, padx=4)
+        create_button = ttk.Button(actions, text="Create Account", command=lambda: sign_in(True))
+        create_button.pack(side=tk.LEFT, padx=4)
+        auth_buttons.extend((sign_in_button, create_button))
+
+        google_frame = ttk.Frame(google_tab)
+        google_frame.pack(fill=tk.BOTH, expand=True)
+        google_client_id = tk.StringVar(master=win, value=getattr(self.cvm_client, "google_desktop_client_id", ""))
+        ttk.Label(google_frame, text="Desktop OAuth client ID").pack(anchor=tk.W)
+        ttk.Entry(google_frame, textvariable=google_client_id).pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(
+            google_frame,
+            text="The same Desktop client ID must be allowed by the backend.",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        def google_sign_in():
+            client_id = google_client_id.get().strip()
+            self.cvm_client.google_desktop_client_id = client_id
+            self.cvm_client.save_cvm_config()
+            run_auth(
+                lambda: self.cvm_client.google_desktop_login(client_id),
+                "Waiting for Google sign-in in your browser...",
+            )
+
+        google_button = ttk.Button(google_frame, text="Sign in with Google", command=google_sign_in)
+        google_button.pack(anchor=tk.W)
+        auth_buttons.append(google_button)
+
+        verification_code = tk.StringVar(master=win)
+        verify_frame = ttk.Frame(verify_tab)
+        verify_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(verify_frame, text="After creating an account, enter the six-digit email code").pack(anchor=tk.W)
+        ttk.Entry(verify_frame, textvariable=verification_code, width=20).pack(anchor=tk.W, pady=4)
+
         def verify():
-            ok, msg = self.cvm_client.account_verify_email(email.get(), verification_code.get())
-            status.set(("Signed in as " if ok else "Error: ") + msg)
-        ttk.Button(win, text="Verify Email", command=verify).pack(pady=8)
-        ttk.Button(win, text="Sign Out", command=lambda: (self.cvm_client.account_logout(), status.set("Not signed in"))).pack()
-    
+            entered_email = email.get()
+            entered_code = verification_code.get()
+            run_auth(
+                lambda: self.cvm_client.account_verify_email(entered_email, entered_code),
+                "Verifying email...",
+            )
+
+        verify_button = ttk.Button(verify_frame, text="Verify Email", command=verify)
+        verify_button.pack(anchor=tk.W, pady=(4, 0))
+        auth_buttons.append(verify_button)
+
+
     def open_endpoint_config(self):
         """Open endpoint configuration dialog"""
         if self.parent_app.check_existing_dialog():
@@ -98,18 +283,27 @@ class CVMManager:
         
         config_window = tk.Toplevel(self.parent_app.root)
         config_window.title("Phala CVM Endpoint Configuration")
-        config_window.geometry("600x400")
+        fit_window(config_window, 680, 700, min_width=420, min_height=320)
+
+        button_frame = ttk.Frame(config_window)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        ttk.Button(button_frame, text="Save", command=self.save_endpoints).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=config_window.destroy).pack(side=tk.RIGHT, padx=5)
+
+        scroller = ScrollableFrame(config_window)
+        scroller.pack(fill=tk.BOTH, expand=True)
+        content = scroller.content
         
         # Instructions
         instructions = ttk.Label(
-            config_window,
+            content,
             text="Configure your Phala CVM endpoints below.\nEach service can have a different endpoint.",
             wraplength=500
         )
         instructions.pack(pady=10, padx=10)
         
         # Endpoints frame
-        endpoints_frame = ttk.LabelFrame(config_window, text="Endpoints", padding=10)
+        endpoints_frame = ttk.LabelFrame(content, text="Endpoints", padding=10)
         endpoints_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Create entry fields for each endpoint
@@ -170,13 +364,6 @@ class CVMManager:
 
         endpoints_frame.columnconfigure(1, weight=1)
         
-        # Buttons
-        button_frame = ttk.Frame(config_window)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        ttk.Button(button_frame, text="Save", command=self.save_endpoints).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Cancel", command=config_window.destroy).pack(side=tk.RIGHT, padx=5)
-    
     def test_endpoint(self, service_type):
         """Test a single endpoint"""
         endpoint = self.endpoint_entries[service_type].get()
@@ -195,14 +382,12 @@ class CVMManager:
         """Save configured endpoints, API key and encryption key"""
         for service_type, entry in self.endpoint_entries.items():
             endpoint_url = entry.get().strip()
-            if endpoint_url:
-                self.cvm_client.cvm_endpoints[service_type] = endpoint_url
+            self.cvm_client.cvm_endpoints[service_type] = endpoint_url.rstrip('/')
 
         # Propagate API key and encryption key to all clients
         api_key = self._api_key_entry.get().strip()
         enc_key = self._enc_key_entry.get().strip()
-        for client in (self.cvm_client, self.backend_client,
-                       self.ai_client, self.sync_client, self.scheduler_client):
+        for client in self._all_cvm_clients():
             client.api_key        = api_key
             client.encryption_key = enc_key
             client.cvm_endpoints  = self.cvm_client.cvm_endpoints
@@ -234,7 +419,7 @@ class CVMManager:
         """Display connection test results"""
         result_window = tk.Toplevel(self.parent_app.root)
         result_window.title("CVM Connection Test Results")
-        result_window.geometry("500x300")
+        fit_window(result_window, 500, 300)
         
         # Results display
         text_widget = tk.Text(result_window, wrap=tk.WORD, height=15, width=60)
@@ -254,7 +439,7 @@ class CVMManager:
         """Configure backend storage options"""
         config_window = tk.Toplevel(self.parent_app.root)
         config_window.title("CVM Backend Configuration")
-        config_window.geometry("500x300")
+        fit_window(config_window, 500, 300)
         
         # Options
         ttk.Label(config_window, text="Confidential Backend Storage Options", font=("Arial", 11, "bold")).pack(pady=10)
@@ -262,7 +447,7 @@ class CVMManager:
         options_frame = ttk.LabelFrame(config_window, text="Settings", padding=10)
         options_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        auto_sync = tk.BooleanVar()
+        auto_sync = tk.BooleanVar(master=config_window)
         ttk.Checkbutton(
             options_frame,
             text="Auto-sync tasks with CVM backend",
@@ -277,7 +462,7 @@ class CVMManager:
         ttk.Checkbutton(
             options_frame,
             text="Use end-to-end encryption",
-            variable=tk.BooleanVar(value=True)
+            variable=tk.BooleanVar(master=config_window, value=True)
         ).pack(anchor='w', pady=5)
         
         # Buttons
@@ -290,7 +475,7 @@ class CVMManager:
         """Configure AI inference settings"""
         config_window = tk.Toplevel(self.parent_app.root)
         config_window.title("CVM AI Inference Configuration")
-        config_window.geometry("500x300")
+        fit_window(config_window, 500, 300)
         
         ttk.Label(config_window, text="Confidential AI Inference Options", font=("Arial", 11, "bold")).pack(pady=10)
         
@@ -298,13 +483,13 @@ class CVMManager:
         options_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         ttk.Label(options_frame, text="Default model:").pack(anchor='w')
-        model_var = tk.StringVar(value="default")
+        model_var = tk.StringVar(master=config_window, value="default")
         ttk.Entry(options_frame, textvariable=model_var).pack(anchor='w', fill=tk.X, padx=20, pady=5)
         
         ttk.Checkbutton(
             options_frame,
             text="Use CVM for heavy computation (fallback to Ollama for quick tasks)",
-            variable=tk.BooleanVar(value=False)
+            variable=tk.BooleanVar(master=config_window, value=False)
         ).pack(anchor='w', pady=5)
         
         ttk.Label(options_frame, text="This keeps your queries confidential on Phala").pack(anchor='w', padx=20, font=("Arial", 9, "italic"))
@@ -317,7 +502,7 @@ class CVMManager:
         """Configure task sync settings"""
         config_window = tk.Toplevel(self.parent_app.root)
         config_window.title("CVM Task Sync Configuration")
-        config_window.geometry("500x350")
+        fit_window(config_window, 500, 350)
         
         ttk.Label(config_window, text="Decentralized Task Sync & Sharing", font=("Arial", 11, "bold")).pack(pady=10)
         
@@ -335,7 +520,7 @@ class CVMManager:
         ttk.Checkbutton(
             options_frame,
             text="Encrypt shared tasks",
-            variable=tk.BooleanVar(value=True)
+            variable=tk.BooleanVar(master=config_window, value=True)
         ).pack(anchor='w', pady=5)
         
         button_frame = ttk.Frame(config_window)
@@ -346,7 +531,7 @@ class CVMManager:
         """Configure scheduled automation settings"""
         config_window = tk.Toplevel(self.parent_app.root)
         config_window.title("CVM Scheduler Configuration")
-        config_window.geometry("550x400")
+        fit_window(config_window, 550, 400)
         
         ttk.Label(config_window, text="Scheduled Task Automation on CVM", font=("Arial", 11, "bold")).pack(pady=10)
         
@@ -364,7 +549,7 @@ class CVMManager:
             frame = ttk.Frame(options_frame)
             frame.pack(fill=tk.X, pady=5)
             
-            var = tk.BooleanVar()
+            var = tk.BooleanVar(master=config_window)
             ttk.Checkbutton(frame, text=automation, variable=var).pack(side=tk.LEFT)
             ttk.Label(frame, text=schedule, font=("Arial", 9, "italic")).pack(side=tk.RIGHT, padx=20)
         
@@ -376,7 +561,7 @@ class CVMManager:
         """Display overall CVM status"""
         status_window = tk.Toplevel(self.parent_app.root)
         status_window.title("Phala CVM Status")
-        status_window.geometry("600x400")
+        fit_window(status_window, 600, 400)
         
         # Status display
         text_widget = tk.Text(status_window, wrap=tk.WORD, height=20, width=70)
@@ -414,8 +599,7 @@ class CVMManager:
 
         win = tk.Toplevel(self.parent_app.root)
         win.title("CVM User ID")
-        win.geometry("520x260")
-        win.resizable(False, False)
+        fit_window(win, 520, 300, min_width=360, min_height=220)
 
         current_id = self._get_user_id()
         import socket, hashlib
@@ -670,6 +854,56 @@ class CVMManager:
         except Exception as e:
             print(f"Pending device approval check failed: {e}")
 
+    def _offer_encryption_recovery(self, error_message, tasks):
+        """Offer recovery when the account's active private key is unavailable."""
+        if "waiting for approval" not in str(error_message).lower():
+            messagebox.showerror("Push Failed", str(error_message), parent=self.parent_app.root)
+            return
+
+        recover = messagebox.askyesno(
+            "Encryption Device Approval Required",
+            "This computer is waiting for an older trusted device to approve it.\n\n"
+            "If that device is no longer available, reset encryption-device access and "
+            "make this computer the new trusted device?\n\n"
+            "WARNING: Existing encrypted CVM tasks will no longer be decryptable. "
+            "They will be replaced with the current local task list.",
+            parent=self.parent_app.root,
+        )
+        if not recover:
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm Encryption Reset",
+            f"Reset all registered encryption devices and upload these {len(tasks)} local task(s)?",
+            parent=self.parent_app.root,
+        )
+        if not confirm:
+            return
+
+        user_id = self._get_user_id()
+
+        def recover_and_push():
+            success, message = self.backend_client.reset_encryption_devices()
+            if success:
+                success, message = self.backend_client.replace_tasks(user_id, tasks)
+
+            def finish():
+                if success:
+                    self._propagate_client_state()
+                    messagebox.showinfo(
+                        "Recovery Successful",
+                        f"This computer is now trusted and {len(tasks)} task(s) were uploaded.",
+                        parent=self.parent_app.root,
+                    )
+                else:
+                    messagebox.showerror(
+                        "Recovery Failed", str(message), parent=self.parent_app.root
+                    )
+
+            self.parent_app.root.after(0, finish)
+
+        threading.Thread(target=recover_and_push, daemon=True).start()
+
     # ------------------------------------------------------------------
     # Push / Pull / Sync actions (called from menu)
     # ------------------------------------------------------------------
@@ -705,6 +939,15 @@ class CVMManager:
         user_id = self._get_user_id()
 
         def do_replace():
+            authenticated, auth_message = self._prepare_backend_session()
+            if not authenticated:
+                self.parent_app.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Force Push Failed", auth_message, parent=self.parent_app.root
+                    ),
+                )
+                return
             success, msg = self.backend_client.replace_tasks(user_id, tasks)
             if success:
                 self._approve_pending_devices_best_effort(user_id)
@@ -754,6 +997,15 @@ class CVMManager:
         user_id = self._get_user_id()
 
         def do_push():
+            authenticated, auth_message = self._prepare_backend_session()
+            if not authenticated:
+                self.parent_app.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Push Failed", auth_message, parent=self.parent_app.root
+                    ),
+                )
+                return
             success, msg = self.backend_client.replace_tasks(user_id, tasks)
             if success:
                 self._approve_pending_devices_best_effort(user_id)
@@ -765,7 +1017,7 @@ class CVMManager:
                         parent=self.parent_app.root
                     )
                 else:
-                    messagebox.showerror("Push Failed", msg, parent=self.parent_app.root)
+                    self._offer_encryption_recovery(msg, tasks)
             self.parent_app.root.after(0, finish)
 
         threading.Thread(target=do_push, daemon=True).start()
@@ -791,6 +1043,15 @@ class CVMManager:
         user_id = self._get_user_id()
 
         def do_pull():
+            authenticated, auth_message = self._prepare_backend_session()
+            if not authenticated:
+                self.parent_app.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Pull Failed", auth_message, parent=self.parent_app.root
+                    ),
+                )
+                return
             success, data = self.backend_client.retrieve_tasks(user_id)
             def finish():
                 if success:
@@ -821,6 +1082,15 @@ class CVMManager:
         user_id = self._get_user_id()
 
         def do_sync():
+            authenticated, auth_message = self._prepare_backend_session()
+            if not authenticated:
+                self.parent_app.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Sync Failed", auth_message, parent=self.parent_app.root
+                    ),
+                )
+                return
             success, data = self.backend_client.sync_tasks(user_id, local_tasks)
             if success:
                 self._approve_pending_devices_best_effort(user_id)

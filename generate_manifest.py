@@ -31,6 +31,7 @@ class ManifestGenerator:
             "todo_list_manager.py": {"type": "module", "required": True},
             "cvm_client.py": {"type": "module", "required": True},
             "cvm_manager.py": {"type": "module", "required": True},
+            "ui_utils.py": {"type": "module", "required": True},
             
             # System files
             "modular_updater.py": {"type": "system", "required": False},
@@ -179,6 +180,7 @@ class ManifestGenerator:
                 "todo_list_manager.py",
                 "cvm_client.py",
                 "cvm_manager.py",
+                "ui_utils.py",
                 "modular_updater.py",
             ]
             

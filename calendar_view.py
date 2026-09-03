@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 import calendar
+from ui_utils import fit_window
 
 
 class CalendarView:
@@ -396,8 +397,7 @@ class CalendarView:
             # Create dialog
             dialog = tk.Toplevel(self.parent_app.root)
             dialog.title(f"Tasks for {display_date}")
-            dialog.geometry("500x450")
-            dialog.resizable(True, True)
+            fit_window(dialog, 500, 450)
             
             # Register this dialog globally
             if hasattr(self.parent_app, 'register_dialog'):
@@ -517,8 +517,7 @@ class CalendarView:
             # Create details dialog
             details_dialog = tk.Toplevel(self.parent_app.root)
             details_dialog.title(f"Task Details: {task_name}")
-            details_dialog.geometry("450x420")
-            details_dialog.resizable(True, True)
+            fit_window(details_dialog, 450, 420)
             
             # Register this dialog globally
             if hasattr(self.parent_app, 'register_dialog'):
