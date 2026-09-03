@@ -105,10 +105,18 @@ services:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}       # [SECURE]
       OPENCLAW_TZ: ${OPENCLAW_TZ:-America/New_York}
       OPENCLAW_DISABLE_BONJOUR: "1"
+      OPENCLAW_GATEWAY_MODE: ${OPENCLAW_GATEWAY_MODE:-local}
+      OPENCLAW_PUBLIC_ORIGIN: ${OPENCLAW_PUBLIC_ORIGIN:-}
+      OPENCLAW_ALLOWED_ORIGINS: ${OPENCLAW_ALLOWED_ORIGINS:-https://cloud.phala.com,http://localhost:18789}
       TODO_MEETING_WEBHOOK_URL: http://backend:5000/integrations/openclaw/meetings
       TODO_MEETING_WEBHOOK_SECRET: ${OPENCLAW_WEBHOOK_SECRET} # [SECURE]
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}                     # Optional model provider
-    command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+    command:
+      - sh
+      - -lc
+      - |
+        node -e "const fs=require('fs'); const path='/home/node/.openclaw/openclaw.json'; let cfg={}; try{cfg=JSON.parse(fs.readFileSync(path,'utf8'));}catch{} const fromList=(process.env.OPENCLAW_ALLOWED_ORIGINS||'').split(',').map(s=>s.trim()).filter(Boolean); const pub=(process.env.OPENCLAW_PUBLIC_ORIGIN||'').trim(); const allowed=[...new Set([...fromList, ...(pub?[pub]:[])])]; cfg.gateway=cfg.gateway||{}; cfg.gateway.mode=(process.env.OPENCLAW_GATEWAY_MODE||'local').trim()||'local'; cfg.gateway.controlUi=cfg.gateway.controlUi||{}; cfg.gateway.controlUi.allowedOrigins=allowed; fs.mkdirSync('/home/node/.openclaw',{recursive:true}); fs.writeFileSync(path, JSON.stringify(cfg,null,2));"
+        exec node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
     init: true
     cap_drop:
       - NET_RAW
@@ -240,6 +248,7 @@ services:
       AI_URL:        http://ai_inference:5001
       SYNC_URL:      http://task_sync:5002
       SCHEDULER_URL: http://scheduler:5003
+      OPENCLAW_URL:  http://openclaw:18789
       API_KEY:       ${API_KEY}             # [SECURE] – Phala dashboard (same key as other services)
       SECRET_KEY:    ${WEB_SECRET_KEY}      # [SECURE] – Flask session signing key
       WEB_USER_ID:   ${WEB_USER_ID:-}       # Optional: set to match your desktop user ID

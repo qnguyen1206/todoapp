@@ -122,6 +122,7 @@ async function api(method, path, body, timeoutMs = 20000) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const opts = { method, headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal };
+    if (method.toUpperCase() === 'GET') opts.cache = 'no-store';
     if (body !== undefined) opts.body = JSON.stringify(body);
     const r = await fetch(path, opts);
     const text = await r.text();
@@ -615,25 +616,46 @@ async function loadDaily() {
     list.innerHTML = '<div class="empty-msg">No daily task schedules yet.</div>';
     return;
   }
-  const header = '<div class="daily-item daily-header"><span></span><span>Days</span><span>Time</span><span>Task</span><span>Status</span><span>Actions</span></div>';
+  const header = '<div class="daily-item daily-header"><span></span><span>Repeats</span><span>Time</span><span>Task</span><span>Status</span><span>Actions</span></div>';
   list.innerHTML = header + tasks.map(t => {
     const safeId = encodeURIComponent(String(t.id ?? ''));
     const status = dailyTaskStatus(t);
     const time = t.end_time ? `${fmtTime(t.start_time)} - ${fmtTime(t.end_time)}` : fmtTime(t.start_time);
+    const recurrence = formatDailyRecurrence(t.days || []);
     return `
     <div class="daily-item ${t.done ? 'done' : ''} ${status.className}">
       <input type="checkbox" class="daily-check" ${t.done ? 'checked' : ''}
              onchange="toggleDaily('${safeId}')"/>
-      <span class="daily-days">${escHtml((t.days || []).join(','))}</span>
+      <span class="daily-days" title="${escHtml(recurrence)}">${escHtml(recurrence)}</span>
       <span class="daily-time">${escHtml(time)}</span>
       <span class="daily-title">${escHtml(t.title)}</span>
       <span class="daily-status">${escHtml(status.label)}</span>
       <span class="daily-actions">
+        ${t.notes ? `<button class="btn btn-sm" onclick="openDailyNotes('${safeId}')">Notes</button>` : ''}
         ${t.source === 'remote' ? `<button class="btn btn-sm" onclick="openDailyModal('${safeId}')">Edit</button>` : ''}
         <button class="btn btn-sm btn-danger" onclick="deleteDaily('${safeId}')">Delete</button>
       </span>
     </div>`;
   }).join('');
+}
+
+function formatDailyRecurrence(days) {
+  const order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const fullNames = {Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday',
+                     Fri: 'Friday', Sat: 'Saturday', Sun: 'Sunday'};
+  const selected = order.filter(day => days.includes(day));
+  const key = selected.join(',');
+  if (selected.length === 7) return 'Every day';
+  if (key === 'Mon,Tue,Wed,Thu,Fri') return 'Every weekday';
+  if (key === 'Sat,Sun') return 'Every weekend';
+  if (selected.length === 1) return `Every ${fullNames[selected[0]]}`;
+  if (selected.length === 6) {
+    const missing = order.find(day => !selected.includes(day));
+    return `Every day except ${fullNames[missing]}`;
+  }
+  if (!selected.length) return 'No days selected';
+  const names = selected.map(day => selected.length <= 2 ? fullNames[day] : day);
+  return `Every ${names.length === 2 ? names.join(' & ') : `${names.slice(0, -1).join(', ')} & ${names.at(-1)}`}`;
 }
 
 function dailyTaskStatus(task) {
@@ -662,6 +684,17 @@ function configureDailyTimeInputs() {
   document.getElementById('daily-end').placeholder = use24Hour ? '10:00' : '10:00 AM';
 }
 
+function configureDailyReminderInputs() {
+  document.getElementById('daily-reminder-email').disabled = !document.getElementById('daily-reminder-email-enabled').checked;
+  document.getElementById('daily-reminder-phone').disabled = !document.getElementById('daily-reminder-sms-enabled').checked;
+}
+
+function openDailyNotes(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  const task = (window.currentDailyTasks || []).find(item => String(item.id) === id);
+  if (task) showNotes(id, task.title, task.notes || 'No notes');
+}
+
 function openDailyModal(encodedId = '') {
   const id = encodedId ? decodeURIComponent(encodedId) : '';
   const task = id ? (window.currentDailyTasks || []).find(item => String(item.id) === id) : null;
@@ -670,9 +703,16 @@ function openDailyModal(encodedId = '') {
   document.getElementById('daily-title').value = task?.title || '';
   document.getElementById('daily-start').value = timeForTaskInput(task?.start_time || '09:00');
   document.getElementById('daily-end').value = task?.end_time ? timeForTaskInput(task.end_time) : '';
+  document.getElementById('daily-notes').value = task?.notes || '';
+  document.getElementById('daily-reminder-email-enabled').checked = Boolean(task?.reminder_email_enabled);
+  document.getElementById('daily-reminder-email').value = task?.reminder_email || '';
+  document.getElementById('daily-reminder-sms-enabled').checked = Boolean(task?.reminder_sms_enabled);
+  document.getElementById('daily-reminder-phone').value = task?.reminder_phone || '';
+  document.getElementById('daily-reminder-minutes').value = String(task?.reminder_minutes_before ?? 15);
   document.querySelectorAll('input[name="daily-day"]').forEach(box => { box.checked = task ? task.days.includes(box.value) : true; });
   document.getElementById('daily-form-error').style.display = 'none';
   configureDailyTimeInputs();
+  configureDailyReminderInputs();
   document.getElementById('daily-modal').style.display = 'flex';
   document.getElementById('daily-title').focus();
 }
@@ -686,16 +726,26 @@ async function saveDailyTask() {
   const start_time = normalizeDueTime(document.getElementById('daily-start').value);
   const endInput = document.getElementById('daily-end').value.trim();
   const end_time = endInput ? normalizeDueTime(endInput) : '';
+  const notes = document.getElementById('daily-notes').value.trim();
+  const emailEnabled = document.getElementById('daily-reminder-email-enabled').checked;
+  const smsEnabled = document.getElementById('daily-reminder-sms-enabled').checked;
+  const reminderEmail = document.getElementById('daily-reminder-email').value.trim();
+  const reminderPhone = document.getElementById('daily-reminder-phone').value.trim();
+  const reminder = {email_enabled: emailEnabled, email: reminderEmail, sms_enabled: smsEnabled,
+    phone: reminderPhone, minutes_before: Number(document.getElementById('daily-reminder-minutes').value),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'};
   const error = document.getElementById('daily-form-error');
   let message = '';
   if (!title) message = 'Task name is required.';
   else if (!days.length) message = 'Select at least one day.';
   else if (!start_time) message = 'Enter a valid start time.';
   else if (endInput && !end_time) message = 'Enter a valid end time or leave it blank.';
+  else if (emailEnabled && !document.getElementById('daily-reminder-email').checkValidity()) message = 'Enter a valid reminder email address.';
+  else if (smsEnabled && !/^\+[1-9]\d{7,14}$/.test(reminderPhone.replace(/[\s().-]/g, ''))) message = 'Enter the phone number in international format, such as +15551234567.';
   if (message) { error.textContent = message; error.style.display = 'block'; return; }
   try {
     const result = await api(id ? 'PUT' : 'POST', id ? `/api/daily/${encodeURIComponent(id)}` : '/api/daily',
-      {title, days, start_time, end_time});
+      {title, days, start_time, end_time, notes, reminder});
     if (result.status !== 'success') throw new Error(result.message || 'Could not save daily task.');
     closeDailyModal();
     loadDaily();
@@ -930,9 +980,10 @@ async function sendAI() {
       const localNow = new Date();
       const localDay = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][localNow.getDay()];
       const localDate = `${localNow.getFullYear()}-${String(localNow.getMonth()+1).padStart(2,'0')}-${String(localNow.getDate()).padStart(2,'0')}`;
+      const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       const d = await api('POST', '/api/ai/chat/tools', {
         prompt, model: selectedModel, zdr: zdrEnabled, history: historyForRequest,
-        local_date: localDate, local_day: localDay,
+        local_date: localDate, local_day: localDay, local_timezone: localTimezone,
       }, 120000);
       thinking.remove();
       if (d.status === 'success') {
@@ -1207,7 +1258,7 @@ function calNext() { calMonth++; if (calMonth > 12) { calMonth = 1;  calYear++; 
 /* ══════════════════════════════════════════════════════════════════
    WEEKLY
 ══════════════════════════════════════════════════════════════════ */
-async function loadWeekly() {
+async function loadWeekly(scrollToCurrentTime = true) {
   const now = new Date();
   const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
   const data = await api('GET', `/api/weekly?date=${localDate}`);
@@ -1298,7 +1349,7 @@ async function loadWeekly() {
 
   const currentSlot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
   const currentCell = grid.querySelector(`.weekly-time-label[data-slot="${currentSlot}"]`);
-  if (currentCell) currentCell.scrollIntoView({block: 'center'});
+  if (scrollToCurrentTime && currentCell) currentCell.scrollIntoView({block: 'center'});
 }
 
 function refreshWeeklyTimeMarker() {
@@ -1427,5 +1478,9 @@ checkMeetingProposals();
 setInterval(checkMeetingProposals, 30000);
 setInterval(() => {
   if (document.getElementById('tab-daily').classList.contains('active')) loadDaily();
+}, 60000);
+setInterval(() => {
+  if (document.getElementById('tab-calendar').classList.contains('active')) renderCalendar();
+  if (document.getElementById('tab-weekly').classList.contains('active')) loadWeekly(false);
 }, 60000);
 setInterval(refreshWeeklyTimeMarker, 60000);

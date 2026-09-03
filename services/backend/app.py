@@ -621,6 +621,8 @@ def init_db():
                     phone_number   TEXT,
                     minutes_before INTEGER NOT NULL DEFAULT 15 CHECK (minutes_before BETWEEN 0 AND 10080),
                     timezone_name  TEXT NOT NULL DEFAULT 'UTC',
+                    recurring_days TEXT[],
+                    recurring_time TEXT,
                     updated_at     TIMESTAMPTZ DEFAULT NOW(),
                     PRIMARY KEY (user_id, task_id)
                 );
@@ -659,6 +661,8 @@ def init_db():
                 UPDATE users SET email_verified = TRUE WHERE email_verified IS NULL;
                 ALTER TABLE users ALTER COLUMN email_verified SET DEFAULT FALSE;
                 ALTER TABLE users ALTER COLUMN email_verified SET NOT NULL;
+                ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_days TEXT[];
+                ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_time TEXT;
             """)
         conn.commit()
         log.info("Database initialised")
@@ -1169,6 +1173,8 @@ def save_task_reminder(task_id):
     phone = re.sub(r"[\s().-]", "", str(data.get("phone") or "").strip())
     timezone_name = str(data.get("timezone") or "UTC").strip()
     task_label = str(data.get("task_label") or "Task").strip()[:200] or "Task"
+    recurring_days = data.get("recurring_days") or []
+    recurring_time = str(data.get("recurring_time") or "").strip()
     try:
         minutes_before = int(data.get("minutes_before", 15))
     except (TypeError, ValueError):
@@ -1179,6 +1185,14 @@ def save_task_reminder(task_id):
         return jsonify({"status": "error", "message": "A valid reminder email is required"}), 400
     if sms_enabled and not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
         return jsonify({"status": "error", "message": "Phone number must use international format, such as +15551234567"}), 400
+    valid_days = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+    if recurring_days:
+        if not isinstance(recurring_days, list) or not recurring_days or any(day not in valid_days for day in recurring_days):
+            return jsonify({"status": "error", "message": "Invalid recurring reminder days"}), 400
+        try:
+            datetime.strptime(recurring_time, "%H:%M")
+        except ValueError:
+            return jsonify({"status": "error", "message": "Recurring reminders require an HH:MM start time"}), 400
     try:
         ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError:
@@ -1193,8 +1207,9 @@ def save_task_reminder(task_id):
             cur.execute("""
                 INSERT INTO task_reminders
                     (user_id, task_id, task_label, email_enabled, reminder_email,
-                     sms_enabled, phone_number, minutes_before, timezone_name, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                     sms_enabled, phone_number, minutes_before, timezone_name,
+                     recurring_days, recurring_time, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (user_id, task_id) DO UPDATE SET
                     task_label = EXCLUDED.task_label,
                     email_enabled = EXCLUDED.email_enabled,
@@ -1203,10 +1218,13 @@ def save_task_reminder(task_id):
                     phone_number = EXCLUDED.phone_number,
                     minutes_before = EXCLUDED.minutes_before,
                     timezone_name = EXCLUDED.timezone_name,
+                    recurring_days = EXCLUDED.recurring_days,
+                    recurring_time = EXCLUDED.recurring_time,
                     updated_at = NOW()
             """, (user_id, task_id, task_label, email_enabled,
                   reminder_email if email_enabled else None, sms_enabled,
-                  phone if sms_enabled else None, minutes_before, timezone_name))
+                  phone if sms_enabled else None, minutes_before, timezone_name,
+                  recurring_days or None, recurring_time or None))
         conn.commit()
         return jsonify({"status": "success"})
     except Exception as exc:

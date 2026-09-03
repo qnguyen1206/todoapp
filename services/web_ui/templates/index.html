@@ -287,6 +287,27 @@
         <div class="form-group"><label id="daily-start-label">Start Time *</label><input id="daily-start" class="input" type="text"/></div>
         <div class="form-group"><label id="daily-end-label">End Time (optional)</label><input id="daily-end" class="input" type="text"/></div>
       </div>
+      <div class="form-group"><label>Notes</label><textarea id="daily-notes" class="input" rows="3" placeholder="Optional notes…"></textarea></div>
+      <fieldset class="reminder-options">
+        <legend>Recurring reminder</legend>
+        <div class="form-group">
+          <label class="setting-row"><input id="daily-reminder-email-enabled" type="checkbox" onchange="configureDailyReminderInputs()"/> Email reminder</label>
+          <input id="daily-reminder-email" class="input" type="email" placeholder="recipient@example.com" disabled/>
+        </div>
+        <div class="form-group">
+          <label>Remind before each occurrence</label>
+          <select id="daily-reminder-minutes" class="input">
+            <option value="0">At start time</option><option value="5">5 minutes before</option>
+            <option value="15" selected>15 minutes before</option><option value="30">30 minutes before</option>
+            <option value="60">1 hour before</option><option value="1440">1 day before</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="setting-row"><input id="daily-reminder-sms-enabled" type="checkbox" onchange="configureDailyReminderInputs()"/> Text-message reminder</label>
+          <input id="daily-reminder-phone" class="input" type="tel" placeholder="+15551234567" disabled/>
+          <small class="help-text">SMS requires Twilio credentials on the scheduler.</small>
+        </div>
+      </fieldset>
       <div id="daily-form-error" class="login-error" style="display:none"></div>
       <div class="modal-actions"><button type="button" class="btn btn-primary" onclick="saveDailyTask()">Save</button><button type="button" class="btn" onclick="closeDailyModal()">Cancel</button></div>
     </div>

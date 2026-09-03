@@ -96,9 +96,13 @@ def init_db():
                     phone_number   TEXT,
                     minutes_before INTEGER NOT NULL DEFAULT 15,
                     timezone_name  TEXT NOT NULL DEFAULT 'UTC',
+                    recurring_days TEXT[],
+                    recurring_time TEXT,
                     updated_at     TIMESTAMPTZ DEFAULT NOW(),
                     PRIMARY KEY (user_id, task_id)
                 );
+                ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_days TEXT[];
+                ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_time TEXT;
 
                 CREATE TABLE IF NOT EXISTS reminder_deliveries (
                     user_id       TEXT NOT NULL,
@@ -192,11 +196,13 @@ def job_reminder(parameters=None):
             cur.execute("""
                 SELECT t.user_id, t.task_id, t.due_date, t.due_time,
                        r.task_label, r.email_enabled, r.reminder_email,
-                       r.sms_enabled, r.phone_number, r.minutes_before, r.timezone_name
+                       r.sms_enabled, r.phone_number, r.minutes_before, r.timezone_name,
+                       r.recurring_days, r.recurring_time
                 FROM tasks t
                 JOIN task_reminders r ON r.user_id = t.user_id AND r.task_id = t.task_id
-                WHERE t.completed = FALSE
-                  AND COALESCE(t.due_date, '') <> '' AND COALESCE(t.due_time, '') <> ''
+                WHERE (t.completed = FALSE OR cardinality(r.recurring_days) > 0)
+                  AND ((COALESCE(t.due_date, '') <> '' AND COALESCE(t.due_time, '') <> '')
+                       OR (cardinality(r.recurring_days) > 0 AND COALESCE(r.recurring_time, '') <> ''))
                   AND (r.email_enabled = TRUE OR r.sms_enabled = TRUE)
             """)
             reminders = cur.fetchall()
@@ -206,13 +212,33 @@ def job_reminder(parameters=None):
     for reminder in reminders:
         try:
             local_zone = ZoneInfo(reminder["timezone_name"] or "UTC")
-            due_local = datetime.strptime(
-                f'{reminder["due_date"]} {reminder["due_time"]}', "%m-%d-%Y %H:%M"
-            ).replace(tzinfo=local_zone)
-            due_utc = due_local.astimezone(timezone.utc)
-            send_at = due_utc - timedelta(minutes=int(reminder["minutes_before"] or 0))
-            if not send_at <= now_utc < send_at + timedelta(minutes=2):
-                continue
+            lead = timedelta(minutes=int(reminder["minutes_before"] or 0))
+            if reminder.get("recurring_days") and reminder.get("recurring_time"):
+                local_today = now_utc.astimezone(local_zone).date()
+                due_local = None
+                for offset in range(8):
+                    occurrence = local_today + timedelta(days=offset)
+                    if occurrence.strftime("%a") not in reminder["recurring_days"]:
+                        continue
+                    candidate = datetime.strptime(
+                        f'{occurrence.isoformat()} {reminder["recurring_time"]}', "%Y-%m-%d %H:%M"
+                    ).replace(tzinfo=local_zone)
+                    candidate_utc = candidate.astimezone(timezone.utc)
+                    send_at = candidate_utc - lead
+                    if send_at <= now_utc < send_at + timedelta(minutes=2):
+                        due_local = candidate
+                        due_utc = candidate_utc
+                        break
+                if due_local is None:
+                    continue
+            else:
+                due_local = datetime.strptime(
+                    f'{reminder["due_date"]} {reminder["due_time"]}', "%m-%d-%Y %H:%M"
+                ).replace(tzinfo=local_zone)
+                due_utc = due_local.astimezone(timezone.utc)
+                send_at = due_utc - lead
+                if not send_at <= now_utc < send_at + timedelta(minutes=2):
+                    continue
         except (ValueError, TypeError, ZoneInfoNotFoundError) as exc:
             log.warning("Invalid reminder schedule for task %s: %s", reminder["task_id"], exc)
             continue

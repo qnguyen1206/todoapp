@@ -472,13 +472,15 @@ header {
 .native-date-picker { position: absolute; right: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .weekday-picker { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; font-size: 13px; }
 .weekday-picker label { display: flex; align-items: center; gap: 5px; }
-.daily-item { display: grid; grid-template-columns: 28px 110px 150px minmax(160px, 1fr) 90px auto; gap: 12px; align-items: center; }
+.daily-item { display: grid; grid-template-columns: 28px minmax(190px, 220px) 160px minmax(180px, 1fr) 100px auto; gap: 12px; align-items: center; }
 .daily-item.done .daily-title { text-decoration: line-through; color: var(--muted); }
 .daily-item.overdue .daily-status { color: var(--danger); }
 .daily-item.in-progress .daily-status { color: var(--primary); }
 .daily-item.not-today { opacity: 0.65; }
 .daily-item.not-today .daily-status { color: var(--muted); }
-.daily-days, .daily-time, .daily-status { font-size: 12px; color: var(--muted); }
+.daily-days, .daily-time, .daily-status { min-width: 0; font-size: 12px; color: var(--muted); }
+.daily-days, .daily-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.daily-title { min-width: 0; overflow-wrap: anywhere; }
 .daily-actions { display: flex; gap: 5px; }
 .daily-header { background: transparent; border: 0; padding-block: 3px; font-weight: 600; color: var(--muted); font-size: 12px; }
 #daily-form-error { background: #fdecea; color: var(--danger); border: 1px solid #f5c6cb; border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
