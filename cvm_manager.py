@@ -891,7 +891,7 @@ class CVMManager:
         def recover_and_push():
             success, message = self.backend_client.reset_encryption_devices()
             if success:
-                success, message = self.backend_client.replace_tasks(user_id, tasks)
+                success, message = self.backend_client.force_replace_tasks(user_id, tasks)
 
             def finish():
                 if success:
@@ -954,7 +954,7 @@ class CVMManager:
                     ),
                 )
                 return
-            success, msg = self.backend_client.replace_tasks(user_id, tasks)
+            success, msg = self.backend_client.force_replace_tasks(user_id, tasks)
             if success:
                 self._approve_pending_devices_best_effort(user_id)
             def finish():

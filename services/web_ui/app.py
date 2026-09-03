@@ -1145,27 +1145,21 @@ def clear_tasks_only():
     try:
         user_id = current_user_id()
         r = _backend("GET", "/tasks/retrieve")
-        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
-
-        preserved_daily = []
-        for task in tasks:
-            if _decode_daily_payload(task.get("notes", "")):
-                kept = dict(task)
-                kept["id"] = str(kept.get("task_id") or kept.get("id") or "")
-                kept.pop("task_id", None)
-                preserved_daily.append(kept)
-
-        r2 = _backend(
-            "POST",
-            "/tasks/replace",
-            json={
-                "tasks": _encrypt_tasks(preserved_daily, user_id),
-            },
-            headers={**_headers(), "X-Confirm-Replace": "true"},
-        )
-        if r2.status_code == 200:
-            return jsonify({"status": "success", "kept_daily": len(preserved_daily)})
-        return jsonify({"status": "error", "message": r2.text}), r2.status_code
+        if r.status_code != 200:
+            return jsonify({"status": "error", "message": r.text}), r.status_code
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
+        regular_ids = [
+            str(task.get("task_id") or task.get("id") or "")
+            for task in tasks if not _decode_daily_payload(task.get("notes", ""))
+        ]
+        deleted = 0
+        for task_id in filter(None, regular_ids):
+            response = _backend("DELETE", f"/tasks/{task_id}")
+            if response.status_code != 200:
+                return jsonify({"status": "error", "message": response.text,
+                                "deleted_before_error": deleted}), response.status_code
+            deleted += 1
+        return jsonify({"status": "success", "deleted": deleted})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
@@ -1400,40 +1394,40 @@ def clear_daily_only():
     try:
         user_id = current_user_id()
         r = _backend("GET", "/tasks/retrieve")
-        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id) if r.status_code == 200 else []
+        if r.status_code != 200:
+            return jsonify({"status": "error", "message": r.text}), r.status_code
+        tasks = _decrypt_tasks(r.json().get("tasks", []), user_id)
 
         data = request.get_json(silent=True) or {}
         requested_day = data.get("day") or datetime.now().strftime("%a")
         requested_date = data.get("date") or date.today().isoformat()
-        preserved_regular = []
+        if requested_day not in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+            return jsonify({"status": "error", "message": "Invalid weekday"}), 400
+        daily_ids_to_delete = []
         for task in tasks:
             daily_payload = _decode_daily_payload(task.get("notes", ""))
             if daily_payload:
                 parsed = _parse_daily_raw(daily_payload.get("raw") or task.get("title"))
                 if requested_day in parsed["days"]:
+                    task_id = str(task.get("task_id") or task.get("id") or "")
+                    if task_id:
+                        daily_ids_to_delete.append(task_id)
                     continue
-            kept = dict(task)
-            kept["id"] = str(kept.get("task_id") or kept.get("id") or "")
-            kept.pop("task_id", None)
-            preserved_regular.append(kept)
 
-        r2 = _backend(
-            "POST",
-            "/tasks/replace",
-            json={
-                "tasks": _encrypt_tasks(preserved_regular, user_id),
-            },
-            headers={**_headers(), "X-Confirm-Replace": "true"},
-        )
-        if r2.status_code != 200:
-            return jsonify({"status": "error", "message": r2.text}), r2.status_code
+        deleted = 0
+        for task_id in daily_ids_to_delete:
+            response = _backend("DELETE", f"/tasks/{task_id}")
+            if response.status_code != 200:
+                return jsonify({"status": "error", "message": response.text,
+                                "deleted_before_error": deleted}), response.status_code
+            deleted += 1
 
         conn = get_db()
         conn.execute("DELETE FROM daily_tasks WHERE date=? AND user_id=?", (requested_date, user_id))
         conn.commit()
         conn.close()
 
-        return jsonify({"status": "success", "kept_regular": len(preserved_regular)})
+        return jsonify({"status": "success", "deleted_remote": deleted})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 

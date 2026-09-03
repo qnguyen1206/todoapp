@@ -592,7 +592,10 @@ class CVMBackendClient(CVMClient):
             payload = {
                 'user_id': user_id,
                 'tasks':   self._encrypt_tasks(user_id, tasks_data),
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                # Desktop snapshots have no reliable per-record modification time.
+                # Never overwrite an existing web/CVM record on an ID collision.
+                'conflict_policy': 'preserve_remote',
             }
             response = requests.post(
                 f"{endpoint}/tasks/store",
@@ -608,8 +611,8 @@ class CVMBackendClient(CVMClient):
         except Exception as e:
             return False, f"Error storing tasks: {str(e)}"
 
-    def replace_tasks(self, user_id, tasks_data):
-        """Force-overwrite: delete ALL remote tasks for user then insert tasks_data."""
+    def force_replace_tasks(self, user_id, tasks_data):
+        """Explicitly replace every remote task. Never use for ordinary push/sync."""
         endpoint = self.cvm_endpoints.get('backend')
         if not endpoint:
             return False, "Backend endpoint not configured"
@@ -618,7 +621,8 @@ class CVMBackendClient(CVMClient):
             payload = {
                 'user_id': user_id,
                 'tasks':   self._encrypt_tasks(user_id, tasks_data),
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'confirmation': 'FORCE REPLACE ALL TASKS',
             }
             response = requests.post(
                 f"{endpoint}/tasks/replace",
@@ -634,6 +638,10 @@ class CVMBackendClient(CVMClient):
                 return False, f"Replace failed: {response.text}"
         except Exception as e:
             return False, f"Error replacing tasks: {str(e)}"
+
+    def replace_tasks(self, user_id, tasks_data):
+        """Blocked compatibility shim; callers must explicitly choose force replacement."""
+        return False, "Unsafe replace blocked; use force_replace_tasks only after user confirmation"
 
     def retrieve_tasks(self, user_id):
         """Retrieve and decrypt tasks from CVM backend."""

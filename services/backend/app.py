@@ -1043,6 +1043,22 @@ def decide_meeting_proposal(proposal_id):
         conn.close()
 
 
+def _validate_task_batch(tasks):
+    if not isinstance(tasks, list):
+        return "tasks must be a list"
+    seen = set()
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            return f"task at index {index} must be an object"
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            return f"task at index {index} is missing an id"
+        if task_id in seen:
+            return f"duplicate task id in request: {task_id}"
+        seen.add(task_id)
+    return None
+
+
 @app.route("/tasks/store", methods=["POST"])
 @require_auth
 def store_tasks():
@@ -1054,6 +1070,10 @@ def store_tasks():
     data = request.get_json(silent=True) or {}
     user_id = g.user_id
     tasks = data.get("tasks", [])
+    preserve_remote = data.get("conflict_policy") == "preserve_remote"
+    batch_error = _validate_task_batch(tasks)
+    if batch_error:
+        return jsonify({"status": "error", "message": batch_error}), 400
 
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
@@ -1062,17 +1082,19 @@ def store_tasks():
     try:
         with conn.cursor() as cur:
             for task in tasks:
-                cur.execute("""
+                conflict_clause = (
+                    "ON CONFLICT (user_id, task_id) DO NOTHING"
+                    if preserve_remote else
+                    """ON CONFLICT (user_id, task_id) DO UPDATE SET
+                        title = EXCLUDED.title, due_date = EXCLUDED.due_date,
+                        due_time = EXCLUDED.due_time, priority = EXCLUDED.priority,
+                        notes = EXCLUDED.notes, completed = EXCLUDED.completed,
+                        updated_at = NOW()"""
+                )
+                cur.execute(f"""
                     INSERT INTO tasks (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (user_id, task_id) DO UPDATE SET
-                        title      = EXCLUDED.title,
-                        due_date   = EXCLUDED.due_date,
-                        due_time   = EXCLUDED.due_time,
-                        priority   = EXCLUDED.priority,
-                        notes      = EXCLUDED.notes,
-                        completed  = EXCLUDED.completed,
-                        updated_at = NOW()
+                    {conflict_clause}
                 """, (
                     user_id,
                     str(task.get("id", "")),
@@ -1146,6 +1168,9 @@ def sync_tasks():
     data = request.get_json(silent=True) or {}
     user_id = g.user_id
     local_tasks = data.get("local_tasks", [])
+    batch_error = _validate_task_batch(local_tasks)
+    if batch_error:
+        return jsonify({"status": "error", "message": batch_error}), 400
 
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
@@ -1153,19 +1178,12 @@ def sync_tasks():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # Upsert all incoming local tasks
+            # Import missing local tasks; the existing remote version wins collisions.
             for task in local_tasks:
                 cur.execute("""
                     INSERT INTO tasks (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (user_id, task_id) DO UPDATE SET
-                        title      = EXCLUDED.title,
-                        due_date   = EXCLUDED.due_date,
-                        due_time   = EXCLUDED.due_time,
-                        priority   = EXCLUDED.priority,
-                        notes      = EXCLUDED.notes,
-                        completed  = EXCLUDED.completed,
-                        updated_at = NOW()
+                    ON CONFLICT (user_id, task_id) DO NOTHING
                 """, (
                     user_id,
                     str(task.get("id", "")),
@@ -1357,8 +1375,16 @@ def replace_tasks():
         }), 409
 
     data = request.get_json(silent=True) or {}
+    if data.get("confirmation") != "FORCE REPLACE ALL TASKS":
+        return jsonify({
+            "status": "error",
+            "message": "Full replacement requires the explicit confirmation phrase",
+        }), 409
     user_id = g.user_id
     tasks = data.get("tasks", [])
+    batch_error = _validate_task_batch(tasks)
+    if batch_error:
+        return jsonify({"status": "error", "message": batch_error}), 400
 
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
@@ -1367,6 +1393,8 @@ def replace_tasks():
     try:
         with conn.cursor() as cur:
             # Wipe everything for this user
+            cur.execute("DELETE FROM reminder_deliveries WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM task_reminders WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM tasks WHERE user_id = %s", (user_id,))
             deleted = cur.rowcount
 
