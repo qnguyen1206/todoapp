@@ -195,6 +195,12 @@ class CVMManager:
             if ok is True:
                 self._propagate_client_state()
                 status.set(f"Signed in as {msg}")
+                # A successful sign-in from an already trusted desktop can safely
+                # approve newly deployed Web UI devices in the background.
+                threading.Thread(
+                    target=lambda: self._approve_pending_devices_best_effort(self._get_user_id()),
+                    daemon=True,
+                ).start()
             elif ok is None:
                 status.set(f"Verification required: {msg}")
             else:
@@ -978,7 +984,7 @@ class CVMManager:
         return "?"
 
     def push_tasks_to_cvm(self):
-        """Push all local tasks to CVM by replacing remote set (prevents duplicates)."""
+        """Non-destructively upsert local tasks while preserving web/CVM-only tasks."""
         endpoint = self.cvm_client.cvm_endpoints.get('backend', '').strip()
         if not endpoint:
             messagebox.showwarning(
@@ -1006,14 +1012,14 @@ class CVMManager:
                     ),
                 )
                 return
-            success, msg = self.backend_client.replace_tasks(user_id, tasks)
+            success, msg = self.backend_client.store_tasks(user_id, tasks)
             if success:
                 self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
                     messagebox.showinfo(
                         "Push Successful",
-                        f"Pushed {len(tasks)} task(s) to CVM backend (remote replaced).",
+                        f"Pushed {len(tasks)} task(s) to CVM backend. Web and daily tasks were preserved.",
                         parent=self.parent_app.root
                     )
                 else:

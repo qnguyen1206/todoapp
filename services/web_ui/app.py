@@ -77,7 +77,6 @@ DAILY_NOTES_PREFIX = "[CVM_DAILY]"
 KEY_WRAP_INFO = b"todoapp-keywrap-v1"
 TASK_INFO_PREFIX = "todoapp-task-v2"
 _WORKSPACE_KEY_CACHE = {}
-MAX_AI_TOOL_ROUNDS = 12
 
 BUILTIN_TOOLS = [
     {
@@ -101,18 +100,11 @@ BUILTIN_TOOLS = [
                     "due_time": {"type": "string", "description": "Optional time such as 03:30 PM"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "notes": {"type": "string", "description": "Optional task notes supplied by the user"},
-                    "reminder": {
-                        "type": "object",
-                        "description": "Optional email and/or SMS reminder. A due_time is required when enabled.",
-                        "properties": {
-                            "email_enabled": {"type": "boolean"},
-                            "email": {"type": "string", "description": "Recipient email address"},
-                            "sms_enabled": {"type": "boolean"},
-                            "phone": {"type": "string", "description": "SMS recipient in international format, e.g. +15551234567"},
-                            "minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080},
-                        },
-                        "additionalProperties": False,
-                    },
+                    "reminder_email_enabled": {"type": "boolean"},
+                    "reminder_email": {"type": "string", "description": "Email reminder recipient"},
+                    "reminder_sms_enabled": {"type": "boolean"},
+                    "reminder_phone": {"type": "string", "description": "SMS number such as +15551234567"},
+                    "reminder_minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080},
                 },
                 "required": ["title", "due_date"],
             },
@@ -130,18 +122,11 @@ BUILTIN_TOOLS = [
                     "due_date": {"type": "string"}, "due_time": {"type": "string"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "notes": {"type": "string", "description": "Replacement task notes"},
-                    "reminder": {
-                        "type": "object",
-                        "description": "Reminder fields to change. Omitted fields keep their current values.",
-                        "properties": {
-                            "email_enabled": {"type": "boolean"},
-                            "email": {"type": "string", "description": "Recipient email address"},
-                            "sms_enabled": {"type": "boolean"},
-                            "phone": {"type": "string", "description": "SMS recipient in international format, e.g. +15551234567"},
-                            "minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080},
-                        },
-                        "additionalProperties": False,
-                    },
+                    "reminder_email_enabled": {"type": "boolean"},
+                    "reminder_email": {"type": "string"},
+                    "reminder_sms_enabled": {"type": "boolean"},
+                    "reminder_phone": {"type": "string"},
+                    "reminder_minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080},
                 },
                 "required": ["task_id"],
             },
@@ -183,11 +168,9 @@ BUILTIN_TOOLS = [
                 "start_time": {"type": "string", "description": "HH:MM"},
                 "end_time": {"type": "string", "description": "Optional HH:MM"},
                 "notes": {"type": "string"},
-                "reminder": {"type": "object", "properties": {
-                    "email_enabled": {"type": "boolean"}, "email": {"type": "string"},
-                    "sms_enabled": {"type": "boolean"}, "phone": {"type": "string"},
-                    "minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080}
-                }, "additionalProperties": False}
+                "reminder_email_enabled": {"type": "boolean"}, "reminder_email": {"type": "string"},
+                "reminder_sms_enabled": {"type": "boolean"}, "reminder_phone": {"type": "string"},
+                "reminder_minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080}
             }, "required": ["title", "days", "start_time"]},
         },
     },
@@ -200,11 +183,9 @@ BUILTIN_TOOLS = [
                 "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
                 "start_time": {"type": "string"}, "end_time": {"type": "string"},
                 "notes": {"type": "string"},
-                "reminder": {"type": "object", "description": "Reminder fields to change; omitted fields are preserved.", "properties": {
-                    "email_enabled": {"type": "boolean"}, "email": {"type": "string"},
-                    "sms_enabled": {"type": "boolean"}, "phone": {"type": "string"},
-                    "minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080}
-                }, "additionalProperties": False}
+                "reminder_email_enabled": {"type": "boolean"}, "reminder_email": {"type": "string"},
+                "reminder_sms_enabled": {"type": "boolean"}, "reminder_phone": {"type": "string"},
+                "reminder_minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080}
             }, "required": ["task_id"]},
         },
     },
@@ -720,6 +701,27 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
     elif name == "complete_daily_task":
         arguments.setdefault("date", local_date or date.today().isoformat())
 
+    def reminder_changes_from_tool():
+        """Accept the current flat schema and older nested calls already in chat history."""
+        if "reminder" in arguments:
+            nested = arguments.get("reminder")
+            if not isinstance(nested, dict):
+                raise ValueError("reminder must be an object")
+            return dict(nested)
+        mapping = {
+            "reminder_email_enabled": "email_enabled",
+            "reminder_email": "email",
+            "reminder_sms_enabled": "sms_enabled",
+            "reminder_phone": "phone",
+            "reminder_minutes_before": "minutes_before",
+        }
+        changes = {target: arguments[source] for source, target in mapping.items() if source in arguments}
+        if "email" in changes and "email_enabled" not in changes:
+            changes["email_enabled"] = bool(str(changes["email"]).strip())
+        if "phone" in changes and "sms_enabled" not in changes:
+            changes["sms_enabled"] = bool(str(changes["phone"]).strip())
+        return changes if changes else None
+
     def load_regular_tasks():
         user_id = current_user_id()
         response = _backend("GET", "/tasks/retrieve")
@@ -773,7 +775,7 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
-            reminder = arguments.get("reminder")
+            reminder = reminder_changes_from_tool()
             if reminder is not None:
                 if not isinstance(reminder, dict):
                     raise ValueError("reminder must be an object")
@@ -820,7 +822,7 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
-            reminder_changes = arguments.get("reminder")
+            reminder_changes = reminder_changes_from_tool()
             if name == "update_task" and reminder_changes is not None:
                 if not isinstance(reminder_changes, dict):
                     raise ValueError("reminder must be an object")
@@ -892,8 +894,8 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
-            if arguments.get("reminder") is not None:
-                reminder = dict(arguments["reminder"])
+            reminder = reminder_changes_from_tool()
+            if reminder is not None:
                 reminder["timezone"] = local_timezone or "UTC"
                 reminder_response = _store_reminder_preferences(task_id, arguments.get("title", "Daily task"), {
                     "reminder": reminder, "recurring_days": arguments.get("days") or [],
@@ -943,13 +945,14 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
-            if name == "update_daily_task" and arguments.get("reminder") is not None:
+            reminder_changes = reminder_changes_from_tool()
+            if name == "update_daily_task" and reminder_changes is not None:
                 reminder = {
                     "email_enabled": bool(task.get("reminder_email_enabled", False)), "email": task.get("reminder_email", ""),
                     "sms_enabled": bool(task.get("reminder_sms_enabled", False)), "phone": task.get("reminder_phone", ""),
                     "minutes_before": task.get("reminder_minutes_before", 15), "timezone": local_timezone or "UTC",
                 }
-                reminder.update(arguments["reminder"])
+                reminder.update(reminder_changes)
                 reminder_response = _store_reminder_preferences(task_id, arguments.get("title", parsed["title"]), {
                     "reminder": reminder, "recurring_days": arguments.get("days", parsed["days"]),
                     "recurring_time": arguments.get("start_time", parsed["start_time"])})
@@ -1158,6 +1161,7 @@ def clear_tasks_only():
             json={
                 "tasks": _encrypt_tasks(preserved_daily, user_id),
             },
+            headers={**_headers(), "X-Confirm-Replace": "true"},
         )
         if r2.status_code == 200:
             return jsonify({"status": "success", "kept_daily": len(preserved_daily)})
@@ -1419,6 +1423,7 @@ def clear_daily_only():
             json={
                 "tasks": _encrypt_tasks(preserved_regular, user_id),
             },
+            headers={**_headers(), "X-Confirm-Replace": "true"},
         )
         if r2.status_code != 200:
             return jsonify({"status": "error", "message": r2.text}), r2.status_code
@@ -1573,8 +1578,8 @@ def ai_chat_tools():
             "always use the exact task_id returned by the matching tool. Daily schedules use weekday arrays and "
             "24-hour HH:MM tool arguments. When adding multiple independent tasks, issue all add tool calls in "
             "the same response instead of one per round. Never claim a change unless its tool returned success. "
-            "Task notes belong in the notes field. When the user requests an email or phone reminder, include the "
-            "reminder object; phone reminders are sent by SMS and numbers must use international +country-code format. "
+            "Task notes belong in the notes field. Reminder tool arguments are flat fields prefixed with reminder_; "
+            "phone reminders are sent by SMS and numbers must use international +country-code format. "
             "Ask for any missing recipient address/number, due time, or reminder lead time instead of inventing it. "
             f"The user's local date is {local_date}, weekday is {local_day}, and timezone is {local_timezone}."
         )},
@@ -1585,7 +1590,8 @@ def ai_chat_tools():
     try:
         tasks_changed = False
         daily_tasks_changed = False
-        for _ in range(MAX_AI_TOOL_ROUNDS):
+        tool_failures = []
+        while True:
             r = _ai("POST", "/chat", json={
                 "messages": messages, "model": model, "zdr": zdr,
                 "tools": BUILTIN_TOOLS, "tool_choice": "auto",
@@ -1602,6 +1608,11 @@ def ai_chat_tools():
             tool_calls = message.get("tool_calls") or []
 
             if not tool_calls:
+                if tool_failures and not (tasks_changed or daily_tasks_changed):
+                    return jsonify({
+                        "status": "error",
+                        "message": "Task change failed: " + "; ".join(tool_failures),
+                    }), 400
                 return jsonify({
                     "status": "success",
                     "response": message.get("content") or "(no response)",
@@ -1615,19 +1626,34 @@ def ai_chat_tools():
             for tc in tool_calls:
                 result = _execute_tool_call(tc, local_date=local_date, local_day=local_day,
                                             local_timezone=local_timezone)
+                result_payload = {}
+                try:
+                    result_payload = json.loads(result)
+                    if result_payload.get("status") == "error" or result_payload.get("error"):
+                        failure = str(result_payload.get("message") or result_payload.get("error"))
+                        if "has not been approved for encrypted task storage" in failure:
+                            return jsonify({
+                                "status": "error",
+                                "message": (
+                                    "This Web UI is waiting for encryption approval. Open the desktop app on an "
+                                    "already trusted computer, sign in to the same account, then retry this request."
+                                ),
+                            }), 409
+                        tool_failures.append(failure)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    tool_failures.append("Task tool returned an invalid response")
                 if tc.get("function", {}).get("name") in ("add_task", "update_task", "complete_task", "delete_task"):
                     try:
-                        tasks_changed = tasks_changed or json.loads(result).get("status") == "success"
+                        tasks_changed = tasks_changed or result_payload.get("status") == "success"
                     except (TypeError, ValueError, json.JSONDecodeError):
                         pass
                 if tc.get("function", {}).get("name") in ("add_daily_task", "update_daily_task", "complete_daily_task", "delete_daily_task"):
                     try:
-                        daily_tasks_changed = daily_tasks_changed or json.loads(result).get("status") == "success"
+                        daily_tasks_changed = daily_tasks_changed or result_payload.get("status") == "success"
                     except (TypeError, ValueError, json.JSONDecodeError):
                         pass
                 messages.append({"role": "tool", "content": result, "tool_call_id": tc.get("id")})
 
-        return jsonify({"status": "error", "message": f"AI exceeded {MAX_AI_TOOL_ROUNDS} tool-call rounds; split the request into smaller batches."}), 500
     except req.exceptions.Timeout:
         return jsonify({"status": "error", "message": "AI request timed out waiting for ai_inference."}), 504
     except req.exceptions.ConnectionError:

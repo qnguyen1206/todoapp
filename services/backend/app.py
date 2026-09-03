@@ -1350,6 +1350,11 @@ def replace_tasks():
     err = require_api_key()
     if err:
         return err
+    if request.headers.get("X-Confirm-Replace", "").strip().lower() != "true":
+        return jsonify({
+            "status": "error",
+            "message": "Full replacement requires explicit force-push confirmation",
+        }), 409
 
     data = request.get_json(silent=True) or {}
     user_id = g.user_id

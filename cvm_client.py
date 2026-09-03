@@ -623,7 +623,7 @@ class CVMBackendClient(CVMClient):
             response = requests.post(
                 f"{endpoint}/tasks/replace",
                 json=payload,
-                headers=self._headers(),
+                headers={**self._headers(), "X-Confirm-Replace": "true"},
                 timeout=15
             )
             if response.status_code == 200:
