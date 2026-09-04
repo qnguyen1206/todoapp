@@ -285,7 +285,7 @@ header {
 .weekly-grid {
   display: grid;
   grid-template-columns: 72px repeat(7, minmax(0, 1fr));
-  grid-template-rows: minmax(54px, auto) repeat(96, 24px);
+  grid-template-rows: 54px repeat(96, 24px);
   width: 100%;
   max-height: calc(100vh - 190px);
   overflow: auto;
@@ -307,8 +307,21 @@ header {
   min-width: 0; font-size: 12px; text-align: center; padding: 7px 4px; border-left: 1px solid var(--border);
 }
 .weekly-day-header.today-col { background: #e3f2fd; color: var(--primary); }
-.weekly-all-day { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
 .weekly-all-day-task { font-size: 10px; padding: 2px 4px; border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.weekly-unscheduled {
+  display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; align-items: start;
+  margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface);
+}
+.weekly-unscheduled[hidden] { display: none; }
+.weekly-unscheduled-heading { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+.weekly-unscheduled-heading strong { color: var(--text); font-size: 12px; }
+.weekly-unscheduled-days { display: flex; gap: 6px; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
+.weekly-unscheduled-day {
+  flex: 0 0 180px; min-width: 0; padding: 5px; border: 1px solid #e5e7eb; border-radius: 5px;
+  background: #fafbfc; font-size: 10px;
+}
+.weekly-unscheduled-tasks { display: flex; flex-direction: column; gap: 2px; max-height: 76px; overflow-y: auto; margin-top: 4px; }
 .weekly-time-label {
   position: sticky; left: 0; z-index: 3; background: var(--surface); color: var(--muted);
   font-size: 9px; text-align: right; padding: 2px 7px 0 2px; border-top: 1px solid #e5e7eb;
@@ -346,6 +359,8 @@ header {
   .cal-cell { min-height: 66px; padding: 2px; }
   .cal-dot { font-size: 9px; padding-inline: 2px; }
   .weekly-grid { grid-template-columns: 58px repeat(7, minmax(82px, 1fr)); }
+  .weekly-unscheduled { grid-template-columns: 1fr; gap: 6px; }
+  .weekly-unscheduled-heading { flex-direction: row; justify-content: space-between; }
 }
 
 /* ── Settings ─────────────────────────────────────────────── */
@@ -472,6 +487,16 @@ header {
 .native-date-picker { position: absolute; right: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .weekday-picker { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; font-size: 13px; }
 .weekday-picker label { display: flex; align-items: center; gap: 5px; }
+.daily-custom-time-toggle { margin: 4px 0 10px; }
+.daily-day-times { display: grid; gap: 6px; margin-bottom: 12px; }
+.daily-day-times[hidden], #daily-default-times[hidden] { display: none; }
+.daily-day-time-row {
+  display: grid; grid-template-columns: 82px minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: end;
+  padding: 7px; border: 1px solid var(--border); border-radius: 6px; background: #fafbfc;
+}
+.daily-day-time-row > strong { align-self: center; font-size: 12px; }
+.daily-day-time-row label { min-width: 0; font-size: 11px; color: var(--muted); }
+.daily-day-time-row .input { margin-top: 3px; }
 .daily-item { display: grid; grid-template-columns: 28px minmax(190px, 220px) 160px minmax(180px, 1fr) 100px auto; gap: 12px; align-items: center; }
 .daily-item.done .daily-title { text-decoration: line-through; color: var(--muted); }
 .daily-item.overdue .daily-status { color: var(--danger); }
@@ -577,6 +602,8 @@ header {
                                          border-radius: 12px 12px 0 0; padding: 18px 14px; }
   .form-row { flex-direction: column; gap: 0; }
   .weekday-picker { grid-template-columns: repeat(2, 1fr); }
+  .daily-day-time-row { grid-template-columns: 72px minmax(0, 1fr); }
+  .daily-day-time-row > label:last-child { grid-column: 2; }
   .modal-actions { flex-wrap: wrap; }
   .modal-actions .btn { flex: 1 1 120px; min-height: 42px; }
   .notes-body.notes-body-lg { min-height: 45dvh; }

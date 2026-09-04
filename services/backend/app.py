@@ -623,6 +623,7 @@ def init_db():
                     timezone_name  TEXT NOT NULL DEFAULT 'UTC',
                     recurring_days TEXT[],
                     recurring_time TEXT,
+                    recurring_schedule JSONB NOT NULL DEFAULT '[]'::jsonb,
                     updated_at     TIMESTAMPTZ DEFAULT NOW(),
                     PRIMARY KEY (user_id, task_id)
                 );
@@ -663,6 +664,7 @@ def init_db():
                 ALTER TABLE users ALTER COLUMN email_verified SET NOT NULL;
                 ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_days TEXT[];
                 ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_time TEXT;
+                ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_schedule JSONB NOT NULL DEFAULT '[]'::jsonb;
             """)
         conn.commit()
         log.info("Database initialised")
@@ -1232,6 +1234,7 @@ def save_task_reminder(task_id):
     task_label = str(data.get("task_label") or "Task").strip()[:200] or "Task"
     recurring_days = data.get("recurring_days") or []
     recurring_time = str(data.get("recurring_time") or "").strip()
+    recurring_schedule = data.get("recurring_schedule") or []
     try:
         minutes_before = int(data.get("minutes_before", 15))
     except (TypeError, ValueError):
@@ -1243,6 +1246,25 @@ def save_task_reminder(task_id):
     if sms_enabled and not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
         return jsonify({"status": "error", "message": "Phone number must use international format, such as +15551234567"}), 400
     valid_days = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+    if not isinstance(recurring_schedule, list):
+        return jsonify({"status": "error", "message": "Recurring schedule must be a list"}), 400
+    scheduled_days = set()
+    for entry in recurring_schedule:
+        if not isinstance(entry, dict) or not isinstance(entry.get("days"), list) or not entry.get("days"):
+            return jsonify({"status": "error", "message": "Each recurring schedule needs a days list"}), 400
+        if any(day not in valid_days for day in entry["days"]):
+            return jsonify({"status": "error", "message": "Invalid recurring schedule day"}), 400
+        if scheduled_days.intersection(entry["days"]):
+            return jsonify({"status": "error", "message": "A recurring day can only have one reminder time"}), 400
+        try:
+            datetime.strptime(str(entry.get("start_time") or ""), "%H:%M")
+        except ValueError:
+            return jsonify({"status": "error", "message": "Recurring schedule times must use HH:MM"}), 400
+        scheduled_days.update(entry["days"])
+    if recurring_schedule:
+        day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        recurring_days = [day for day in day_order if day in scheduled_days]
+        recurring_time = str(recurring_schedule[0].get("start_time") or "")
     if recurring_days:
         if not isinstance(recurring_days, list) or not recurring_days or any(day not in valid_days for day in recurring_days):
             return jsonify({"status": "error", "message": "Invalid recurring reminder days"}), 400
@@ -1265,8 +1287,8 @@ def save_task_reminder(task_id):
                 INSERT INTO task_reminders
                     (user_id, task_id, task_label, email_enabled, reminder_email,
                      sms_enabled, phone_number, minutes_before, timezone_name,
-                     recurring_days, recurring_time, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                     recurring_days, recurring_time, recurring_schedule, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (user_id, task_id) DO UPDATE SET
                     task_label = EXCLUDED.task_label,
                     email_enabled = EXCLUDED.email_enabled,
@@ -1277,11 +1299,13 @@ def save_task_reminder(task_id):
                     timezone_name = EXCLUDED.timezone_name,
                     recurring_days = EXCLUDED.recurring_days,
                     recurring_time = EXCLUDED.recurring_time,
+                    recurring_schedule = EXCLUDED.recurring_schedule,
                     updated_at = NOW()
             """, (user_id, task_id, task_label, email_enabled,
                   reminder_email if email_enabled else None, sms_enabled,
                   phone if sms_enabled else None, minutes_before, timezone_name,
-                  recurring_days or None, recurring_time or None))
+                  recurring_days or None, recurring_time or None,
+                  psycopg2.extras.Json(recurring_schedule)))
         conn.commit()
         return jsonify({"status": "success"})
     except Exception as exc:

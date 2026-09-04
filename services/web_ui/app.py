@@ -77,6 +77,7 @@ DAILY_NOTES_PREFIX = "[CVM_DAILY]"
 KEY_WRAP_INFO = b"todoapp-keywrap-v1"
 TASK_INFO_PREFIX = "todoapp-task-v2"
 _WORKSPACE_KEY_CACHE = {}
+MAX_AI_TOOL_ROUNDS = 50
 
 BUILTIN_TOOLS = [
     {
@@ -151,7 +152,7 @@ BUILTIN_TOOLS = [
     {
         "type": "function", "function": {
             "name": "get_daily_tasks",
-            "description": "Get recurring daily tasks. Returns schedule IDs, weekdays, start/end times, and today's completion state.",
+            "description": "Get recurring daily tasks. Returns task IDs plus the full schedules array with each weekday group's start/end time.",
             "parameters": {"type": "object", "properties": {
                 "day": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], "description": "Optional weekday filter"},
                 "date": {"type": "string", "description": "Local date in YYYY-MM-DD"}
@@ -161,27 +162,40 @@ BUILTIN_TOOLS = [
     {
         "type": "function", "function": {
             "name": "add_daily_task",
-            "description": "Add a recurring daily task schedule. Times use 24-hour HH:MM storage format.",
+            "description": "Add one recurring daily task. Use schedules for different weekday time ranges; otherwise use days/start_time/end_time. Times use 24-hour HH:MM.",
             "parameters": {"type": "object", "properties": {
                 "title": {"type": "string"},
                 "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
                 "start_time": {"type": "string", "description": "HH:MM"},
                 "end_time": {"type": "string", "description": "Optional HH:MM"},
+                "schedules": {"type": "array", "description": "Optional per-day time groups. Use this when selected days have different times.", "items": {
+                    "type": "object", "properties": {
+                        "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
+                        "start_time": {"type": "string", "description": "HH:MM"},
+                        "end_time": {"type": "string", "description": "Optional HH:MM"},
+                    }, "required": ["days", "start_time"]
+                }},
                 "notes": {"type": "string"},
                 "reminder_email_enabled": {"type": "boolean"}, "reminder_email": {"type": "string"},
                 "reminder_sms_enabled": {"type": "boolean"}, "reminder_phone": {"type": "string"},
                 "reminder_minutes_before": {"type": "integer", "minimum": 0, "maximum": 10080}
-            }, "required": ["title", "days", "start_time"]},
+            }, "required": ["title"]},
         },
     },
     {
         "type": "function", "function": {
             "name": "update_daily_task",
-            "description": "Update a recurring daily task. Call get_daily_tasks first and use its exact task_id.",
+            "description": "Update one recurring daily task. Call get_daily_tasks first; use schedules to replace its per-day time groups without creating separate tasks.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"}, "title": {"type": "string"},
                 "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
                 "start_time": {"type": "string"}, "end_time": {"type": "string"},
+                "schedules": {"type": "array", "description": "Replacement per-day time groups", "items": {
+                    "type": "object", "properties": {
+                        "days": {"type": "array", "items": {"type": "string", "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]}},
+                        "start_time": {"type": "string"}, "end_time": {"type": "string"},
+                    }, "required": ["days", "start_time"]
+                }},
                 "notes": {"type": "string"},
                 "reminder_email_enabled": {"type": "boolean"}, "reminder_email": {"type": "string"},
                 "reminder_sms_enabled": {"type": "boolean"}, "reminder_phone": {"type": "string"},
@@ -603,7 +617,7 @@ def _decode_daily_payload(notes_text):
     return None
 
 
-def _encode_daily_payload(raw_text, completed=False, completed_date=None, notes=""):
+def _encode_daily_payload(raw_text, completed=False, completed_date=None, notes="", schedules=None):
     payload = {
         "kind": "daily",
         "raw": raw_text,
@@ -611,6 +625,8 @@ def _encode_daily_payload(raw_text, completed=False, completed_date=None, notes=
         "completed_date": completed_date if completed else None,
         "notes": str(notes or ""),
     }
+    if schedules:
+        payload["schedules"] = schedules
     return DAILY_NOTES_PREFIX + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -643,6 +659,69 @@ def _build_daily_raw(title, days, start_time, end_time=""):
     return f"{','.join(selected)} {time_text} - {str(title).strip()}"
 
 
+DAILY_DAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _normalize_daily_schedules(schedules=None, days=None, start_time="", end_time=""):
+    """Validate per-day time groups while accepting the legacy shared-time fields."""
+    if schedules is None:
+        schedules = [{"days": days or [], "start_time": start_time, "end_time": end_time}]
+    if not isinstance(schedules, list) or not schedules:
+        raise ValueError("At least one daily schedule is required")
+
+    normalized = []
+    assigned_days = set()
+    for entry in schedules:
+        if not isinstance(entry, dict):
+            raise ValueError("Each daily schedule must be an object")
+        entry_days = entry.get("days") or []
+        if not isinstance(entry_days, list):
+            raise ValueError("Daily schedule days must be a list")
+        selected = [day for day in DAILY_DAY_ORDER if day in entry_days]
+        if not selected:
+            raise ValueError("Each daily schedule needs at least one day")
+        duplicate_days = assigned_days.intersection(selected)
+        if duplicate_days:
+            raise ValueError(f"A day can only have one time range: {', '.join(sorted(duplicate_days))}")
+        schedule_start = str(entry.get("start_time") or "").strip()
+        schedule_end = str(entry.get("end_time") or "").strip()
+        try:
+            datetime.strptime(schedule_start, "%H:%M")
+            if schedule_end:
+                datetime.strptime(schedule_end, "%H:%M")
+        except ValueError:
+            raise ValueError("Daily schedule times must use 24-hour HH:MM format")
+        normalized.append({"days": selected, "start_time": schedule_start, "end_time": schedule_end})
+        assigned_days.update(selected)
+
+    normalized.sort(key=lambda item: DAILY_DAY_ORDER.index(item["days"][0]))
+    return normalized
+
+
+def _daily_details(payload, raw_text):
+    """Return one normalized daily task definition from old or new payloads."""
+    parsed = _parse_daily_raw(raw_text)
+    try:
+        schedules = _normalize_daily_schedules(
+            payload.get("schedules") if isinstance(payload, dict) and payload.get("schedules") else None,
+            parsed["days"], parsed["start_time"], parsed["end_time"],
+        )
+    except ValueError:
+        schedules = _normalize_daily_schedules(None, parsed["days"], parsed["start_time"], parsed["end_time"])
+    days = [day for day in DAILY_DAY_ORDER if any(day in schedule["days"] for schedule in schedules)]
+    return {**parsed, "days": days, "schedules": schedules}
+
+
+def _daily_schedule_for_day(task, weekday):
+    for schedule in task.get("schedules") or []:
+        if weekday in schedule.get("days", []):
+            return schedule
+    if weekday in task.get("days", []):
+        return {"days": task.get("days", []), "start_time": task.get("start_time", ""),
+                "end_time": task.get("end_time", "")}
+    return None
+
+
 def _split_remote_tasks(tasks):
     """Split remote backend tasks into regular-todo and daily-marker lists."""
     regular = []
@@ -660,13 +739,16 @@ def _split_remote_tasks(tasks):
                 completed_date = str(task["updated_at"])[:10]
             requested_date = getattr(g, "daily_date", None) or date.today().isoformat()
             done = bool(daily_payload.get("completed", task.get("completed", False))) and completed_date == requested_date
-            parsed = _parse_daily_raw(raw)
+            parsed = _daily_details(daily_payload, raw)
             requested_day = getattr(g, "daily_day", None) or datetime.now().strftime("%a")
+            today_schedule = _daily_schedule_for_day(parsed, requested_day)
             daily.append({
                 "id": f"remote:{remote_task_id}",
                 **parsed,
                 "done": done,
-                "scheduled_today": requested_day in parsed["days"],
+                "start_time": today_schedule.get("start_time", "") if today_schedule else parsed["start_time"],
+                "end_time": today_schedule.get("end_time", "") if today_schedule else parsed["end_time"],
+                "scheduled_today": today_schedule is not None,
                 "source": "remote",
                 "remote_task_id": remote_task_id,
                 "notes": str(daily_payload.get("notes") or ""),
@@ -768,6 +850,9 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
                 raise ValueError("title and due_date are required")
             datetime.strptime(due_date, "%m-%d-%Y")
             priority = max(1, min(5, int(arguments.get("priority", 1))))
+            reminder = reminder_changes_from_tool()
+            if reminder is not None and (reminder.get("email_enabled") or reminder.get("sms_enabled")) and not arguments.get("due_time"):
+                raise ValueError("A due_time is required when reminders are enabled")
             task_id = uuid.uuid4().hex[:12]
             task = {"id": task_id, "title": title, "due_date": due_date,
                     "due_time": str(arguments.get("due_time", "")), "priority": str(priority),
@@ -775,18 +860,20 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
-            reminder = reminder_changes_from_tool()
             if reminder is not None:
-                if not isinstance(reminder, dict):
-                    raise ValueError("reminder must be an object")
-                if (reminder.get("email_enabled") or reminder.get("sms_enabled")) and not task["due_time"]:
-                    raise ValueError("A due_time is required when reminders are enabled")
                 reminder = {**reminder, "timezone": local_timezone or "UTC"}
                 reminder_response = _store_reminder_preferences(
                     task_id, title, {"reminder": reminder}
                 )
                 if reminder_response.status_code != 200:
-                    raise RuntimeError(reminder_response.text)
+                    rollback = _backend("DELETE", f"/tasks/{task_id}")
+                    if rollback.status_code == 200:
+                        raise RuntimeError(f"Task was not added because reminder setup failed: {reminder_response.text}")
+                    return json.dumps({
+                        "status": "partial", "mutation_applied": True,
+                        "message": f"Added task: {title}",
+                        "warning": f"Reminder setup failed and rollback also failed: {reminder_response.text}",
+                    })
             return json.dumps({"status": "success", "message": f"Added task: {title}", "task_id": task_id})
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
@@ -842,7 +929,11 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
                     task_id, updated.get("title", title), {"reminder": reminder}
                 )
                 if reminder_response.status_code != 200:
-                    raise RuntimeError(reminder_response.text)
+                    return json.dumps({
+                        "status": "partial", "mutation_applied": True,
+                        "message": f"Updated task: {updated.get('title', title)}",
+                        "warning": f"Reminder setup failed: {reminder_response.text}",
+                    })
             action = "Completed" if name == "complete_task" else "Updated"
             return json.dumps({"status": "success", "message": f"{action} task: {updated.get('title', title)}"})
         except Exception as exc:
@@ -858,8 +949,9 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
                 payload = _decode_daily_payload(task.get("notes", ""))
                 if not payload:
                     continue
-                parsed = _parse_daily_raw(payload.get("raw") or task.get("title"))
-                if requested_day and requested_day not in parsed["days"]:
+                parsed = _daily_details(payload, payload.get("raw") or task.get("title"))
+                requested_schedule = _daily_schedule_for_day(parsed, requested_day) if requested_day else None
+                if requested_day and not requested_schedule:
                     continue
                 completed_date = payload.get("completed_date")
                 if not completed_date and payload.get("completed") and task.get("updated_at"):
@@ -867,7 +959,9 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
                 schedules.append({
                     "task_id": str(task.get("task_id") or task.get("id") or ""),
                     "title": parsed["title"], "days": parsed["days"],
-                    "start_time": parsed["start_time"], "end_time": parsed["end_time"],
+                    "start_time": requested_schedule.get("start_time", "") if requested_schedule else parsed["start_time"],
+                    "end_time": requested_schedule.get("end_time", "") if requested_schedule else parsed["end_time"],
+                    "schedules": parsed["schedules"],
                     "notes": str(payload.get("notes") or ""),
                     "reminder": {
                         "email_enabled": bool(task.get("reminder_email_enabled", False)),
@@ -885,23 +979,37 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
 
     if name == "add_daily_task":
         try:
-            raw = _build_daily_raw(arguments.get("title", ""), arguments.get("days") or [],
-                                   arguments.get("start_time", ""), arguments.get("end_time", ""))
+            daily_schedules = _normalize_daily_schedules(
+                arguments.get("schedules") if "schedules" in arguments else None,
+                arguments.get("days") or [], arguments.get("start_time", ""), arguments.get("end_time", ""),
+            )
+            schedule_days = [day for day in DAILY_DAY_ORDER if any(day in item["days"] for item in daily_schedules)]
+            first_schedule = daily_schedules[0]
+            raw = _build_daily_raw(arguments.get("title", ""), schedule_days,
+                                   first_schedule["start_time"], first_schedule["end_time"])
             user_id = current_user_id()
+            reminder = reminder_changes_from_tool()
             task_id = "daily:" + uuid.uuid4().hex[:20]
             task = {"id": task_id, "title": raw, "due_date": "", "due_time": "", "priority": "1",
-                    "notes": _encode_daily_payload(raw, False, notes=arguments.get("notes", "")), "completed": False}
+                    "notes": _encode_daily_payload(raw, False, notes=arguments.get("notes", ""),
+                                                   schedules=daily_schedules), "completed": False}
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
-            reminder = reminder_changes_from_tool()
             if reminder is not None:
                 reminder["timezone"] = local_timezone or "UTC"
                 reminder_response = _store_reminder_preferences(task_id, arguments.get("title", "Daily task"), {
-                    "reminder": reminder, "recurring_days": arguments.get("days") or [],
-                    "recurring_time": arguments.get("start_time", "")})
+                    "reminder": reminder, "recurring_days": schedule_days,
+                    "recurring_time": first_schedule["start_time"], "recurring_schedule": daily_schedules})
                 if reminder_response.status_code != 200:
-                    raise RuntimeError(reminder_response.text)
+                    rollback = _backend("DELETE", f"/tasks/{task_id}")
+                    if rollback.status_code == 200:
+                        raise RuntimeError(f"Daily task was not added because reminder setup failed: {reminder_response.text}")
+                    return json.dumps({
+                        "status": "partial", "mutation_applied": True,
+                        "message": f"Added daily task: {arguments.get('title')}",
+                        "warning": f"Reminder setup failed and rollback also failed: {reminder_response.text}",
+                    })
             return json.dumps({"status": "success", "message": f"Added daily task: {arguments.get('title')}", "task_id": task_id})
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
@@ -918,7 +1026,7 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             payload = _decode_daily_payload(task.get("notes", ""))
             if not payload:
                 raise ValueError("The selected task is not a daily task")
-            parsed = _parse_daily_raw(payload.get("raw") or task.get("title"))
+            parsed = _daily_details(payload, payload.get("raw") or task.get("title"))
             if name == "delete_daily_task":
                 response = _backend("DELETE", f"/tasks/{task_id}")
                 if response.status_code != 200:
@@ -931,34 +1039,53 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
                 completed_date = str(arguments.get("date") or date.today().isoformat())
                 datetime.strptime(completed_date, "%Y-%m-%d")
                 updated["completed"] = True
-                updated["notes"] = _encode_daily_payload(parsed["raw"], True, completed_date, payload.get("notes", ""))
+                updated["notes"] = _encode_daily_payload(parsed["raw"], True, completed_date,
+                                                         payload.get("notes", ""), parsed["schedules"])
                 action = "Completed"
             else:
+                schedule_changed = any(key in arguments for key in ("schedules", "days", "start_time", "end_time"))
+                if "schedules" in arguments:
+                    daily_schedules = _normalize_daily_schedules(arguments["schedules"])
+                elif schedule_changed:
+                    daily_schedules = _normalize_daily_schedules(
+                        None, arguments.get("days", parsed["days"]),
+                        arguments.get("start_time", parsed["start_time"]),
+                        arguments.get("end_time", parsed["end_time"]),
+                    )
+                else:
+                    daily_schedules = parsed["schedules"]
+                schedule_days = [day for day in DAILY_DAY_ORDER if any(day in item["days"] for item in daily_schedules)]
+                first_schedule = daily_schedules[0]
                 raw = _build_daily_raw(
-                    arguments.get("title", parsed["title"]), arguments.get("days", parsed["days"]),
-                    arguments.get("start_time", parsed["start_time"]), arguments.get("end_time", parsed["end_time"]),
+                    arguments.get("title", parsed["title"]), schedule_days,
+                    first_schedule["start_time"], first_schedule["end_time"],
                 )
                 updated["title"] = raw
                 updated["notes"] = _encode_daily_payload(raw, bool(payload.get("completed")), payload.get("completed_date"),
-                                                        arguments.get("notes", payload.get("notes", "")))
+                                                        arguments.get("notes", payload.get("notes", "")), daily_schedules)
                 action = "Updated"
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
             if response.status_code != 200:
                 raise RuntimeError(response.text)
             reminder_changes = reminder_changes_from_tool()
-            if name == "update_daily_task" and reminder_changes is not None:
+            if name == "update_daily_task" and (reminder_changes is not None or schedule_changed):
                 reminder = {
                     "email_enabled": bool(task.get("reminder_email_enabled", False)), "email": task.get("reminder_email", ""),
                     "sms_enabled": bool(task.get("reminder_sms_enabled", False)), "phone": task.get("reminder_phone", ""),
                     "minutes_before": task.get("reminder_minutes_before", 15), "timezone": local_timezone or "UTC",
                 }
-                reminder.update(reminder_changes)
+                reminder.update(reminder_changes or {})
                 reminder_response = _store_reminder_preferences(task_id, arguments.get("title", parsed["title"]), {
-                    "reminder": reminder, "recurring_days": arguments.get("days", parsed["days"]),
-                    "recurring_time": arguments.get("start_time", parsed["start_time"])})
+                    "reminder": reminder, "recurring_days": schedule_days,
+                    "recurring_time": first_schedule["start_time"], "recurring_schedule": daily_schedules})
                 if reminder_response.status_code != 200:
-                    raise RuntimeError(reminder_response.text)
-            return json.dumps({"status": "success", "message": f"{action} daily task: {parsed['title']}"})
+                    return json.dumps({
+                        "status": "partial", "mutation_applied": True,
+                        "message": f"Updated daily task: {arguments.get('title', parsed['title'])}",
+                        "warning": f"Reminder setup failed: {reminder_response.text}",
+                    })
+            result_title = arguments.get("title", parsed["title"]) if name == "update_daily_task" else parsed["title"]
+            return json.dumps({"status": "success", "message": f"{action} daily task: {result_title}"})
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
     return json.dumps({"error": f"Unknown tool: {name}"})
@@ -1007,6 +1134,7 @@ def _store_reminder_preferences(task_id, task_title, data):
         "timezone": str(reminder.get("timezone") or "UTC"),
         "recurring_days": data.get("recurring_days") or [],
         "recurring_time": str(data.get("recurring_time") or ""),
+        "recurring_schedule": data.get("recurring_schedule") or [],
     }
     return _backend("PUT", f"/tasks/{task_id}/reminder", json=payload)
 
@@ -1228,6 +1356,12 @@ def add_daily():
     start_time = data.get("start_time", "00:00")
     end_time = data.get("end_time", "")
     try:
+        schedules = _normalize_daily_schedules(
+            data.get("schedules") if "schedules" in data else None, days, start_time, end_time,
+        )
+        days = [day for day in DAILY_DAY_ORDER if any(day in schedule["days"] for schedule in schedules)]
+        start_time = schedules[0]["start_time"]
+        end_time = schedules[0]["end_time"]
         raw = _build_daily_raw(title, days, start_time, end_time)
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
@@ -1240,7 +1374,7 @@ def add_daily():
             "due_date": "",
             "due_time": "",
             "priority": "1",
-            "notes": _encode_daily_payload(raw, False, notes=data.get("notes", "")),
+            "notes": _encode_daily_payload(raw, False, notes=data.get("notes", ""), schedules=schedules),
             "completed": False,
         }
         response = _backend(
@@ -1254,9 +1388,15 @@ def add_daily():
         if response.status_code != 200:
             return jsonify({"status": "error", "message": response.text}), response.status_code
         reminder_response = _store_reminder_preferences(remote_task_id, title, {
-            "reminder": data.get("reminder") or {}, "recurring_days": days, "recurring_time": start_time})
+            "reminder": data.get("reminder") or {}, "recurring_days": days, "recurring_time": start_time,
+            "recurring_schedule": schedules})
         if reminder_response.status_code != 200:
-            return jsonify({"status": "error", "message": reminder_response.text}), reminder_response.status_code
+            rollback = _backend("DELETE", f"/tasks/{remote_task_id}")
+            if rollback.status_code == 200:
+                return jsonify({"status": "error", "message":
+                    f"Daily task was not added because reminder setup failed: {reminder_response.text}"}), reminder_response.status_code
+            return jsonify({"status": "partial", "message":
+                f"Daily task was added, but reminder setup failed and rollback failed: {reminder_response.text}"}), 207
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 503
     return jsonify({"status": "success", "id": f"remote:{remote_task_id}"})
@@ -1270,8 +1410,14 @@ def edit_daily(task_id):
     remote_task_id = task_id.split(":", 1)[1]
     data = request.get_json(silent=True) or {}
     try:
-        raw = _build_daily_raw(data.get("title", ""), data.get("days") or [],
-                               data.get("start_time", ""), data.get("end_time", ""))
+        schedules = _normalize_daily_schedules(
+            data.get("schedules") if "schedules" in data else None,
+            data.get("days") or [], data.get("start_time", ""), data.get("end_time", ""),
+        )
+        days = [day for day in DAILY_DAY_ORDER if any(day in schedule["days"] for schedule in schedules)]
+        start_time = schedules[0]["start_time"]
+        end_time = schedules[0]["end_time"]
+        raw = _build_daily_raw(data.get("title", ""), days, start_time, end_time)
         user_id = current_user_id()
         response = _backend("GET", "/tasks/retrieve")
         tasks = _decrypt_tasks(response.json().get("tasks", []), user_id) if response.status_code == 200 else []
@@ -1284,14 +1430,15 @@ def edit_daily(task_id):
         updated.pop("task_id", None)
         updated["title"] = raw
         updated["notes"] = _encode_daily_payload(raw, bool(payload.get("completed")), payload.get("completed_date"),
-                                                data.get("notes", payload.get("notes", "")))
+                                                 data.get("notes", payload.get("notes", "")), schedules)
         stored = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([updated], user_id)})
         if stored.status_code == 200:
             reminder_response = _store_reminder_preferences(remote_task_id, data.get("title", "Daily task"), {
-                "reminder": data.get("reminder") or {}, "recurring_days": data.get("days") or [],
-                "recurring_time": data.get("start_time", "")})
+                "reminder": data.get("reminder") or {}, "recurring_days": days,
+                "recurring_time": start_time, "recurring_schedule": schedules})
             if reminder_response.status_code != 200:
-                return jsonify({"status": "error", "message": reminder_response.text}), reminder_response.status_code
+                return jsonify({"status": "partial", "message":
+                    f"Daily task times were updated, but reminder setup failed: {reminder_response.text}"}), 207
             return jsonify({"status": "success"})
         return jsonify({"status": "error", "message": stored.text}), stored.status_code
     except Exception as exc:
@@ -1327,8 +1474,9 @@ def toggle_daily(task_id):
             updated["id"] = remote_task_id
             updated["title"] = raw
             updated["completed"] = not done
+            details = _daily_details(payload, raw)
             updated["notes"] = _encode_daily_payload(raw, not done, client_date if not done else None,
-                                                     payload.get("notes", ""))
+                                                     payload.get("notes", ""), details["schedules"])
             updated.pop("task_id", None)
 
             r2 = _backend(
@@ -1407,7 +1555,7 @@ def clear_daily_only():
         for task in tasks:
             daily_payload = _decode_daily_payload(task.get("notes", ""))
             if daily_payload:
-                parsed = _parse_daily_raw(daily_payload.get("raw") or task.get("title"))
+                parsed = _daily_details(daily_payload, daily_payload.get("raw") or task.get("title"))
                 if requested_day in parsed["days"]:
                     task_id = str(task.get("task_id") or task.get("id") or "")
                     if task_id:
@@ -1568,10 +1716,19 @@ def ai_chat_tools():
     messages = [
         {"role": "system", "content": (
             "You are a task management assistant. Regular tasks and recurring daily tasks are different lists. "
-            "Use get_tasks before changing a regular task, and get_daily_tasks before changing a daily task; "
-            "always use the exact task_id returned by the matching tool. Daily schedules use weekday arrays and "
-            "24-hour HH:MM tool arguments. When adding multiple independent tasks, issue all add tool calls in "
-            "the same response instead of one per round. Never claim a change unless its tool returned success. "
+            "Use get_tasks before updating, completing, or deleting a regular task, and get_daily_tasks before "
+            "updating, completing, or deleting a daily task; adding a new task does not require a get call. Always "
+            "call get_daily_tasks without a day filter when locating a task to edit, then use the exact task_id "
+            "returned by the matching tool. Daily schedules use weekday arrays and 24-hour "
+            "HH:MM tool arguments. When one daily task has different times on different days, use its schedules array "
+            "in one add_daily_task or update_daily_task call so it remains one task; never create one task per day. "
+            "For example, Monday 09:00-10:00 and Wednesday 14:00-15:00 means schedules=[{\"days\":[\"Mon\"], "
+            "\"start_time\":\"09:00\", \"end_time\":\"10:00\"}, {\"days\":[\"Wed\"], "
+            "\"start_time\":\"14:00\", \"end_time\":\"15:00\"}]. Each schedule "
+            "contains its days and start/end time. A tool round may contain any "
+            "number of tool calls. When adding multiple independent "
+            "tasks, issue every add tool call together in the same response instead of one per round. Never repeat a "
+            "mutation that already returned success, and never claim a change unless its tool returned success. "
             "Task notes belong in the notes field. Reminder tool arguments are flat fields prefixed with reminder_; "
             "phone reminders are sent by SMS and numbers must use international +country-code format. "
             "Ask for any missing recipient address/number, due time, or reminder lead time instead of inventing it. "
@@ -1584,13 +1741,41 @@ def ai_chat_tools():
     try:
         tasks_changed = False
         daily_tasks_changed = False
-        tool_failures = []
-        while True:
+        tool_failures = {}
+        successful_actions = []
+        seen_successful_mutations = set()
+        mutation_tools = {
+            "add_task", "update_task", "complete_task", "delete_task",
+            "add_daily_task", "update_daily_task", "complete_daily_task", "delete_daily_task",
+        }
+
+        def action_summary(warning=""):
+            failure_messages = list(dict.fromkeys(tool_failures.values()))
+            lines = ["Completed actions:"]
+            lines.extend(f"- {message}" for message in successful_actions)
+            if failure_messages:
+                lines.append("Could not complete:")
+                lines.extend(f"- {message}" for message in failure_messages)
+            if warning:
+                lines.append(f"Note: {warning}")
+            return jsonify({
+                "status": "success",
+                "response": "\n".join(lines),
+                "tasks_changed": tasks_changed,
+                "daily_tasks_changed": daily_tasks_changed,
+                "actions": successful_actions,
+                "failures": failure_messages,
+                "partial": bool(failure_messages or warning),
+            })
+
+        for _ in range(MAX_AI_TOOL_ROUNDS):
             r = _ai("POST", "/chat", json={
                 "messages": messages, "model": model, "zdr": zdr,
                 "tools": BUILTIN_TOOLS, "tool_choice": "auto",
             })
             if r.status_code != 200:
+                if successful_actions:
+                    return action_summary("The AI stopped after these changes because the model service returned an error.")
                 try:
                     payload = r.json()
                 except Exception:
@@ -1602,10 +1787,12 @@ def ai_chat_tools():
             tool_calls = message.get("tool_calls") or []
 
             if not tool_calls:
-                if tool_failures and not (tasks_changed or daily_tasks_changed):
+                if successful_actions:
+                    return action_summary()
+                if tool_failures:
                     return jsonify({
                         "status": "error",
-                        "message": "Task change failed: " + "; ".join(tool_failures),
+                        "message": "Task change failed: " + "; ".join(dict.fromkeys(tool_failures.values())),
                     }), 400
                 return jsonify({
                     "status": "success",
@@ -1618,8 +1805,27 @@ def ai_chat_tools():
 
             messages.append(message)
             for tc in tool_calls:
-                result = _execute_tool_call(tc, local_date=local_date, local_day=local_day,
-                                            local_timezone=local_timezone)
+                tool_name = tc.get("function", {}).get("name")
+                raw_tool_arguments = tc.get("function", {}).get("arguments") or {}
+                try:
+                    normalized_arguments = (
+                        json.loads(raw_tool_arguments) if isinstance(raw_tool_arguments, str)
+                        else raw_tool_arguments
+                    )
+                    mutation_signature = tool_name + ":" + json.dumps(
+                        normalized_arguments, sort_keys=True, separators=(",", ":")
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    mutation_signature = tool_name + ":" + str(raw_tool_arguments)
+
+                if tool_name in mutation_tools and mutation_signature in seen_successful_mutations:
+                    result = json.dumps({
+                        "status": "success", "duplicate": True,
+                        "message": "This exact action was already completed in this request.",
+                    })
+                else:
+                    result = _execute_tool_call(tc, local_date=local_date, local_day=local_day,
+                                                local_timezone=local_timezone)
                 result_payload = {}
                 try:
                     result_payload = json.loads(result)
@@ -1633,26 +1839,57 @@ def ai_chat_tools():
                                     "already trusted computer, sign in to the same account, then retry this request."
                                 ),
                             }), 409
-                        tool_failures.append(failure)
+                        tool_failures[mutation_signature] = failure
+                    elif result_payload.get("status") == "partial":
+                        tool_failures[mutation_signature] = str(
+                            result_payload.get("warning") or "Action was only partially completed"
+                        )
+                    elif result_payload.get("status") == "success":
+                        tool_failures.pop(mutation_signature, None)
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    tool_failures.append("Task tool returned an invalid response")
-                if tc.get("function", {}).get("name") in ("add_task", "update_task", "complete_task", "delete_task"):
-                    try:
-                        tasks_changed = tasks_changed or result_payload.get("status") == "success"
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        pass
-                if tc.get("function", {}).get("name") in ("add_daily_task", "update_daily_task", "complete_daily_task", "delete_daily_task"):
-                    try:
-                        daily_tasks_changed = daily_tasks_changed or result_payload.get("status") == "success"
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        pass
+                    tool_failures[mutation_signature] = "Task tool returned an invalid response"
+                mutation_succeeded = (
+                    result_payload.get("status") == "success"
+                    or bool(result_payload.get("mutation_applied"))
+                )
+                is_duplicate = bool(result_payload.get("duplicate"))
+                if tool_name in mutation_tools and mutation_succeeded and not is_duplicate:
+                    seen_successful_mutations.add(mutation_signature)
+                    successful_actions.append(result_payload.get("message") or f"Completed {tool_name}")
+                    if result_payload.get("status") == "success":
+                        tool_failures.pop(mutation_signature, None)
+                if tool_name in ("add_task", "update_task", "complete_task", "delete_task"):
+                    tasks_changed = tasks_changed or (mutation_succeeded and not is_duplicate)
+                if tool_name in ("add_daily_task", "update_daily_task", "complete_daily_task", "delete_daily_task"):
+                    daily_tasks_changed = daily_tasks_changed or (mutation_succeeded and not is_duplicate)
                 messages.append({"role": "tool", "content": result, "tool_call_id": tc.get("id")})
 
+            # Report from actual tool results as soon as a mutation batch finishes.
+            # A second model turn used to repeat writes or report failure after a
+            # successful write, even though the task changes had already committed.
+            if successful_actions:
+                return action_summary()
+
+        if successful_actions:
+            return action_summary(
+                f"The model reached the {MAX_AI_TOOL_ROUNDS}-round conversation limit after completing the actions above."
+            )
+        return jsonify({
+            "status": "error",
+            "message": f"AI reached the {MAX_AI_TOOL_ROUNDS}-round conversation limit without completing an action.",
+        }), 400
+
     except req.exceptions.Timeout:
+        if 'successful_actions' in locals() and successful_actions:
+            return action_summary("The model timed out after completing the actions above.")
         return jsonify({"status": "error", "message": "AI request timed out waiting for ai_inference."}), 504
     except req.exceptions.ConnectionError:
+        if 'successful_actions' in locals() and successful_actions:
+            return action_summary("The AI service disconnected after completing the actions above.")
         return jsonify({"status": "error", "message": "AI service not available."}), 503
     except Exception as e:
+        if 'successful_actions' in locals() and successful_actions:
+            return action_summary("An internal error occurred after completing the actions above.")
         return jsonify({"status": "error", "message": str(e)}), 503
 
 @app.route("/api/ai/models", methods=["GET"])
@@ -1782,11 +2019,12 @@ def calendar_data(year, month):
     for day_number in range(1, last_day + 1):
         weekday = datetime(year, month, day_number).strftime("%a")
         for task in daily_tasks:
-            if weekday in task.get("days", []):
+            day_schedule = _daily_schedule_for_day(task, weekday)
+            if day_schedule:
                 by_date.setdefault(str(day_number), []).append({
                     "title": task.get("title"),
-                    "due_time": task.get("start_time", ""),
-                    "end_time": task.get("end_time", ""),
+                    "due_time": day_schedule.get("start_time", ""),
+                    "end_time": day_schedule.get("end_time", ""),
                     "color": "daily", "type": "daily",
                 })
     for entries in by_date.values():
@@ -1832,11 +2070,12 @@ def weekly_data():
         date_key = day_date.strftime("%m-%d-%Y")
         weekday = day_date.strftime("%a")
         for task in daily_tasks:
-            if weekday in task.get("days", []):
+            day_schedule = _daily_schedule_for_day(task, weekday)
+            if day_schedule:
                 week_dates[date_key].append({
                     "title": task.get("title"),
-                    "due_time": task.get("start_time", ""),
-                    "end_time": task.get("end_time", ""),
+                    "due_time": day_schedule.get("start_time", ""),
+                    "end_time": day_schedule.get("end_time", ""),
                     "color": "daily", "type": "daily",
                 })
     for entries in week_dates.values():

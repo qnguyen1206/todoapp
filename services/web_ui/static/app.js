@@ -620,14 +620,14 @@ async function loadDaily() {
   list.innerHTML = header + tasks.map(t => {
     const safeId = encodeURIComponent(String(t.id ?? ''));
     const status = dailyTaskStatus(t);
-    const time = t.end_time ? `${fmtTime(t.start_time)} - ${fmtTime(t.end_time)}` : fmtTime(t.start_time);
+    const time = formatDailyScheduleTimes(t);
     const recurrence = formatDailyRecurrence(t.days || []);
     return `
     <div class="daily-item ${t.done ? 'done' : ''} ${status.className}">
       <input type="checkbox" class="daily-check" ${t.done ? 'checked' : ''}
              onchange="toggleDaily('${safeId}')"/>
       <span class="daily-days" title="${escHtml(recurrence)}">${escHtml(recurrence)}</span>
-      <span class="daily-time">${escHtml(time)}</span>
+      <span class="daily-time" title="${escHtml(time)}">${escHtml(time)}</span>
       <span class="daily-title">${escHtml(t.title)}</span>
       <span class="daily-status">${escHtml(status.label)}</span>
       <span class="daily-actions">
@@ -658,6 +658,17 @@ function formatDailyRecurrence(days) {
   return `Every ${names.length === 2 ? names.join(' & ') : `${names.slice(0, -1).join(', ')} & ${names.at(-1)}`}`;
 }
 
+function formatDailyScheduleTimes(task) {
+  const schedules = Array.isArray(task.schedules) && task.schedules.length
+    ? task.schedules
+    : [{days: task.days || [], start_time: task.start_time || '', end_time: task.end_time || ''}];
+  const formatRange = schedule => schedule.end_time
+    ? `${fmtTime(schedule.start_time)} - ${fmtTime(schedule.end_time)}`
+    : fmtTime(schedule.start_time);
+  if (schedules.length === 1) return formatRange(schedules[0]);
+  return schedules.map(schedule => `${(schedule.days || []).join(', ')}: ${formatRange(schedule)}`).join('; ');
+}
+
 function dailyTaskStatus(task) {
   if (task.done) return {label: 'Completed', className: 'completed'};
   if (task.scheduled_today === false) return {label: 'Not Today', className: 'not-today'};
@@ -682,6 +693,51 @@ function configureDailyTimeInputs() {
   document.getElementById('daily-end-label').textContent = use24Hour ? 'End Time (optional, HH:MM)' : 'End Time (optional, HH:MM AM/PM)';
   document.getElementById('daily-start').placeholder = use24Hour ? '09:00' : '9:00 AM';
   document.getElementById('daily-end').placeholder = use24Hour ? '10:00' : '10:00 AM';
+  document.querySelectorAll('.daily-day-start').forEach(input => { input.placeholder = use24Hour ? '09:00' : '9:00 AM'; });
+  document.querySelectorAll('.daily-day-end').forEach(input => { input.placeholder = use24Hour ? '10:00' : '10:00 AM'; });
+}
+
+let dailyScheduleDrafts = {};
+
+function selectedDailyDays() {
+  return [...document.querySelectorAll('input[name="daily-day"]:checked')].map(box => box.value);
+}
+
+function captureDailyScheduleDrafts() {
+  document.querySelectorAll('.daily-day-time-row').forEach(row => {
+    dailyScheduleDrafts[row.dataset.day] = {
+      start_time: row.querySelector('.daily-day-start').value,
+      end_time: row.querySelector('.daily-day-end').value,
+    };
+  });
+}
+
+function renderDailyDayTimeRows() {
+  const container = document.getElementById('daily-day-times');
+  const custom = document.getElementById('daily-custom-times').checked;
+  captureDailyScheduleDrafts();
+  container.hidden = !custom;
+  document.getElementById('daily-default-times').hidden = custom;
+  if (!custom) return;
+
+  const fallbackStart = document.getElementById('daily-start').value || timeForTaskInput('09:00');
+  const fallbackEnd = document.getElementById('daily-end').value;
+  const fullNames = {Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday',
+                     Fri: 'Friday', Sat: 'Saturday', Sun: 'Sunday'};
+  container.innerHTML = selectedDailyDays().map(day => {
+    const draft = dailyScheduleDrafts[day] || {start_time: fallbackStart, end_time: fallbackEnd};
+    dailyScheduleDrafts[day] = draft;
+    return `<div class="daily-day-time-row" data-day="${day}">
+      <strong>${fullNames[day]}</strong>
+      <label>Start *<input class="input daily-day-start" type="text" value="${escHtml(draft.start_time)}"/></label>
+      <label>End (optional)<input class="input daily-day-end" type="text" value="${escHtml(draft.end_time)}"/></label>
+    </div>`;
+  }).join('');
+  configureDailyTimeInputs();
+}
+
+function toggleDailyCustomTimes() {
+  renderDailyDayTimeRows();
 }
 
 function configureDailyReminderInputs() {
@@ -703,6 +759,18 @@ function openDailyModal(encodedId = '') {
   document.getElementById('daily-title').value = task?.title || '';
   document.getElementById('daily-start').value = timeForTaskInput(task?.start_time || '09:00');
   document.getElementById('daily-end').value = task?.end_time ? timeForTaskInput(task.end_time) : '';
+  const schedules = Array.isArray(task?.schedules) && task.schedules.length
+    ? task.schedules
+    : [{days: task?.days || [], start_time: task?.start_time || '09:00', end_time: task?.end_time || ''}];
+  dailyScheduleDrafts = {};
+  document.getElementById('daily-day-times').innerHTML = '';
+  schedules.forEach(schedule => (schedule.days || []).forEach(day => {
+    dailyScheduleDrafts[day] = {
+      start_time: timeForTaskInput(schedule.start_time || '09:00'),
+      end_time: schedule.end_time ? timeForTaskInput(schedule.end_time) : '',
+    };
+  }));
+  document.getElementById('daily-custom-times').checked = schedules.length > 1;
   document.getElementById('daily-notes').value = task?.notes || '';
   document.getElementById('daily-reminder-email-enabled').checked = Boolean(task?.reminder_email_enabled);
   document.getElementById('daily-reminder-email').value = task?.reminder_email || '';
@@ -712,6 +780,7 @@ function openDailyModal(encodedId = '') {
   document.querySelectorAll('input[name="daily-day"]').forEach(box => { box.checked = task ? task.days.includes(box.value) : true; });
   document.getElementById('daily-form-error').style.display = 'none';
   configureDailyTimeInputs();
+  renderDailyDayTimeRows();
   configureDailyReminderInputs();
   document.getElementById('daily-modal').style.display = 'flex';
   document.getElementById('daily-title').focus();
@@ -722,10 +791,31 @@ function closeDailyModal() { document.getElementById('daily-modal').style.displa
 async function saveDailyTask() {
   const id = document.getElementById('edit-daily-id').value;
   const title = document.getElementById('daily-title').value.trim();
-  const days = [...document.querySelectorAll('input[name="daily-day"]:checked')].map(box => box.value);
-  const start_time = normalizeDueTime(document.getElementById('daily-start').value);
-  const endInput = document.getElementById('daily-end').value.trim();
-  const end_time = endInput ? normalizeDueTime(endInput) : '';
+  const days = selectedDailyDays();
+  const customTimes = document.getElementById('daily-custom-times').checked;
+  let start_time = normalizeDueTime(document.getElementById('daily-start').value);
+  let endInput = document.getElementById('daily-end').value.trim();
+  let end_time = endInput ? normalizeDueTime(endInput) : '';
+  let schedules = [];
+  let scheduleError = '';
+  if (customTimes) {
+    captureDailyScheduleDrafts();
+    schedules = days.map(day => {
+      const draft = dailyScheduleDrafts[day] || {};
+      const normalizedStart = normalizeDueTime(draft.start_time);
+      const rawEnd = String(draft.end_time || '').trim();
+      const normalizedEnd = rawEnd ? normalizeDueTime(rawEnd) : '';
+      if (!normalizedStart) scheduleError = `${day} needs a valid start time.`;
+      else if (rawEnd && !normalizedEnd) scheduleError = `${day} needs a valid end time or a blank end time.`;
+      return {days: [day], start_time: normalizedStart || '', end_time: normalizedEnd || ''};
+    });
+    if (schedules.length) {
+      start_time = schedules[0].start_time;
+      end_time = schedules[0].end_time;
+    }
+  } else {
+    schedules = [{days, start_time: start_time || '', end_time: end_time || ''}];
+  }
   const notes = document.getElementById('daily-notes').value.trim();
   const emailEnabled = document.getElementById('daily-reminder-email-enabled').checked;
   const smsEnabled = document.getElementById('daily-reminder-sms-enabled').checked;
@@ -738,14 +828,21 @@ async function saveDailyTask() {
   let message = '';
   if (!title) message = 'Task name is required.';
   else if (!days.length) message = 'Select at least one day.';
+  else if (scheduleError) message = scheduleError;
   else if (!start_time) message = 'Enter a valid start time.';
-  else if (endInput && !end_time) message = 'Enter a valid end time or leave it blank.';
+  else if (!customTimes && endInput && !end_time) message = 'Enter a valid end time or leave it blank.';
   else if (emailEnabled && !document.getElementById('daily-reminder-email').checkValidity()) message = 'Enter a valid reminder email address.';
   else if (smsEnabled && !/^\+[1-9]\d{7,14}$/.test(reminderPhone.replace(/[\s().-]/g, ''))) message = 'Enter the phone number in international format, such as +15551234567.';
   if (message) { error.textContent = message; error.style.display = 'block'; return; }
   try {
     const result = await api(id ? 'PUT' : 'POST', id ? `/api/daily/${encodeURIComponent(id)}` : '/api/daily',
-      {title, days, start_time, end_time, notes, reminder});
+      {title, days, start_time, end_time, schedules, notes, reminder});
+    if (result.status === 'partial') {
+      closeDailyModal();
+      await loadDaily();
+      alert(result.message || 'The schedule was saved, but part of the reminder setup failed.');
+      return;
+    }
     if (result.status !== 'success') throw new Error(result.message || 'Could not save daily task.');
     closeDailyModal();
     loadDaily();
@@ -984,7 +1081,7 @@ async function sendAI() {
       const d = await api('POST', '/api/ai/chat/tools', {
         prompt, model: selectedModel, zdr: zdrEnabled, history: historyForRequest,
         local_date: localDate, local_day: localDay, local_timezone: localTimezone,
-      }, 120000);
+      }, 300000);
       thinking.remove();
       if (d.status === 'success') {
         appendAIBotResponse(d.response || '(no response)', d);
@@ -1243,7 +1340,7 @@ async function renderCalendar() {
     const dots  = tasks.map(t => {
       const time = t.due_time ? `${fmtTime(t.due_time)} ` : '';
       const marker = t.type === 'daily' ? '&#8635; ' : '';
-      return `<div class="cal-dot ${t.color||'normal'}" title="${t.type === 'daily' ? 'Recurring daily task' : 'Todo task'}">${marker}${escHtml(time + t.title)}</div>`;
+      return `<div class="cal-dot ${t.color||'normal'}" title="${escHtml(t.title)}">${marker}${escHtml(time + t.title)}</div>`;
     }).join('');
     html += `<div class="cal-cell${isToday?' today-cell':''}">
                <div class="cal-day">${day}</div>${dots}</div>`;
@@ -1269,6 +1366,7 @@ async function loadWeekly(scrollToCurrentTime = true) {
   const todayStr = `${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}-${today.getFullYear()}`;
 
   const grid = document.getElementById('weekly-grid');
+  const unscheduled = document.getElementById('weekly-unscheduled');
   const toSlot = value => {
     const normalized = normalizeDueTime(value);
     if (!normalized) return null;
@@ -1309,12 +1407,38 @@ async function loadWeekly(scrollToCurrentTime = true) {
     return events;
   };
 
+  const dateOnlyGroups = dates.map((date, index) => ({
+    day: days[index],
+    tasks: (week[date] ?? []).filter(task => !normalizeDueTime(task.due_time)),
+  })).filter(group => group.tasks.length);
+  const dateOnlyCount = dateOnlyGroups.reduce((count, group) => count + group.tasks.length, 0);
+
+  if (dateOnlyCount) {
+    unscheduled.hidden = false;
+    unscheduled.innerHTML = `
+      <div class="weekly-unscheduled-heading">
+        <strong>No due time</strong>
+        <span>${dateOnlyCount} date-only ${dateOnlyCount === 1 ? 'task' : 'tasks'}</span>
+      </div>
+      <div class="weekly-unscheduled-days">
+        ${dateOnlyGroups.map(group => `
+          <section class="weekly-unscheduled-day">
+            <strong>${escHtml(group.day)}</strong>
+            <div class="weekly-unscheduled-tasks">
+              ${group.tasks.map(task => `<span class="weekly-all-day-task ${task.color || 'normal'}" title="${escHtml(task.title)}">${escHtml(task.title)}</span>`).join('')}
+            </div>
+          </section>
+        `).join('')}
+      </div>`;
+  } else {
+    unscheduled.hidden = true;
+    unscheduled.innerHTML = '';
+  }
+
   let html = '<div class="weekly-corner">Time</div>';
   dates.forEach((date, i) => {
-    const allDay = (week[date] ?? []).filter(task => !task.due_time);
     html += `<div class="weekly-day-header${date === todayStr ? ' today-col' : ''}" style="grid-column:${i + 2};grid-row:1">
       <strong>${escHtml(days[i])}</strong>
-      <div class="weekly-all-day">${allDay.map(task => `<span class="weekly-all-day-task ${task.color || 'normal'}">${escHtml(task.title)}</span>`).join('')}</div>
     </div>`;
   });
 
@@ -1338,7 +1462,7 @@ async function loadWeekly(scrollToCurrentTime = true) {
       const marker = task.type === 'daily' ? '&#8635; ' : '';
       const laneWidth = 100 / task._laneCount;
       const laneLeft = laneWidth * task._lane;
-      html += `<div class="weekly-event ${task.color || 'normal'}" style="grid-column:${dayIndex + 2};grid-row:${start + 2} / span ${span};--event-width:${laneWidth}%;--event-left:${laneLeft}%" title="${task.type === 'daily' ? 'Recurring daily task' : 'Todo task'}">
+      html += `<div class="weekly-event ${task.color || 'normal'}" style="grid-column:${dayIndex + 2};grid-row:${start + 2} / span ${span};--event-width:${laneWidth}%;--event-left:${laneLeft}%" title="${escHtml(task.title)}">
         <span class="weekly-event-time">${escHtml(fmtTime(task.due_time) + endLabel)}</span>
         <span>${marker}${escHtml(task.title)}</span>
       </div>`;

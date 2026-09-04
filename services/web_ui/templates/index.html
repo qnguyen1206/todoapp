@@ -157,6 +157,7 @@
     <div class="toolbar">
       <button class="btn" onclick="loadWeekly()">↻ Refresh</button>
     </div>
+    <aside id="weekly-unscheduled" class="weekly-unscheduled" hidden></aside>
     <div id="weekly-grid" class="weekly-grid"></div>
   </section>
 
@@ -274,19 +275,24 @@
       <div class="form-group">
         <label>Days *</label>
         <div class="weekday-picker">
-          <label><input type="checkbox" name="daily-day" value="Mon" checked/> Mon</label>
-          <label><input type="checkbox" name="daily-day" value="Tue" checked/> Tue</label>
-          <label><input type="checkbox" name="daily-day" value="Wed" checked/> Wed</label>
-          <label><input type="checkbox" name="daily-day" value="Thu" checked/> Thu</label>
-          <label><input type="checkbox" name="daily-day" value="Fri" checked/> Fri</label>
-          <label><input type="checkbox" name="daily-day" value="Sat" checked/> Sat</label>
-          <label><input type="checkbox" name="daily-day" value="Sun" checked/> Sun</label>
+          <label><input type="checkbox" name="daily-day" value="Mon" checked onchange="renderDailyDayTimeRows()"/> Mon</label>
+          <label><input type="checkbox" name="daily-day" value="Tue" checked onchange="renderDailyDayTimeRows()"/> Tue</label>
+          <label><input type="checkbox" name="daily-day" value="Wed" checked onchange="renderDailyDayTimeRows()"/> Wed</label>
+          <label><input type="checkbox" name="daily-day" value="Thu" checked onchange="renderDailyDayTimeRows()"/> Thu</label>
+          <label><input type="checkbox" name="daily-day" value="Fri" checked onchange="renderDailyDayTimeRows()"/> Fri</label>
+          <label><input type="checkbox" name="daily-day" value="Sat" checked onchange="renderDailyDayTimeRows()"/> Sat</label>
+          <label><input type="checkbox" name="daily-day" value="Sun" checked onchange="renderDailyDayTimeRows()"/> Sun</label>
         </div>
       </div>
-      <div class="form-row">
+      <label class="setting-row daily-custom-time-toggle">
+        <input id="daily-custom-times" type="checkbox" onchange="toggleDailyCustomTimes()"/>
+        Use a different time for each selected day
+      </label>
+      <div id="daily-default-times" class="form-row">
         <div class="form-group"><label id="daily-start-label">Start Time *</label><input id="daily-start" class="input" type="text"/></div>
         <div class="form-group"><label id="daily-end-label">End Time (optional)</label><input id="daily-end" class="input" type="text"/></div>
       </div>
+      <div id="daily-day-times" class="daily-day-times" hidden></div>
       <div class="form-group"><label>Notes</label><textarea id="daily-notes" class="input" rows="3" placeholder="Optional notes…"></textarea></div>
       <fieldset class="reminder-options">
         <legend>Recurring reminder</legend>
@@ -384,6 +390,6 @@
       </iframe>
     </div>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260904-daily-per-day-times"></script>
 </body>
 </html>
