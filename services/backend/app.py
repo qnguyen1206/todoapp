@@ -684,10 +684,26 @@ def init_db():
 def health():
     try:
         conn = get_db()
-        conn.close()
-        return jsonify({"status": "ok", "service": "backend", "timestamp": datetime.now(timezone.utc).isoformat()})
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        finally:
+            conn.close()
+        return jsonify({
+            "status": "ok",
+            "service": "backend",
+            "database": {"status": "ok", "type": "postgresql"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
     except Exception as exc:
-        return jsonify({"status": "error", "message": str(exc)}), 503
+        return jsonify({
+            "status": "error",
+            "service": "backend",
+            "database": {"status": "error", "type": "postgresql"},
+            "message": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }), 503
 
 
 # ---------------------------------------------------------------------------
@@ -1379,6 +1395,79 @@ def delete_task(task_id):
         return jsonify({"status": "success", "deleted": deleted})
     except Exception as exc:
         conn.rollback()
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
+def _batch_task_ids(data):
+    raw_ids = data.get("task_ids") if isinstance(data, dict) else None
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return None, "task_ids must be a non-empty list"
+    task_ids = list(dict.fromkeys(str(task_id).strip() for task_id in raw_ids if str(task_id).strip()))
+    if not task_ids:
+        return None, "task_ids must contain at least one ID"
+    return task_ids, None
+
+
+@app.route("/tasks/batch/complete", methods=["POST"])
+@require_auth
+def complete_tasks_batch():
+    """Atomically complete multiple tasks belonging to the authenticated user."""
+    err = require_api_key()
+    if err:
+        return err
+    task_ids, validation_error = _batch_task_ids(request.get_json(silent=True) or {})
+    if validation_error:
+        return jsonify({"status": "error", "message": validation_error}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
+                "WHERE user_id = %s AND task_id = ANY(%s) AND completed = FALSE",
+                (g.user_id, task_ids),
+            )
+            updated = cur.rowcount
+            cur.execute(
+                "SELECT COUNT(*) FROM tasks WHERE user_id = %s AND task_id = ANY(%s)",
+                (g.user_id, task_ids),
+            )
+            matched = cur.fetchone()[0]
+        conn.commit()
+        return jsonify({"status": "success", "requested": len(task_ids), "matched": matched, "updated": updated})
+    except Exception as exc:
+        conn.rollback()
+        log.error("complete_tasks_batch error: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/tasks/batch/delete", methods=["POST"])
+@require_auth
+def delete_tasks_batch():
+    """Atomically delete multiple tasks and their reminder state."""
+    err = require_api_key()
+    if err:
+        return err
+    task_ids, validation_error = _batch_task_ids(request.get_json(silent=True) or {})
+    if validation_error:
+        return jsonify({"status": "error", "message": validation_error}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tasks WHERE user_id = %s AND task_id = ANY(%s)", (g.user_id, task_ids))
+            deleted = cur.rowcount
+            cur.execute("DELETE FROM task_reminders WHERE user_id = %s AND task_id = ANY(%s)", (g.user_id, task_ids))
+            cur.execute("DELETE FROM reminder_deliveries WHERE user_id = %s AND task_id = ANY(%s)", (g.user_id, task_ids))
+        conn.commit()
+        return jsonify({"status": "success", "requested": len(task_ids), "deleted": deleted})
+    except Exception as exc:
+        conn.rollback()
+        log.error("delete_tasks_batch error: %s", exc)
         return jsonify({"status": "error", "message": str(exc)}), 500
     finally:
         conn.close()

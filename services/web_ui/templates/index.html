@@ -38,14 +38,23 @@
   <section id="tab-tasks" class="tab-content active">
     <div class="toolbar">
       <button class="btn btn-primary" onclick="openAddTask()">+ Add Task</button>
+      <button class="btn" onclick="openBulkTaskModal()">+ Add Multiple</button>
       <button class="btn" onclick="loadTasks()">↻ Refresh</button>
       <button class="btn btn-danger" onclick="clearAllTasks()">Clear All Tasks</button>
+    </div>
+    <div id="task-bulk-actions" class="task-bulk-actions" hidden>
+      <strong id="task-selection-count">Select tasks below (0 selected)</strong>
+      <button class="btn btn-sm btn-primary" type="button" onclick="finishSelectedTasks()">Finish Selected</button>
+      <button class="btn btn-sm" type="button" onclick="openBulkEditModal()">Edit Selected</button>
+      <button class="btn btn-sm btn-danger" type="button" onclick="deleteSelectedTasks()">Delete Selected</button>
+      <button class="btn btn-sm" type="button" onclick="clearTaskSelection()">Clear Selection</button>
     </div>
 
     <div class="task-table-wrap">
     <table class="task-table" id="task-table">
       <thead>
         <tr>
+          <th class="select-cell"><input id="select-all-tasks" type="checkbox" aria-label="Select all visible tasks" onchange="toggleAllVisibleTasks(this.checked)"/></th>
           <th onclick="sortTasks('title')">Task ⇅</th>
           <th onclick="sortTasks('due_date')">Due Date ⇅</th>
           <th>Time</th>
@@ -54,7 +63,7 @@
         </tr>
       </thead>
       <tbody id="task-tbody">
-        <tr><td colspan="5" class="empty-msg">Loading…</td></tr>
+        <tr><td colspan="6" class="empty-msg">Loading…</td></tr>
       </tbody>
     </table>
     </div>
@@ -185,9 +194,15 @@
       <p class="help-text">Set <code>WEB_USER_ID</code> env var in Phala to match your desktop app's user ID for seamless sync.</p>
     </div>
     <div class="settings-card">
-      <h3>Backend Health</h3>
-      <button class="btn" onclick="checkHealth()">Check All Services</button>
-      <pre id="health-output" class="health-output"></pre>
+      <h3>System Health</h3>
+      <p class="help-text">Check the Web UI, storage backend, database, AI, sync, scheduler, and OpenClaw services.</p>
+      <div class="health-toolbar">
+        <button id="health-check-btn" class="btn" onclick="checkHealth()">Check All Services</button>
+        <span id="health-last-checked" class="health-last-checked">Not checked yet</span>
+      </div>
+      <div id="health-output" class="health-output" aria-live="polite">
+        <div class="health-empty">Run a health check to see the current CVM service status.</div>
+      </div>
     </div>
     <div class="settings-card">
       <a class="external-link" href="https://trust.phala.com/app/7ae3718bfb21f7feac51d3b223df22e26d7d67e1" target="_blank" rel="noopener noreferrer">
@@ -263,6 +278,76 @@
       <div class="modal-actions">
         <button class="btn btn-primary" onclick="saveTask()">Save</button>
         <button class="btn" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Edit selected tasks -->
+  <div id="bulk-edit-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <h2>Edit Selected Tasks</h2>
+      <p id="bulk-edit-summary" class="help-text"></p>
+      <p class="help-text">Check only the fields you want to change. Unchecked fields stay as they are.</p>
+      <div class="bulk-edit-field">
+        <label class="setting-row"><input id="bulk-edit-date-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change due date</label>
+        <input id="bulk-edit-date" class="input" type="date" disabled/>
+      </div>
+      <div class="bulk-edit-field">
+        <label class="setting-row"><input id="bulk-edit-time-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change due time</label>
+        <input id="bulk-edit-time" class="input" type="text" placeholder="Leave empty to remove the due time" disabled/>
+      </div>
+      <div class="bulk-edit-field">
+        <label class="setting-row"><input id="bulk-edit-priority-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change priority</label>
+        <select id="bulk-edit-priority" class="input" disabled>
+          <option value="1">1 - Critical</option><option value="2">2 - High</option>
+          <option value="3" selected>3 - Medium</option><option value="4">4 - Low</option><option value="5">5 - Optional</option>
+        </select>
+      </div>
+      <div class="bulk-edit-field">
+        <label class="setting-row"><input id="bulk-edit-notes-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Replace notes</label>
+        <textarea id="bulk-edit-notes" class="input" rows="3" placeholder="New notes for every selected task" disabled></textarea>
+      </div>
+      <div id="bulk-edit-error" class="login-error" style="display:none"></div>
+      <div class="modal-actions">
+        <button id="bulk-edit-save" class="btn btn-primary" type="button" onclick="saveBulkTaskEdits()">Apply Changes</button>
+        <button class="btn" type="button" onclick="closeBulkEditModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Add Multiple Tasks (local parser; does not use AI) -->
+  <div id="bulk-task-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg bulk-task-modal">
+      <h2>Add Multiple Tasks</h2>
+      <p class="help-text">Paste one task per line. Dates, times, and priorities are recognized locally, so this works without AI.</p>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Default Due Date</label>
+          <input id="bulk-default-date" class="input" type="date"/>
+        </div>
+        <div class="form-group">
+          <label>Default Priority</label>
+          <select id="bulk-default-priority" class="input">
+            <option value="1">1 - Critical</option>
+            <option value="2">2 - High</option>
+            <option value="3" selected>3 - Medium</option>
+            <option value="4">4 - Low</option>
+            <option value="5">5 - Optional</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Tasks (one per line)</label>
+        <textarea id="bulk-task-input" class="input bulk-task-input" rows="9" placeholder="Buy groceries tomorrow at 6 PM p2&#10;Submit expense report Friday at 3:30 PM&#10;Call the dentist next Monday&#10;Final presentation | 09-18-2026 | 14:00 | p1 | Bring printed slides"></textarea>
+        <small class="help-text">Use phrases such as <strong>today</strong>, <strong>tomorrow</strong>, <strong>Friday</strong>, or <strong>next Monday</strong>. For exact control: <code>Task | date | time | priority | notes</code>.</small>
+      </div>
+      <div id="bulk-task-error" class="login-error" style="display:none"></div>
+      <div id="bulk-task-preview" class="bulk-task-preview">
+        <div class="empty-msg">Enter tasks above to preview them before saving.</div>
+      </div>
+      <div class="modal-actions">
+        <button id="bulk-add-button" type="button" class="btn btn-primary" onclick="saveBulkTasks()" disabled>Add Tasks</button>
+        <button type="button" class="btn" onclick="closeBulkTaskModal()">Cancel</button>
       </div>
     </div>
   </div>
@@ -390,6 +475,6 @@
       </iframe>
     </div>
   </div>
-  <script src="/static/app.js?v=20260904-daily-per-day-times"></script>
+  <script src="/static/app.js?v=20260908-system-health-dashboard"></script>
 </body>
 </html>

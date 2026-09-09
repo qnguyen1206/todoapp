@@ -12,8 +12,10 @@ import logging
 import sqlite3
 import uuid
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
+from time import perf_counter
 
 import requests as req
 from flask import Flask, render_template, request, jsonify, redirect, url_for, Response, g
@@ -1199,6 +1201,178 @@ def add_task():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
+
+@app.route("/api/tasks/bulk", methods=["POST"])
+@login_required
+def add_tasks_bulk():
+    """Validate and atomically store a non-AI batch of regular tasks."""
+    data = request.get_json(silent=True) or {}
+    incoming = data.get("tasks")
+    if not isinstance(incoming, list) or not incoming:
+        return jsonify({"status": "error", "message": "At least one task is required"}), 400
+
+    tasks = []
+    for index, item in enumerate(incoming, start=1):
+        if not isinstance(item, dict):
+            return jsonify({"status": "error", "message": f"Task {index} must be an object"}), 400
+        title = str(item.get("title") or "").strip()
+        due_date = str(item.get("due_date") or "").strip()
+        due_time = str(item.get("due_time") or "").strip()
+        notes = str(item.get("notes") or "No notes").strip() or "No notes"
+        try:
+            priority = int(item.get("priority", 3))
+            if priority < 1 or priority > 5:
+                raise ValueError("priority out of range")
+            datetime.strptime(due_date, "%m-%d-%Y")
+            if due_time:
+                datetime.strptime(due_time, "%H:%M")
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message":
+                f"Task {index} has an invalid date, time, or priority"}), 400
+        if not title:
+            return jsonify({"status": "error", "message": f"Task {index} needs a title"}), 400
+        tasks.append({
+            "id": uuid.uuid4().hex, "title": title, "due_date": due_date,
+            "due_time": due_time, "priority": str(priority), "notes": notes, "completed": False,
+        })
+
+    try:
+        user_id = current_user_id()
+        response = _backend("POST", "/tasks/store", json={
+            "tasks": _encrypt_tasks(tasks, user_id),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "conflict_policy": "preserve_remote",
+        })
+        if response.status_code != 200:
+            return jsonify({"status": "error", "message": response.text}), response.status_code
+        return jsonify({"status": "success", "added": len(tasks), "tasks": tasks})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+def _selected_task_ids(data):
+    raw_ids = data.get("task_ids") if isinstance(data, dict) else None
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return None, "Select at least one task"
+    task_ids = list(dict.fromkeys(str(task_id).strip() for task_id in raw_ids if str(task_id).strip()))
+    return (task_ids, None) if task_ids else (None, "Select at least one task")
+
+
+@app.route("/api/tasks/bulk/complete", methods=["POST"])
+@login_required
+def complete_tasks_bulk():
+    data = request.get_json(silent=True) or {}
+    task_ids, validation_error = _selected_task_ids(data)
+    if validation_error:
+        return jsonify({"status": "error", "message": validation_error}), 400
+    try:
+        response = _backend("POST", "/tasks/batch/complete", json={"task_ids": task_ids})
+        if response.status_code != 200:
+            return jsonify({"status": "error", "message": response.text}), response.status_code
+        result = response.json()
+        newly_completed = int(result.get("updated", 0))
+        stats_warning = None
+        if newly_completed:
+            try:
+                conn = get_db()
+                try:
+                    row = conn.execute("SELECT value FROM character WHERE key='tasks_completed'").fetchone()
+                    completed = int(row[0]) if row else 0
+                    new_completed = completed + newly_completed
+                    conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('tasks_completed',?)", (str(new_completed),))
+                    conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('level',?)", (str(new_completed // 5),))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as stats_exc:
+                # The task mutation already committed in the backend. Never report
+                # it as failed merely because optional local XP bookkeeping failed.
+                stats_warning = f"Tasks were completed, but XP could not be updated: {stats_exc}"
+                app.logger.warning(stats_warning)
+        return jsonify({"status": "success", **result, **({"warning": stats_warning} if stats_warning else {})})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/tasks/bulk/delete", methods=["POST"])
+@login_required
+def delete_tasks_bulk():
+    data = request.get_json(silent=True) or {}
+    task_ids, validation_error = _selected_task_ids(data)
+    if validation_error:
+        return jsonify({"status": "error", "message": validation_error}), 400
+    try:
+        response = _backend("POST", "/tasks/batch/delete", json={"task_ids": task_ids})
+        if response.status_code != 200:
+            return jsonify({"status": "error", "message": response.text}), response.status_code
+        return jsonify(response.json())
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/tasks/bulk/edit", methods=["POST"])
+@login_required
+def edit_tasks_bulk():
+    data = request.get_json(silent=True) or {}
+    task_ids, validation_error = _selected_task_ids(data)
+    changes = data.get("changes")
+    if validation_error:
+        return jsonify({"status": "error", "message": validation_error}), 400
+    if not isinstance(changes, dict) or not changes:
+        return jsonify({"status": "error", "message": "Choose at least one field to edit"}), 400
+    if set(changes) - {"due_date", "due_time", "priority", "notes"}:
+        return jsonify({"status": "error", "message": "Unsupported bulk-edit field"}), 400
+    try:
+        normalized_changes = dict(changes)
+        if "due_date" in normalized_changes:
+            datetime.strptime(str(normalized_changes["due_date"]), "%m-%d-%Y")
+            normalized_changes["due_date"] = str(normalized_changes["due_date"])
+        if "due_time" in normalized_changes:
+            normalized_changes["due_time"] = str(normalized_changes["due_time"] or "")
+            if normalized_changes["due_time"]:
+                datetime.strptime(normalized_changes["due_time"], "%H:%M")
+        if "priority" in normalized_changes:
+            priority = int(normalized_changes["priority"])
+            if priority < 1 or priority > 5:
+                raise ValueError("priority out of range")
+            normalized_changes["priority"] = str(priority)
+        if "notes" in normalized_changes:
+            normalized_changes["notes"] = str(normalized_changes["notes"] or "No notes")
+
+        user_id = current_user_id()
+        response = _backend("GET", "/tasks/retrieve")
+        if response.status_code != 200:
+            return jsonify({"status": "error", "message": response.text}), response.status_code
+        current = _decrypt_tasks(response.json().get("tasks", []), user_id)
+        regular_by_id = {
+            str(task.get("task_id") or task.get("id")): task
+            for task in current if not _decode_daily_payload(task.get("notes", ""))
+        }
+        missing = [task_id for task_id in task_ids if task_id not in regular_by_id]
+        if missing:
+            return jsonify({"status": "error", "message": "Some selected tasks no longer exist; refresh and try again"}), 409
+
+        edited = []
+        for task_id in task_ids:
+            task = dict(regular_by_id[task_id])
+            task.update(normalized_changes)
+            edited.append({
+                "id": task_id, "title": task.get("title", ""), "due_date": task.get("due_date", ""),
+                "due_time": task.get("due_time", ""), "priority": str(task.get("priority", "3")),
+                "notes": task.get("notes", "No notes"), "completed": bool(task.get("completed", False)),
+            })
+        store_response = _backend("POST", "/tasks/store", json={
+            "tasks": _encrypt_tasks(edited, user_id),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        if store_response.status_code != 200:
+            return jsonify({"status": "error", "message": store_response.text}), store_response.status_code
+        return jsonify({"status": "success", "updated": len(edited)})
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Enter a valid date, time, and priority"}), 400
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
 @app.route("/api/tasks/<task_id>", methods=["PUT"])
 @login_required
 def edit_task(task_id):
@@ -2194,28 +2368,25 @@ def openclaw_health():
 
 
 @app.route("/api/health/all", methods=["GET"])
+@login_required
 def health_all():
-    """Check health for all internal services reachable from web_ui."""
-    services = {
-        "web_ui": {
-            "url": None,
-            "ok": True,
-            "status": "ok",
-            "code": 200,
-            "message": "running",
-        },
-        "backend": {"url": f"{BACKEND_URL}/health"},
-        "ai_inference": {"url": f"{AI_URL}/health"},
-        "task_sync": {"url": f"{SYNC_URL}/health"},
-        "scheduler": {"url": f"{SCHEDULER_URL}/health"},
-        "openclaw": {"url": f"{OPENCLAW_URL}/healthz"},
+    """Check all CVM services concurrently for the Settings dashboard."""
+    targets = {
+        "backend": f"{BACKEND_URL}/health",
+        "ai_inference": f"{AI_URL}/health",
+        "task_sync": f"{SYNC_URL}/health",
+        "scheduler": f"{SCHEDULER_URL}/health",
+        "openclaw": f"{OPENCLAW_URL}/healthz",
     }
 
-    for name, svc in services.items():
-        if svc.get("url") is None:
-            continue
+    def probe(name, url):
+        started = perf_counter()
         try:
-            resp = req.get(svc["url"], headers={"Content-Type": "application/json", **({"X-API-Key": API_KEY} if API_KEY else {})}, timeout=5)
+            resp = req.get(
+                url,
+                headers={"Content-Type": "application/json", **({"X-API-Key": API_KEY} if API_KEY else {})},
+                timeout=5,
+            )
             payload = {}
             try:
                 payload = resp.json()
@@ -2224,21 +2395,72 @@ def health_all():
 
             status_text = str(payload.get("status", "")).lower() if isinstance(payload, dict) else ""
             is_ok = resp.status_code == 200 and status_text in ("ok", "success", "healthy", "")
-            services[name] = {
-                "url": svc["url"],
+            message = payload.get("message", "") if isinstance(payload, dict) else ""
+            details = {}
+            if name == "ai_inference" and isinstance(payload, dict):
+                details = {
+                    "configured": payload.get("configured"),
+                    "model": payload.get("default_model", ""),
+                    "provider": payload.get("provider", ""),
+                }
+                if payload.get("configured") is False:
+                    is_ok = False
+                    status_text = "not configured"
+                    message = message or "AI API key is not configured"
+            elif name == "scheduler" and isinstance(payload, dict):
+                details = {"active_jobs": payload.get("active_jobs")}
+
+            return {
                 "ok": is_ok,
-                "status": payload.get("status", "ok") if isinstance(payload, dict) else "unknown",
+                "status": status_text or "unknown",
                 "code": resp.status_code,
-                "message": payload.get("message", "") if isinstance(payload, dict) else "",
+                "message": message,
+                "latency_ms": round((perf_counter() - started) * 1000),
+                "details": details,
+                "_payload": payload,
             }
         except Exception as exc:
-            services[name] = {
-                "url": svc["url"],
+            return {
                 "ok": False,
                 "status": "error",
                 "code": 0,
                 "message": str(exc),
+                "latency_ms": round((perf_counter() - started) * 1000),
+                "details": {},
+                "_payload": {},
             }
+
+    services = {
+        "web_ui": {
+            "ok": True,
+            "status": "ok",
+            "code": 200,
+            "message": "Settings dashboard is running",
+            "latency_ms": 0,
+            "details": {},
+        }
+    }
+    with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+        futures = {executor.submit(probe, name, url): name for name, url in targets.items()}
+        for future in as_completed(futures):
+            services[futures[future]] = future.result()
+
+    backend = services.get("backend", {})
+    backend_payload = backend.get("_payload", {})
+    database_payload = backend_payload.get("database", {}) if isinstance(backend_payload, dict) else {}
+    database_status = str(database_payload.get("status", "")).lower()
+    database_ok = bool(backend.get("ok")) and database_status in ("ok", "healthy", "success")
+    services["postgres"] = {
+        "ok": database_ok,
+        "status": database_status or ("unknown" if backend.get("ok") else "unreachable"),
+        "code": backend.get("code", 0),
+        "message": "Database query succeeded" if database_ok else "Database could not be verified through the backend",
+        "latency_ms": backend.get("latency_ms", 0),
+        "details": {"type": database_payload.get("type", "postgresql")},
+    }
+
+    for service in services.values():
+        service.pop("_payload", None)
 
     overall_ok = all(svc.get("ok", False) for svc in services.values())
     return jsonify({

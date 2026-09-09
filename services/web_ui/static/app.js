@@ -20,6 +20,8 @@ let toolsEnabled = true;
 let streamEnabled = false;
 let conversationHistory = [];
 let currentMeetingProposal = null;
+let bulkParsedTasks = [];
+const selectedTaskIds = new Set();
 const snoozedMeetingProposals = new Set();
 const MAX_HISTORY_MESSAGES = 20; // ~10 exchanges; trims oldest first
 
@@ -112,7 +114,10 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.tab === 'ai')       initAI();
     if (btn.dataset.tab === 'calendar') renderCalendar();
     if (btn.dataset.tab === 'weekly')   loadWeekly();
-    if (btn.dataset.tab === 'settings') loadSettings();
+    if (btn.dataset.tab === 'settings') {
+      loadSettings();
+      checkHealth();
+    }
   });
 });
 
@@ -358,16 +363,19 @@ async function loadCharacter() {
 ══════════════════════════════════════════════════════════════════ */
 async function loadTasks() {
   document.getElementById('task-tbody').innerHTML =
-    '<tr><td colspan="5" class="empty-msg">Loading…</td></tr>';
+    '<tr><td colspan="6" class="empty-msg">Loading…</td></tr>';
   try {
     const data = await api('GET', '/api/tasks');
     allTasks = data.tasks ?? [];
+    const availableIds = new Set(allTasks.filter(task => !task.completed).map(task => String(task.task_id)));
+    [...selectedTaskIds].forEach(id => { if (!availableIds.has(id)) selectedTaskIds.delete(id); });
     renderTasks();
+    updateTaskSelectionUI(allTasks.filter(task => !task.completed));
     document.getElementById('remaining-badge').textContent = `Tasks: ${allTasks.filter(t => !t.completed).length}`;
     loadCharacter();
   } catch (e) {
     document.getElementById('task-tbody').innerHTML =
-      `<tr><td colspan="5" class="empty-msg">Error: ${escHtml(e.message)}</td></tr>`;
+      `<tr><td colspan="6" class="empty-msg">Error: ${escHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -392,7 +400,7 @@ function renderTasks() {
   });
 
   if (!tasks.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No tasks — add one above!</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No tasks — add one above!</td></tr>';
     return;
   }
 
@@ -400,7 +408,8 @@ function renderTasks() {
     const id    = escHtml(t.task_id);
     const title = escHtml(t.title);
     const color = t.color || '';
-    return `<tr class="${color}">
+    return `<tr class="${color} ${selectedTaskIds.has(String(t.task_id)) ? 'selected' : ''}">
+      <td class="select-cell"><input class="task-select" data-task-id="${id}" type="checkbox" aria-label="Select ${title}" ${selectedTaskIds.has(String(t.task_id)) ? 'checked' : ''} onchange="toggleTaskSelection('${id}', this.checked)"/></td>
       <td class="task-name-cell" onclick="showNotes('${id}')">${title}</td>
       <td>${escHtml(t.due_date)}</td>
       <td>${fmtTime(t.due_time)}</td>
@@ -412,6 +421,173 @@ function renderTasks() {
       </td>
     </tr>`;
   }).join('');
+  updateTaskSelectionUI(tasks);
+}
+
+function visibleTaskIds() {
+  return allTasks.filter(task => !task.completed).map(task => String(task.task_id));
+}
+
+function checkedTaskIds() {
+  return [...document.querySelectorAll('#task-tbody .task-select:checked')]
+    .map(checkbox => String(checkbox.dataset.taskId));
+}
+
+function syncTaskSelectionFromDOM() {
+  const taskIds = checkedTaskIds();
+  selectedTaskIds.clear();
+  taskIds.forEach(taskId => selectedTaskIds.add(taskId));
+  updateTaskSelectionUI();
+  return taskIds;
+}
+
+function updateTaskSelectionUI(visibleTasks = allTasks.filter(task => !task.completed)) {
+  const visibleIds = visibleTasks.map(task => String(task.task_id));
+  const selectedVisible = visibleIds.filter(id => selectedTaskIds.has(id)).length;
+  const count = checkedTaskIds().length;
+  document.getElementById('task-bulk-actions').hidden = count === 0;
+  document.getElementById('task-selection-count').textContent = visibleIds.length
+    ? `${count ? 'Selected' : 'Select tasks below'} (${count} selected)`
+    : 'No tasks available to select';
+  const selectAll = document.getElementById('select-all-tasks');
+  selectAll.checked = visibleIds.length > 0 && selectedVisible === visibleIds.length;
+  selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIds.length;
+}
+
+function toggleTaskSelection(taskId, selected) {
+  const id = String(taskId);
+  if (selected) selectedTaskIds.add(id);
+  else selectedTaskIds.delete(id);
+  renderTasks();
+}
+
+function toggleAllVisibleTasks(selected) {
+  visibleTaskIds().forEach(id => selected ? selectedTaskIds.add(id) : selectedTaskIds.delete(id));
+  renderTasks();
+}
+
+function clearTaskSelection() {
+  selectedTaskIds.clear();
+  renderTasks();
+}
+
+function setBulkActionsBusy(busy) {
+  document.querySelectorAll('#task-bulk-actions button').forEach(button => { button.disabled = busy; });
+}
+
+async function finishSelectedTasks() {
+  const taskIds = syncTaskSelectionFromDOM();
+  if (!taskIds.length) { alert('Select at least one task first.'); return; }
+  setBulkActionsBusy(true);
+  try {
+    const result = await api('POST', '/api/tasks/bulk/complete', {task_ids: taskIds}, 120000);
+    selectedTaskIds.clear();
+    await loadTasks();
+    alert(`Finished ${result.updated ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.${result.warning ? `\n${result.warning}` : ''}`);
+  } catch (error) {
+    alert(`Could not finish selected tasks: ${error.message}`);
+  } finally {
+    setBulkActionsBusy(false);
+  }
+}
+
+async function deleteSelectedTasks() {
+  const taskIds = syncTaskSelectionFromDOM();
+  if (!taskIds.length) { alert('Select at least one task first.'); return; }
+  if (!confirm(`Delete ${taskIds.length} selected ${taskIds.length === 1 ? 'task' : 'tasks'}? This cannot be undone.`)) return;
+  setBulkActionsBusy(true);
+  try {
+    const result = await api('POST', '/api/tasks/bulk/delete', {task_ids: taskIds}, 120000);
+    selectedTaskIds.clear();
+    await loadTasks();
+    alert(`Deleted ${result.deleted ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.`);
+  } catch (error) {
+    alert(`Could not delete selected tasks: ${error.message}`);
+  } finally {
+    setBulkActionsBusy(false);
+  }
+}
+
+function configureBulkEditInputs() {
+  ['date', 'time', 'priority', 'notes'].forEach(field => {
+    document.getElementById(`bulk-edit-${field}`).disabled = !document.getElementById(`bulk-edit-${field}-enabled`).checked;
+  });
+}
+
+function openBulkEditModal() {
+  const selectedIds = syncTaskSelectionFromDOM();
+  if (!selectedIds.length) { alert('Select at least one task first.'); return; }
+  ['date', 'time', 'priority', 'notes'].forEach(field => {
+    document.getElementById(`bulk-edit-${field}-enabled`).checked = false;
+  });
+  document.getElementById('bulk-edit-date').value = '';
+  document.getElementById('bulk-edit-time').value = '';
+  document.getElementById('bulk-edit-time').placeholder = use24Hour
+    ? 'HH:MM, or leave empty to remove the time'
+    : 'HH:MM AM/PM, or leave empty to remove the time';
+  document.getElementById('bulk-edit-priority').value = '3';
+  document.getElementById('bulk-edit-notes').value = '';
+  document.getElementById('bulk-edit-summary').textContent = `Editing ${selectedIds.length} selected ${selectedIds.length === 1 ? 'task' : 'tasks'}.`;
+  document.getElementById('bulk-edit-error').style.display = 'none';
+  configureBulkEditInputs();
+  document.getElementById('bulk-edit-modal').style.display = 'flex';
+}
+
+function closeBulkEditModal() {
+  document.getElementById('bulk-edit-modal').style.display = 'none';
+}
+
+async function saveBulkTaskEdits() {
+  const error = document.getElementById('bulk-edit-error');
+  const changes = {};
+  if (document.getElementById('bulk-edit-date-enabled').checked) {
+    const value = document.getElementById('bulk-edit-date').value;
+    if (!value) {
+      error.textContent = 'Choose a due date.';
+      error.style.display = 'block';
+      return;
+    }
+    const [year, month, day] = value.split('-');
+    changes.due_date = `${month}-${day}-${year}`;
+  }
+  if (document.getElementById('bulk-edit-time-enabled').checked) {
+    const value = document.getElementById('bulk-edit-time').value.trim();
+    const normalized = normalizeDueTime(value);
+    if (normalized === null) {
+      error.textContent = use24Hour ? 'Enter time as HH:MM.' : 'Enter time as HH:MM AM/PM.';
+      error.style.display = 'block';
+      return;
+    }
+    changes.due_time = normalized;
+  }
+  if (document.getElementById('bulk-edit-priority-enabled').checked) {
+    changes.priority = document.getElementById('bulk-edit-priority').value;
+  }
+  if (document.getElementById('bulk-edit-notes-enabled').checked) {
+    changes.notes = document.getElementById('bulk-edit-notes').value.trim() || 'No notes';
+  }
+  if (!Object.keys(changes).length) {
+    error.textContent = 'Check at least one field to change.';
+    error.style.display = 'block';
+    return;
+  }
+
+  const taskIds = [...selectedTaskIds];
+  const saveButton = document.getElementById('bulk-edit-save');
+  saveButton.disabled = true;
+  error.style.display = 'none';
+  try {
+    const result = await api('POST', '/api/tasks/bulk/edit', {task_ids: taskIds, changes}, 120000);
+    closeBulkEditModal();
+    selectedTaskIds.clear();
+    await loadTasks();
+    alert(`Updated ${result.updated ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.`);
+  } catch (exception) {
+    error.textContent = exception.message;
+    error.style.display = 'block';
+  } finally {
+    saveButton.disabled = false;
+  }
 }
 
 const finishingTaskIds = new Set();
@@ -480,6 +656,210 @@ function closeFullNotes() {
 }
 
 /* ── Task Modal ─────────────────────────────────────────────────── */
+const BULK_WEEKDAYS = {sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6};
+const BULK_MONTHS = {
+  jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+  may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7,
+  sep: 8, sept: 8, september: 8, oct: 9, october: 9, nov: 10, november: 10,
+  dec: 11, december: 11,
+};
+
+function taskDateFromLocal(date) {
+  const pad = value => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${date.getFullYear()}`;
+}
+
+function validBulkDate(year, month, day) {
+  const date = new Date(year, month, day);
+  return date.getFullYear() === year && date.getMonth() === month && date.getDate() === day ? date : null;
+}
+
+function parseBulkDateValue(raw, baseDate = new Date()) {
+  const value = String(raw || '').trim().toLowerCase();
+  const base = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+  if (!value) return null;
+  if (value === 'today') return taskDateFromLocal(base);
+  if (value === 'tomorrow') {
+    base.setDate(base.getDate() + 1);
+    return taskDateFromLocal(base);
+  }
+
+  let match = value.match(/^(next\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/);
+  if (match) {
+    let offset = (BULK_WEEKDAYS[match[2]] - base.getDay() + 7) % 7;
+    if (match[1] && offset === 0) offset = 7;
+    base.setDate(base.getDate() + offset);
+    return taskDateFromLocal(base);
+  }
+
+  match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) {
+    const date = validBulkDate(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    return date ? taskDateFromLocal(date) : null;
+  }
+  match = value.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if (match) {
+    const date = validBulkDate(Number(match[3]), Number(match[1]) - 1, Number(match[2]));
+    return date ? taskDateFromLocal(date) : null;
+  }
+  match = value.match(/^([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?$/);
+  if (match && Object.prototype.hasOwnProperty.call(BULK_MONTHS, match[1])) {
+    let year = match[3] ? Number(match[3]) : base.getFullYear();
+    let date = validBulkDate(year, BULK_MONTHS[match[1]], Number(match[2]));
+    if (date && !match[3] && date < base) date = validBulkDate(year + 1, BULK_MONTHS[match[1]], Number(match[2]));
+    return date ? taskDateFromLocal(date) : null;
+  }
+  return null;
+}
+
+function normalizeBulkTime(raw) {
+  let value = String(raw || '').trim();
+  if (!value) return '';
+  value = value.replace(/^(\d{1,2})\s*(am|pm)$/i, '$1:00 $2');
+  return normalizeDueTime(value);
+}
+
+function parseBulkTaskLine(originalLine, lineNumber, defaults) {
+  let text = String(originalLine || '').replace(/^\s*(?:[-*\u2022]\s+|\d+[.)]\s+|\[[ xX]\]\s*)/, '').trim();
+  const result = {line: lineNumber, title: '', due_date: defaults.due_date, due_time: '', priority: defaults.priority, notes: 'No notes', valid: false, error: ''};
+  if (!text) return {...result, error: 'Empty line'};
+
+  if (text.includes('|')) {
+    const fields = text.split('|').map(field => field.trim());
+    result.title = fields[0] || '';
+    if (fields[1]) {
+      result.due_date = parseBulkDateValue(fields[1]);
+      if (!result.due_date) result.error = 'Invalid date';
+    }
+    if (fields[2]) {
+      result.due_time = normalizeBulkTime(fields[2]);
+      if (result.due_time === null) result.error = result.error || 'Invalid time';
+    }
+    if (fields[3]) {
+      const priority = Number(fields[3].replace(/^(?:p|priority\s*)/i, ''));
+      if (Number.isInteger(priority) && priority >= 1 && priority <= 5) result.priority = String(priority);
+      else result.error = result.error || 'Priority must be 1-5';
+    }
+    const notes = fields.slice(4).join(' | ').trim();
+    if (notes) result.notes = notes;
+  } else {
+    const notesMatch = text.match(/\s+notes?\s*:\s*(.+)$/i);
+    if (notesMatch) {
+      result.notes = notesMatch[1].trim() || 'No notes';
+      text = text.slice(0, notesMatch.index).trim();
+    }
+
+    const priorityMatch = text.match(/(?:^|\s)(?:p|priority\s*)([1-5])\b/i);
+    if (priorityMatch) {
+      result.priority = priorityMatch[1];
+      text = `${text.slice(0, priorityMatch.index)} ${text.slice(priorityMatch.index + priorityMatch[0].length)}`.trim();
+    }
+
+    const datePatterns = [
+      /\b\d{4}-\d{1,2}-\d{1,2}\b/i,
+      /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{4}\b/i,
+      /\b(?:today|tomorrow)\b/i,
+      /\b(?:next\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i,
+      /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b/i,
+    ];
+    const dateMatch = datePatterns.map(pattern => text.match(pattern)).find(Boolean);
+    if (dateMatch) {
+      result.due_date = parseBulkDateValue(dateMatch[0]);
+      if (!result.due_date) result.error = 'Invalid date';
+      text = `${text.slice(0, dateMatch.index)} ${text.slice(dateMatch.index + dateMatch[0].length)}`.trim();
+    }
+
+    const timeMatch = text.match(/\b(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)\b/i);
+    if (timeMatch) {
+      result.due_time = normalizeBulkTime(timeMatch[1]);
+      if (result.due_time === null) result.error = result.error || 'Invalid time';
+      text = `${text.slice(0, timeMatch.index)} ${text.slice(timeMatch.index + timeMatch[0].length)}`.trim();
+    }
+    result.title = text.replace(/[,:;\u2013\u2014-]+\s*$/, '').replace(/\b(?:due|on|at)\s*$/i, '').trim();
+  }
+
+  if (!result.title) result.error = result.error || 'Task name is missing';
+  if (!result.due_date || !isValidDueDate(result.due_date)) result.error = result.error || 'A valid due date is required';
+  result.valid = !result.error;
+  return result;
+}
+
+function parseBulkTasks() {
+  const dateInput = document.getElementById('bulk-default-date').value;
+  const defaults = {
+    due_date: dateInput ? parseBulkDateValue(dateInput) : taskDateFromLocal(new Date()),
+    priority: document.getElementById('bulk-default-priority').value || '3',
+  };
+  bulkParsedTasks = document.getElementById('bulk-task-input').value.split(/\r?\n/)
+    .map((line, index) => ({line, index: index + 1})).filter(item => item.line.trim())
+    .map(item => parseBulkTaskLine(item.line, item.index, defaults));
+  return bulkParsedTasks;
+}
+
+function renderBulkTaskPreview() {
+  const tasks = parseBulkTasks();
+  const preview = document.getElementById('bulk-task-preview');
+  const error = document.getElementById('bulk-task-error');
+  const button = document.getElementById('bulk-add-button');
+  if (!tasks.length) {
+    preview.innerHTML = '<div class="empty-msg">Enter tasks above to preview them before saving.</div>';
+    error.style.display = 'none';
+    button.disabled = true;
+    button.textContent = 'Add Tasks';
+    return;
+  }
+  const invalidCount = tasks.filter(task => !task.valid).length;
+  preview.innerHTML = `<table class="bulk-preview-table"><thead><tr><th>Line</th><th>Task</th><th>Date</th><th>Time</th><th>Priority</th><th>Check</th></tr></thead><tbody>${tasks.map(task => `
+    <tr class="${task.valid ? '' : 'invalid'}"><td>${task.line}</td><td>${escHtml(task.title || 'â€”')}</td><td>${escHtml(task.due_date || 'â€”')}</td><td>${escHtml(task.due_time ? fmtTime(task.due_time) : 'No time')}</td><td>${escHtml(task.priority)}</td><td>${task.valid ? 'Ready' : escHtml(task.error)}</td></tr>`).join('')}</tbody></table>`;
+  error.textContent = invalidCount ? `${invalidCount} ${invalidCount === 1 ? 'line needs' : 'lines need'} attention. Nothing will be saved until every line is valid.` : '';
+  error.style.display = invalidCount ? 'block' : 'none';
+  button.disabled = invalidCount > 0;
+  button.textContent = `Add ${tasks.length} ${tasks.length === 1 ? 'Task' : 'Tasks'}`;
+}
+
+function openBulkTaskModal() {
+  const now = new Date();
+  const pad = value => String(value).padStart(2, '0');
+  document.getElementById('bulk-default-date').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  document.getElementById('bulk-default-priority').value = '3';
+  document.getElementById('bulk-task-input').value = '';
+  document.getElementById('bulk-task-error').style.display = 'none';
+  bulkParsedTasks = [];
+  renderBulkTaskPreview();
+  document.getElementById('bulk-task-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('bulk-task-input').focus(), 50);
+}
+
+function closeBulkTaskModal() {
+  document.getElementById('bulk-task-modal').style.display = 'none';
+}
+
+async function saveBulkTasks() {
+  const tasks = parseBulkTasks();
+  renderBulkTaskPreview();
+  if (!tasks.length || tasks.some(task => !task.valid)) return;
+  const button = document.getElementById('bulk-add-button');
+  const error = document.getElementById('bulk-task-error');
+  button.disabled = true;
+  button.textContent = `Adding ${tasks.length}...`;
+  try {
+    const data = await api('POST', '/api/tasks/bulk', {tasks: tasks.map(({title, due_date, due_time, priority, notes}) => ({title, due_date, due_time, priority, notes}))}, 120000);
+    closeBulkTaskModal();
+    await loadTasks();
+    alert(`Added ${data.added ?? tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}.`);
+  } catch (exception) {
+    error.textContent = exception.message;
+    error.style.display = 'block';
+  } finally {
+    button.disabled = false;
+    renderBulkTaskPreview();
+  }
+}
+
+document.getElementById('bulk-task-input').addEventListener('input', renderBulkTaskPreview);
+document.getElementById('bulk-default-date').addEventListener('change', renderBulkTaskPreview);
+document.getElementById('bulk-default-priority').addEventListener('change', renderBulkTaskPreview);
+
 function openAddTask() {
   document.getElementById('modal-title').textContent = 'Add Task';
   document.getElementById('edit-task-id').value = '';
@@ -977,6 +1357,8 @@ function closeAttestationDetails() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeModal();
+    closeBulkTaskModal();
+    closeBulkEditModal();
     document.getElementById('notes-modal').style.display = 'none';
     closeFullNotes();
     closeAttestationDetails();
@@ -1355,6 +1737,27 @@ function calNext() { calMonth++; if (calMonth > 12) { calMonth = 1;  calYear++; 
 /* ══════════════════════════════════════════════════════════════════
    WEEKLY
 ══════════════════════════════════════════════════════════════════ */
+function weeklyStartSlot(value) {
+  const normalized = normalizeDueTime(value);
+  if (!normalized) return null;
+  const [hour, minute] = normalized.split(':').map(Number);
+  return Math.max(0, Math.min(95, Math.floor((hour * 60 + minute) / 15)));
+}
+
+function weeklyEndSlot(value, startSlot) {
+  const normalized = normalizeDueTime(value);
+  if (!normalized) return null;
+  const [hour, minute] = normalized.split(':').map(Number);
+  const totalMinutes = hour * 60 + minute;
+
+  // An event ending at midnight belongs at the boundary after 23:45,
+  // not at the first slot of the same day. Round other end times upward
+  // so 23:59 and partial quarter-hours include their entire final slot.
+  if (totalMinutes === 0 && startSlot > 0) return 96;
+  const slot = Math.max(1, Math.min(96, Math.ceil(totalMinutes / 15)));
+  return slot <= startSlot ? 96 : slot;
+}
+
 async function loadWeekly(scrollToCurrentTime = true) {
   const now = new Date();
   const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
@@ -1367,17 +1770,11 @@ async function loadWeekly(scrollToCurrentTime = true) {
 
   const grid = document.getElementById('weekly-grid');
   const unscheduled = document.getElementById('weekly-unscheduled');
-  const toSlot = value => {
-    const normalized = normalizeDueTime(value);
-    if (!normalized) return null;
-    const [hour, minute] = normalized.split(':').map(Number);
-    return Math.max(0, Math.min(95, hour * 4 + Math.floor(minute / 15)));
-  };
   const layoutOverlaps = tasks => {
     const events = tasks.filter(task => task.due_time).map(task => {
-      const start = toSlot(task.due_time);
-      const requestedEnd = toSlot(task.end_time);
-      return {...task, _start: start, _end: requestedEnd !== null && requestedEnd > start ? requestedEnd : start + 1};
+      const start = weeklyStartSlot(task.due_time);
+      const requestedEnd = weeklyEndSlot(task.end_time, start);
+      return {...task, _start: start, _end: requestedEnd !== null ? requestedEnd : Math.min(96, start + 1)};
     }).filter(event => event._start !== null).sort((a, b) => a._start - b._start || a._end - b._end);
 
     let group = [];
@@ -1543,44 +1940,63 @@ async function saveSetting(key, value) {
 
 async function checkHealth() {
   const out = document.getElementById('health-output');
-  out.textContent = 'Checking…';
+  const button = document.getElementById('health-check-btn');
+  const checked = document.getElementById('health-last-checked');
+  button.disabled = true;
+  button.textContent = 'Checking...';
+  out.innerHTML = '<div class="health-empty health-checking">Checking all services...</div>';
   try {
     const data = await api('GET', '/api/health/all');
     const services = data.services ?? {};
     const labels = {
       web_ui: 'Web UI',
       backend: 'Backend Storage',
+      postgres: 'PostgreSQL Database',
       ai_inference: 'AI Inference',
       task_sync: 'Task Sync',
       scheduler: 'Scheduler',
+      openclaw: 'OpenClaw',
     };
 
-    const order = ['web_ui', 'backend', 'ai_inference', 'task_sync', 'scheduler'];
-    const lines = [];
+    const order = ['web_ui', 'backend', 'postgres', 'ai_inference', 'task_sync', 'scheduler', 'openclaw'];
+    const cards = [];
     const overallClass = data.overall_ok ? 'ok' : 'degraded';
-    const overallText = data.overall_ok ? 'Overall: OK' : 'Overall: DEGRADED';
-    lines.push(`<div class="overall ${overallClass}">${escHtml(overallText)}</div>`);
+    const overallText = data.overall_ok ? 'All systems operational' : 'One or more services need attention';
 
     for (const key of order) {
       const svc = services[key] || {};
       const name = labels[key] || key;
       const status = svc.status || 'unknown';
       const code = svc.code || 0;
-      const badge = svc.ok ? 'OK' : 'ERROR';
+      const badge = svc.ok ? 'Healthy' : 'Unavailable';
       const badgeClass = svc.ok ? 'ok' : 'error';
-      const detail = svc.message ? ` - ${svc.message}` : '';
-      lines.push(
-        `<div class="health-row">` +
-          `<span class="service-name">${escHtml(name)}:</span>` +
-          `<span class="status-badge ${badgeClass}">${escHtml(badge)}</span>` +
-          `<span class="status-detail">(${escHtml(status)}, HTTP ${escHtml(code)})${escHtml(detail)}</span>` +
+      const latency = Number.isFinite(Number(svc.latency_ms)) ? `${Number(svc.latency_ms)} ms` : 'Not measured';
+      const response = code ? `HTTP ${code}` : 'No response';
+      const message = svc.message || (svc.ok ? 'Service responded normally' : 'Service did not report a healthy status');
+      cards.push(
+        `<div class="health-service ${badgeClass}">` +
+          `<div class="health-service-heading">` +
+            `<span class="service-name">${escHtml(name)}</span>` +
+            `<span class="status-badge ${badgeClass}">${escHtml(badge)}</span>` +
+          `</div>` +
+          `<div class="health-service-meta">${escHtml(response)} · ${escHtml(latency)} · ${escHtml(status)}</div>` +
+          `<div class="status-detail">${escHtml(message)}</div>` +
         `</div>`
       );
     }
 
-    out.innerHTML = lines.join('');
+    out.innerHTML =
+      `<div class="overall ${overallClass}">${escHtml(overallText)}</div>` +
+      `<div class="health-grid">${cards.join('')}</div>`;
+    const timestamp = data.timestamp ? new Date(data.timestamp) : new Date();
+    checked.textContent = `Last checked ${Number.isNaN(timestamp.getTime()) ? 'just now' : timestamp.toLocaleString()}`;
   } catch (e) {
-    out.textContent = `Health check failed: ${e?.message || e}`;
+    out.innerHTML = `<div class="overall degraded">Health check failed</div>` +
+      `<div class="health-empty health-error">${escHtml(e?.message || e)}</div>`;
+    checked.textContent = 'Last check failed';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Check Again';
   }
 }
 
@@ -1588,6 +2004,8 @@ async function checkHealth() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeModal();
+    closeBulkTaskModal();
+    closeBulkEditModal();
     closeDailyModal();
     document.getElementById('notes-modal').style.display = 'none';
     closeFullNotes();

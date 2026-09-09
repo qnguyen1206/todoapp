@@ -10,6 +10,7 @@
 #        docker build -t kairu1206/cvm-sync:latest      ./services/task_sync    && docker push kairu1206/cvm-sync:latest
 #        docker build -t kairu1206/cvm-scheduler:latest ./services/scheduler    && docker push kairu1206/cvm-scheduler:latest
 #        docker build -t kairu1206/cvm-webui:latest ./services/web_ui && docker push kairu1206/cvm-webui:latest
+#        docker build -t kairu1206/cvm-openclaw:latest ./services/openclaw && docker push kairu1206/cvm-openclaw:latest
 #
 #   1. Paste this file into https://cloud.phala.com → Create CVM → Advanced tab.
 #   2. Set ALL env vars marked [SECURE] in the Phala dashboard "Environment Variables" panel.
@@ -92,7 +93,7 @@ services:
   # Complete onboarding before enabling Gmail Pub/Sub hooks.
   # ----------------------------------------------------------
   openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+    image: kairu1206/cvm-openclaw:latest
     ports:
       - "18789:18789"
     environment:
@@ -111,11 +112,17 @@ services:
       TODO_MEETING_WEBHOOK_URL: http://backend:5000/integrations/openclaw/meetings
       TODO_MEETING_WEBHOOK_SECRET: ${OPENCLAW_WEBHOOK_SECRET} # [SECURE]
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}                     # Optional model provider
+      PHALA_AI_API_KEY: ${PHALA_AI_API_KEY}                   # [SECURE] – confidential inference credential
+      OPENCLAW_CONFIDENTIAL_AI_ENABLED: ${OPENCLAW_CONFIDENTIAL_AI_ENABLED:-false}
+      OPENCLAW_CONFIDENTIAL_AI_BASE_URL: ${OPENCLAW_CONFIDENTIAL_AI_BASE_URL:-https://inference.phala.com/v1}
+      OPENCLAW_CONFIDENTIAL_AI_MODEL: ${OPENCLAW_CONFIDENTIAL_AI_MODEL:-deepseek/deepseek-v4-flash}
+      OPENCLAW_CONFIDENTIAL_AI_ALIAS: ${OPENCLAW_CONFIDENTIAL_AI_ALIAS:-Phala Confidential}
+      OPENCLAW_CONFIDENTIAL_AI_TIMEOUT_SECONDS: ${OPENCLAW_CONFIDENTIAL_AI_TIMEOUT_SECONDS:-300}
     command:
       - sh
       - -lc
       - |
-        node -e "const fs=require('fs'); const path='/home/node/.openclaw/openclaw.json'; let cfg={}; try{cfg=JSON.parse(fs.readFileSync(path,'utf8'));}catch{} const fromList=(process.env.OPENCLAW_ALLOWED_ORIGINS||'').split(',').map(s=>s.trim()).filter(Boolean); const pub=(process.env.OPENCLAW_PUBLIC_ORIGIN||'').trim(); const allowed=[...new Set([...fromList, ...(pub?[pub]:[])])]; cfg.gateway=cfg.gateway||{}; cfg.gateway.mode=(process.env.OPENCLAW_GATEWAY_MODE||'local').trim()||'local'; cfg.gateway.controlUi=cfg.gateway.controlUi||{}; cfg.gateway.controlUi.allowedOrigins=allowed; fs.mkdirSync('/home/node/.openclaw',{recursive:true}); fs.writeFileSync(path, JSON.stringify(cfg,null,2));"
+        node /opt/todoapp/configure-openclaw.mjs
         exec node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
     init: true
     cap_drop:

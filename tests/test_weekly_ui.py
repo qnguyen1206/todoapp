@@ -23,6 +23,15 @@ class WeeklyUIContractTests(unittest.TestCase):
         self.assertIn('title="${escHtml(t.title)}"', javascript)
         self.assertNotIn("title=\"${task.type === 'daily' ? 'Recurring daily task' : 'Todo task'}\"", javascript)
 
+    def test_end_of_day_events_reach_the_final_calendar_boundary(self):
+        javascript = (ROOT / "services" / "web_ui" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function weeklyEndSlot(value, startSlot)", javascript)
+        self.assertIn("if (totalMinutes === 0 && startSlot > 0) return 96", javascript)
+        self.assertIn("Math.ceil(totalMinutes / 15)", javascript)
+        self.assertIn("Math.min(96, start + 1)", javascript)
+        self.assertNotIn("Math.min(95, hour * 4 + Math.floor(minute / 15))", javascript)
+
 
 if __name__ == "__main__":
     unittest.main()
