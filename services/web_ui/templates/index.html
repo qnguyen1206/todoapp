@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>TODO App</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📋</text></svg>"/>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=20260912-mobile-calendar" />
 </head>
 <body>
   <!-- ── Header ─────────────────────────────────────────────────── -->
@@ -157,6 +157,13 @@
       <button class="btn" onclick="calNext()">▶</button>
     </div>
     <div id="calendar-grid" class="calendar-grid"></div>
+    <div class="calendar-mobile">
+      <div id="calendar-mobile-grid" class="calendar-mobile-grid" aria-label="Monthly calendar"></div>
+      <section id="calendar-day-details" class="calendar-day-details" aria-live="polite">
+        <h3 id="calendar-day-title"></h3>
+        <div id="calendar-day-tasks"></div>
+      </section>
+    </div>
   </section>
 
   <!-- ══════════════════════════════════════════════════════════════ -->
@@ -475,6 +482,6 @@
       </iframe>
     </div>
   </div>
-  <script src="/static/app.js?v=20260908-system-health-dashboard"></script>
+  <script src="/static/app.js?v=20260912-mobile-calendar"></script>
 </body>
 </html>

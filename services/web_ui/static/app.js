@@ -4,6 +4,8 @@ let sortKey       = 'due_date';
 let sortAsc       = true;
 let calYear       = new Date().getFullYear();
 let calMonth      = new Date().getMonth() + 1;  // 1-based
+let calendarTasksByDay = {};
+let selectedCalendarDay = null;
 let use24Hour     = true;
 let selectedAiModelSetting = '';
 let activeAiModelChoice = '';
@@ -1704,17 +1706,25 @@ async function renderCalendar() {
   document.getElementById('cal-title').textContent = `${MONTHS[calMonth-1]} ${calYear}`;
   const data = await api('GET', `/api/calendar/${calYear}/${calMonth}`);
   const byDay = data.tasks_by_day ?? {};
+  calendarTasksByDay = byDay;
 
   const today = new Date();
   const firstDay = new Date(calYear, calMonth - 1, 1);
   const lastDay  = new Date(calYear, calMonth, 0).getDate();
+  if (!selectedCalendarDay || selectedCalendarDay > lastDay) {
+    selectedCalendarDay = today.getFullYear() === calYear && today.getMonth() + 1 === calMonth
+      ? today.getDate()
+      : 1;
+  }
   // Mon=0 … Sun=6
   let startDow = (firstDay.getDay() + 6) % 7;
 
   let html = DAYS.map(d => `<div class="cal-header">${d}</div>`).join('');
+  let mobileHtml = DAYS.map(d => `<div class="mobile-cal-header" aria-hidden="true">${d.slice(0, 1)}</div>`).join('');
 
   // Blank cells before first day
   for (let i = 0; i < startDow; i++) html += '<div class="cal-cell other-month"></div>';
+  for (let i = 0; i < startDow; i++) mobileHtml += '<div class="mobile-cal-cell other-month" aria-hidden="true"></div>';
 
   for (let day = 1; day <= lastDay; day++) {
     const isToday = today.getFullYear() === calYear && today.getMonth()+1 === calMonth && today.getDate() === day;
@@ -1726,13 +1736,73 @@ async function renderCalendar() {
     }).join('');
     html += `<div class="cal-cell${isToday?' today-cell':''}">
                <div class="cal-day">${day}</div>${dots}</div>`;
+    const taskCount = tasks.length;
+    const taskLabel = taskCount === 1 ? '1 task' : `${taskCount} tasks`;
+    const dateLabel = `${MONTHS[calMonth - 1]} ${day}, ${calYear}`;
+    mobileHtml += `<button type="button" class="mobile-cal-cell${isToday ? ' today-cell' : ''}${day === selectedCalendarDay ? ' selected' : ''}"
+      data-calendar-day="${day}" aria-pressed="${day === selectedCalendarDay}" aria-label="${escHtml(`${dateLabel}, ${taskLabel}`)}"
+      onclick="selectCalendarDay(${day})">
+        <span class="mobile-cal-day">${day}</span>
+        ${taskCount ? `<span class="mobile-cal-count">${taskCount}</span>` : ''}
+      </button>`;
   }
 
   document.getElementById('calendar-grid').innerHTML = html;
+  document.getElementById('calendar-mobile-grid').innerHTML = mobileHtml;
+  renderCalendarDayDetails();
 }
 
-function calPrev() { calMonth--; if (calMonth < 1) { calMonth = 12; calYear--; } renderCalendar(); }
-function calNext() { calMonth++; if (calMonth > 12) { calMonth = 1;  calYear++; } renderCalendar(); }
+function selectCalendarDay(day) {
+  selectedCalendarDay = Number(day);
+  document.querySelectorAll('[data-calendar-day]').forEach(cell => {
+    const selected = Number(cell.dataset.calendarDay) === selectedCalendarDay;
+    cell.classList.toggle('selected', selected);
+    cell.setAttribute('aria-pressed', String(selected));
+  });
+  renderCalendarDayDetails();
+}
+
+function renderCalendarDayDetails() {
+  const title = document.getElementById('calendar-day-title');
+  const container = document.getElementById('calendar-day-tasks');
+  if (!title || !container || !selectedCalendarDay) return;
+
+  const selectedDate = new Date(calYear, calMonth - 1, selectedCalendarDay);
+  title.textContent = selectedDate.toLocaleDateString(undefined, {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  });
+  const tasks = calendarTasksByDay[String(selectedCalendarDay)] ?? [];
+  if (!tasks.length) {
+    container.innerHTML = '<div class="calendar-day-empty">No tasks scheduled.</div>';
+    return;
+  }
+
+  container.innerHTML = tasks.map(task => {
+    const start = task.due_time ? fmtTime(task.due_time) : 'No time';
+    const time = task.end_time ? `${start} – ${fmtTime(task.end_time)}` : start;
+    const kind = task.type === 'daily' ? 'Daily' : 'To-do';
+    return `<article class="calendar-day-task ${task.color || 'normal'}" title="${escHtml(task.title)}">
+      <div class="calendar-day-task-main">
+        <span class="calendar-day-task-title">${escHtml(task.title)}</span>
+        <span class="calendar-day-task-kind">${kind}</span>
+      </div>
+      <div class="calendar-day-task-time">${escHtml(time)}</div>
+    </article>`;
+  }).join('');
+}
+
+function calPrev() {
+  calMonth--;
+  if (calMonth < 1) { calMonth = 12; calYear--; }
+  selectedCalendarDay = null;
+  renderCalendar();
+}
+function calNext() {
+  calMonth++;
+  if (calMonth > 12) { calMonth = 1; calYear++; }
+  selectedCalendarDay = null;
+  renderCalendar();
+}
 
 /* ══════════════════════════════════════════════════════════════════
    WEEKLY

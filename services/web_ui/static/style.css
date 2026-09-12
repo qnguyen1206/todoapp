@@ -291,6 +291,7 @@ header {
 .cal-dot.today   { background: #fff3e0; color: var(--today); }
 .cal-dot.normal  { background: #e8eaf6; color: #3949ab; }
 .cal-dot.daily   { background: #e0f2f1; color: #00796b; }
+.calendar-mobile { display: none; }
 
 /* ── Weekly ───────────────────────────────────────────────── */
 .weekly-grid {
@@ -622,9 +623,56 @@ header {
 
   .cal-nav { justify-content: space-between; gap: 6px; }
   .cal-title { min-width: 0; flex: 1; }
-  #tab-calendar { overflow-x: auto; }
-  .calendar-grid { min-width: 630px; }
-  .cal-cell { min-height: 76px; }
+  #tab-calendar { overflow: visible; }
+  .calendar-grid { display: none; }
+  .calendar-mobile { display: block; min-width: 0; }
+  .calendar-mobile-grid {
+    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px;
+    width: 100%; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .mobile-cal-header {
+    padding: 4px 0; color: var(--muted); font-size: 10px; font-weight: 700; text-align: center;
+    text-transform: uppercase;
+  }
+  .mobile-cal-cell {
+    appearance: none; position: relative; min-width: 0; min-height: 46px; padding: 5px 2px;
+    border: 1px solid transparent; border-radius: 7px; background: #f7f8fa; color: var(--text);
+    font: inherit; text-align: center; touch-action: manipulation;
+  }
+  button.mobile-cal-cell { cursor: pointer; }
+  button.mobile-cal-cell:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+  .mobile-cal-cell.other-month { background: transparent; }
+  .mobile-cal-cell.today-cell { border-color: #90caf9; background: #e3f2fd; }
+  .mobile-cal-cell.selected { border-color: var(--primary); background: var(--primary); color: #fff; }
+  .mobile-cal-day { display: block; font-size: 13px; font-weight: 600; }
+  .mobile-cal-count {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 17px; height: 17px;
+    margin-top: 2px; padding: 0 4px; border-radius: 999px; background: #dfe5f5; color: #3949ab;
+    font-size: 9px; font-weight: 700;
+  }
+  .mobile-cal-cell.selected .mobile-cal-count { background: rgba(255,255,255,.9); color: var(--primary); }
+  .calendar-day-details {
+    margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .calendar-day-details h3 { margin-bottom: 8px; font-size: 15px; }
+  #calendar-day-tasks { display: flex; flex-direction: column; gap: 7px; }
+  .calendar-day-empty { padding: 12px 4px; color: var(--muted); text-align: center; }
+  .calendar-day-task {
+    padding: 9px 10px; border-left: 4px solid currentColor; border-radius: 6px; background: #f5f6fa;
+  }
+  .calendar-day-task-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .calendar-day-task-title { min-width: 0; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+  .calendar-day-task-kind {
+    flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; background: rgba(255,255,255,.75);
+    color: inherit; font-size: 9px; font-weight: 700; text-transform: uppercase;
+  }
+  .calendar-day-task-time { margin-top: 3px; color: var(--muted); font-size: 12px; }
+  .calendar-day-task.overdue { background: #ffebee; color: var(--overdue); }
+  .calendar-day-task.today { background: #fff3e0; color: var(--today); }
+  .calendar-day-task.normal { background: #e8eaf6; color: #3949ab; }
+  .calendar-day-task.daily { background: #e0f2f1; color: #00796b; }
 
   .weekly-grid { max-height: calc(100dvh - 165px); grid-template-columns: 58px repeat(7, 92px); }
 
@@ -651,5 +699,5 @@ header {
   .header-right { width: 100%; justify-content: space-between; }
   .stat-badge { flex: 1; text-align: center; }
   .toolbar .btn { flex-basis: 100%; }
-  .calendar-grid { min-width: 560px; }
+  .mobile-cal-cell { min-height: 42px; }
 }
