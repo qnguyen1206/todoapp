@@ -1291,6 +1291,9 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             return
         
         del tasks[index]
+        cvm_manager = getattr(self.parent_app, 'cvm_manager', None)
+        if cvm_manager:
+            cvm_manager.record_local_task_completion(task_found)
         self.parent_app.tasks_completed += 1
         if self.parent_app.tasks_completed % 5 == 0:
             self.parent_app.level += 1
@@ -1478,7 +1481,13 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 return
             
             notes = notes_text.get("1.0", tk.END).strip()
-            tasks[index] = (task_entry.get(), date, due_time, priority, notes)
+            updated_task = (task_entry.get(), date, due_time, priority, notes)
+            cvm_manager = getattr(self.parent_app, 'cvm_manager', None)
+            if cvm_manager and updated_task != task_found:
+                # IDs are content-derived, so remove the old remote record and
+                # let the updated tuple be inserted under its new/current ID.
+                cvm_manager.record_local_task_deletion(task_found)
+            tasks[index] = updated_task
             self.save_tasks(tasks)
             self.refresh_task_list()
             dialog.destroy()
@@ -1516,6 +1525,9 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             return
         
         del tasks[index]
+        cvm_manager = getattr(self.parent_app, 'cvm_manager', None)
+        if cvm_manager:
+            cvm_manager.record_local_task_deletion(task_found)
         self.save_tasks(tasks)
         self.refresh_task_list()
 
@@ -1532,6 +1544,10 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         ):
             return
 
+        cvm_manager = getattr(self.parent_app, 'cvm_manager', None)
+        if cvm_manager:
+            for task in tasks:
+                cvm_manager.record_local_task_deletion(task)
         self.save_tasks([])
         self.refresh_task_list()
         messagebox.showinfo("Success", "All tasks were cleared.")

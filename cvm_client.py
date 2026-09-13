@@ -664,7 +664,8 @@ class CVMBackendClient(CVMClient):
         except Exception as e:
             return False, f"Error retrieving tasks: {str(e)}"
 
-    def sync_tasks(self, user_id, local_tasks, last_sync_time=None):
+    def sync_tasks(self, user_id, local_tasks, last_sync_time=None,
+                   completed_task_ids=None, deleted_task_ids=None):
         """Sync tasks with CVM backend (conflict resolution)."""
         endpoint = self.cvm_endpoints.get('backend')
         if not endpoint:
@@ -674,7 +675,9 @@ class CVMBackendClient(CVMClient):
             payload = {
                 'user_id':    user_id,
                 'local_tasks': self._encrypt_tasks(user_id, local_tasks),
-                'last_sync':  last_sync_time or datetime.now().isoformat()
+                'last_sync':  last_sync_time or datetime.now().isoformat(),
+                'completed_task_ids': list(completed_task_ids or []),
+                'deleted_task_ids': list(deleted_task_ids or []),
             }
             response = requests.post(
                 f"{endpoint}/tasks/sync",

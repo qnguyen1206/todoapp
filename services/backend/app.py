@@ -1186,9 +1186,26 @@ def sync_tasks():
     data = request.get_json(silent=True) or {}
     user_id = g.user_id
     local_tasks = data.get("local_tasks", [])
+    completed_task_ids = data.get("completed_task_ids", [])
+    deleted_task_ids = data.get("deleted_task_ids", [])
     batch_error = _validate_task_batch(local_tasks)
     if batch_error:
         return jsonify({"status": "error", "message": batch_error}), 400
+    for field_name, task_ids in (
+        ("completed_task_ids", completed_task_ids),
+        ("deleted_task_ids", deleted_task_ids),
+    ):
+        if not isinstance(task_ids, list):
+            return jsonify({"status": "error", "message": f"{field_name} must be a list"}), 400
+        if any(not str(task_id).strip() for task_id in task_ids):
+            return jsonify({"status": "error", "message": f"{field_name} contains an empty ID"}), 400
+        if len(task_ids) > 5000:
+            return jsonify({"status": "error", "message": f"{field_name} exceeds 5000 IDs"}), 400
+
+    completed_task_ids = list(dict.fromkeys(str(task_id).strip() for task_id in completed_task_ids))
+    deleted_task_ids = list(dict.fromkeys(str(task_id).strip() for task_id in deleted_task_ids))
+    # Deletion wins if a task somehow appears in both pending queues.
+    completed_task_ids = [task_id for task_id in completed_task_ids if task_id not in set(deleted_task_ids)]
 
     if not user_id:
         return jsonify({"status": "error", "message": "user_id required"}), 400
@@ -1196,6 +1213,25 @@ def sync_tasks():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if completed_task_ids:
+                cur.execute(
+                    "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
+                    "WHERE user_id = %s AND task_id = ANY(%s)",
+                    (user_id, completed_task_ids),
+                )
+            if deleted_task_ids:
+                cur.execute(
+                    "DELETE FROM reminder_deliveries WHERE user_id = %s AND task_id = ANY(%s)",
+                    (user_id, deleted_task_ids),
+                )
+                cur.execute(
+                    "DELETE FROM task_reminders WHERE user_id = %s AND task_id = ANY(%s)",
+                    (user_id, deleted_task_ids),
+                )
+                cur.execute(
+                    "DELETE FROM tasks WHERE user_id = %s AND task_id = ANY(%s)",
+                    (user_id, deleted_task_ids),
+                )
             # Import missing local tasks; the existing remote version wins collisions.
             for task in local_tasks:
                 cur.execute("""

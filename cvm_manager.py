@@ -27,6 +27,7 @@ class CVMManager:
     
     def __init__(self, parent_app):
         self.parent_app = parent_app
+        self._pending_mutations_lock = threading.RLock()
         
         if not CVM_AVAILABLE:
             raise ImportError("cvm_client is required for CVM functionality")
@@ -654,6 +655,114 @@ class CVMManager:
     # Data sync helpers
     # ------------------------------------------------------------------
 
+    def _todo_identity_key(self, task):
+        title = task[0] if len(task) > 0 else ""
+        due_date = task[1] if len(task) > 1 else ""
+        due_time = task[2] if len(task) > 2 else ""
+        return json.dumps([str(title), str(due_date), str(due_time)], separators=(",", ":"))
+
+    def _generated_todo_task_id(self, task):
+        title = task[0] if len(task) > 0 else ""
+        due_date = task[1] if len(task) > 1 else ""
+        due_time = task[2] if len(task) > 2 else ""
+        # Keep the legacy ID formula so existing desktop records do not fork.
+        return "todo:" + hashlib.md5(
+            f"{title}|{due_date}|{due_time}".encode()
+        ).hexdigest()[:20]
+
+    def _account_storage_suffix(self):
+        return hashlib.sha256(self._get_user_id().encode()).hexdigest()[:16]
+
+    def _task_id_map_path(self):
+        return Path.home() / "TODOapp" / f"cvm_task_ids_{self._account_storage_suffix()}.json"
+
+    def _load_task_id_map(self):
+        try:
+            data = json.loads(self._task_id_map_path().read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        result = {}
+        for key, raw_ids in data.items():
+            if isinstance(raw_ids, str):
+                raw_ids = [raw_ids]
+            if isinstance(raw_ids, list):
+                ids = list(dict.fromkeys(str(value).strip() for value in raw_ids if str(value).strip()))
+                if ids:
+                    result[str(key)] = ids
+        return result
+
+    def _save_task_id_map(self, task_ids):
+        path = self._task_id_map_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(task_ids, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _todo_task_ids(self, task):
+        """Return every server ID known for a local tuple (including old duplicates)."""
+        known = self._load_task_id_map().get(self._todo_identity_key(task), [])
+        return known or [self._generated_todo_task_id(task)]
+
+    def _todo_task_id(self, task):
+        """Return the canonical CVM ID used when uploading a desktop todo tuple."""
+        return self._todo_task_ids(task)[0]
+
+    def _pending_mutations_path(self):
+        # Keep offline mutations isolated per signed-in account. Task IDs are
+        # content-derived and can otherwise collide when accounts are switched.
+        return Path.home() / "TODOapp" / f"cvm_pending_task_mutations_{self._account_storage_suffix()}.json"
+
+    def _load_pending_mutations(self):
+        path = self._pending_mutations_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            data = {}
+        return {
+            "completed": set(data.get("completed", [])),
+            "deleted": set(data.get("deleted", [])),
+        }
+
+    def _save_pending_mutations(self, mutations):
+        path = self._pending_mutations_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "completed": sorted(mutations.get("completed", set())),
+            "deleted": sorted(mutations.get("deleted", set())),
+        }, indent=2), encoding="utf-8")
+
+    def _queue_todo_mutation(self, task, mutation):
+        """Persist an offline-safe completion/deletion for the next sync."""
+        task_ids = self._todo_task_ids(task)
+        with self._pending_mutations_lock:
+            pending = self._load_pending_mutations()
+            if mutation == "deleted":
+                pending["completed"].difference_update(task_ids)
+                pending["deleted"].update(task_ids)
+            else:
+                pending["deleted"].difference_update(task_ids)
+                pending["completed"].update(task_ids)
+            self._save_pending_mutations(pending)
+
+    def record_local_task_completion(self, task):
+        self._queue_todo_mutation(task, "completed")
+
+    def record_local_task_deletion(self, task):
+        self._queue_todo_mutation(task, "deleted")
+
+    def _pending_mutations_snapshot(self):
+        with self._pending_mutations_lock:
+            pending = self._load_pending_mutations()
+            return {name: set(ids) for name, ids in pending.items()}
+
+    def _acknowledge_pending_mutations(self, submitted):
+        """Remove only mutations included in a successful sync request."""
+        with self._pending_mutations_lock:
+            pending = self._load_pending_mutations()
+            for name in ("completed", "deleted"):
+                pending[name].difference_update(submitted.get(name, set()))
+            self._save_pending_mutations(pending)
+
     def _get_user_id(self):
         """Return the persistent user ID.
         Priority: 1) custom ID saved in cvm_config.json
@@ -685,9 +794,7 @@ class CVMManager:
             priority = t[3] if len(t) > 3 else "1"
             notes    = t[4] if len(t) > 4 else ""
             # Include due_time to avoid collisions between same-day tasks.
-            task_id = "todo:" + hashlib.md5(
-                f"{title}|{due_date}|{due_time}".encode()
-            ).hexdigest()[:20]
+            task_id = self._todo_task_id(t)
             result.append({
                 "id":       task_id,
                 "title":    title,
@@ -747,12 +854,17 @@ class CVMManager:
     def _dedupe_payload_tasks(self, tasks):
         """Deduplicate payload entries by semantic content."""
         deduped = []
-        seen = set()
+        seen = {}
         for task in tasks:
             key = self._task_fingerprint(task)
             if key in seen:
+                # For duplicate normal-todo aliases, a completed copy must win;
+                # otherwise an older active alias can resurrect the task.
+                existing_index = seen[key]
+                if key.startswith("todo|") and bool(task.get("completed", False)):
+                    deduped[existing_index] = task
                 continue
-            seen.add(key)
+            seen[key] = len(deduped)
             deduped.append(task)
         return deduped
 
@@ -788,7 +900,24 @@ class CVMManager:
         if not mgr:
             return 0
 
-        unique_remote = self._dedupe_payload_tasks(remote_tasks or [])
+        remote_tasks = remote_tasks or []
+        remote_id_map = {}
+        for task in remote_tasks:
+            notes = task.get("notes", "")
+            if isinstance(notes, str) and notes.startswith(self._DAILY_NOTES_PREFIX):
+                continue
+            task_tuple = (
+                task.get("title", ""), task.get("due_date", ""), task.get("due_time", "")
+            )
+            task_id = str(task.get("id", "")).strip()
+            if task_id:
+                key = self._todo_identity_key(task_tuple)
+                remote_id_map.setdefault(key, [])
+                if task_id not in remote_id_map[key]:
+                    remote_id_map[key].append(task_id)
+        self._save_task_id_map(remote_id_map)
+
+        unique_remote = self._dedupe_payload_tasks(remote_tasks)
         todo_converted = []
         daily_lines = []
 
@@ -802,6 +931,11 @@ class CVMManager:
                         daily_lines.append(f"[COMPLETED] {raw}")
                     else:
                         daily_lines.append(raw)
+                continue
+
+            # Completed normal todos remain in backend history, but they must not
+            # be written back into the desktop app's active-only todo.txt file.
+            if bool(t.get("completed", False)):
                 continue
 
             todo_converted.append((
@@ -835,7 +969,7 @@ class CVMManager:
         if daily_mgr:
             self.parent_app.root.after(0, daily_mgr.load_daily_tasks)
 
-        return len(unique_remote)
+        return len(todo_converted) + len(daily_unique)
 
     def _approve_pending_devices_best_effort(self, user_id):
         """Approve pending ENC2 devices so they can decrypt shared workspace tasks.
@@ -1085,6 +1219,7 @@ class CVMManager:
             return
 
         local_tasks = self._local_tasks_as_dicts()
+        pending_mutations = self._pending_mutations_snapshot()
         user_id = self._get_user_id()
 
         def do_sync():
@@ -1097,8 +1232,14 @@ class CVMManager:
                     ),
                 )
                 return
-            success, data = self.backend_client.sync_tasks(user_id, local_tasks)
+            success, data = self.backend_client.sync_tasks(
+                user_id,
+                local_tasks,
+                completed_task_ids=sorted(pending_mutations["completed"]),
+                deleted_task_ids=sorted(pending_mutations["deleted"]),
+            )
             if success:
+                self._acknowledge_pending_mutations(pending_mutations)
                 self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
