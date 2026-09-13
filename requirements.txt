@@ -1,0 +1,4 @@
+tkcalendar
+requests
+# Optional Windows startup integration (provides win32com.client).
+pywin32; sys_platform == "win32"

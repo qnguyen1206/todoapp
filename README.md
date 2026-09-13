@@ -9,6 +9,7 @@
 **CORE REQUIREMENTS (Always Required):**
 
 - Python 3.13 (or later) - Download from https://www.python.org/
+- For running from source, install the desktop dependencies: `python -m pip install -r requirements.txt`
 
 **OPTIONAL FEATURES:**
 
@@ -41,7 +42,11 @@ If you have Ollama:
 
 1. Download the latest version from GitHub Release
 2. Extract the folder
-3. Run the `todo.exe` file or `python todo.py`
+3. Run `todo.exe`, or install source dependencies with `python -m pip install -r requirements.txt` and run `python todo.py`
+
+If you see `ModuleNotFoundError: No module named 'win32com'`, install
+`pywin32` using `python -m pip install pywin32`. This package enables
+"Start with Windows"; local task management also works without it.
 
 **The app will work immediately for local task management!**
 

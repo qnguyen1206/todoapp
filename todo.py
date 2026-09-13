@@ -11,9 +11,13 @@ from tkinter import ttk, messagebox
 from datetime import datetime
 from pathlib import Path
 import sys
-import win32com.client
 import webbrowser
 from ui_utils import fit_window
+
+try:
+    import win32com.client
+except ImportError:
+    win32com = None
 
 # Import our custom modules with error handling
 try:
@@ -669,6 +673,8 @@ The app will continue to work normally for task management without AI features."
         startup_path = self.get_startup_path()
         if not startup_path.exists():
             return False
+        if win32com is None:
+            return True
         
         # Verify the shortcut points to the current executable/script
         try:
@@ -706,6 +712,15 @@ The app will continue to work normally for task management without AI features."
 
     def enable_startup(self):
         """Enable startup with Windows"""
+        if win32com is None:
+            messagebox.showerror(
+                "Missing Windows dependency",
+                "Starting with Windows requires pywin32. Install it with:\n\n"
+                f'"{sys.executable}" -m pip install pywin32\n\n'
+                "Then restart the app."
+            )
+            self.startup_var.set(self.check_startup_status())
+            return
         try:
             # Get the path of the current executable
             if getattr(sys, 'frozen', False):
