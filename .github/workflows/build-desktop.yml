@@ -2,8 +2,13 @@ name: Build desktop apps
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing version tag to publish, such as v1.8.1 (leave blank to build only)'
+        required: false
+        type: string
   push:
-    branches: [main]
+    branches: [master]
     tags: ['v*']
   pull_request:
 
@@ -38,6 +43,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A manual release must build the exact commit referenced by its tag.
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -77,7 +85,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-22.04
     steps:
@@ -89,7 +99,8 @@ jobs:
       - name: Create release and upload native packages
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || \
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --generate-notes
+          gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber

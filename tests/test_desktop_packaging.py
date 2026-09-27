@@ -32,6 +32,9 @@ class DesktopPackagingTests(unittest.TestCase):
             "TODO-App-Linux-x64",
         ):
             self.assertIn(package, workflow)
+        self.assertIn("branches: [master]", workflow)
+        self.assertIn("release_tag:", workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
 
     def test_updater_selects_only_the_current_platform_asset(self):
         updater = ModularUpdater.__new__(ModularUpdater)
