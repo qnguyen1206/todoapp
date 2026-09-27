@@ -14,6 +14,7 @@ import hashlib
 import uuid
 import base64
 import secrets
+import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
@@ -89,6 +90,15 @@ class CVMClient:
                     self.crypto_device_id = crypto.get('device_id', '')
                     self.crypto_encryption_private_key = crypto.get('encryption_private_key', '')
                     self.crypto_signing_private_key = crypto.get('signing_private_key', '')
+            else:
+                # Release bundles include public service URLs only. Never bundle a
+                # developer's cvm_config.json because it also holds account tokens
+                # and private device keys.
+                resource_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+                defaults_file = resource_root / 'cvm_defaults.json'
+                if defaults_file.exists():
+                    with open(defaults_file, 'r', encoding='utf-8') as defaults:
+                        self.cvm_endpoints = json.load(defaults).get('endpoints', {})
         except Exception as e:
             print(f"Failed to load CVM config: {e}")
             self.cvm_endpoints = {

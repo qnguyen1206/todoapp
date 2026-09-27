@@ -1,0 +1,95 @@
+name: Build desktop apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            label: Windows x64
+            spec: todo.spec
+            artifact: TODO-App-Windows-x64
+          - os: macos-15-intel
+            label: macOS Intel
+            spec: todo-macos.spec
+            artifact: TODO-App-macOS-Intel
+          - os: macos-15
+            label: macOS Apple Silicon
+            spec: todo-macos.spec
+            artifact: TODO-App-macOS-Apple-Silicon
+          - os: ubuntu-22.04
+            label: Linux x64
+            spec: todo-linux.spec
+            artifact: TODO-App-Linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-desktop.txt
+
+      - name: Install Linux GUI libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-desktop.txt
+
+      - name: Build native app
+        run: python -m PyInstaller --noconfirm --clean ${{ matrix.spec }}
+
+      - name: Package Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/todo.exe,README.md -DestinationPath ${{ matrix.artifact }}.zip
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/TODO App.app" "${{ matrix.artifact }}.zip"
+
+      - name: Package Linux app
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf "${{ matrix.artifact }}.tar.gz" todo
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release and upload native packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber

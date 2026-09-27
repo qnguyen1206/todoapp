@@ -9,6 +9,8 @@ daily_date.txt
 mysql_config.json
 ai_config.json
 cvm_config.json
+cvm_pending_task_mutations_*.json
+cvm_task_ids_*.json
 
 todo.exe
 

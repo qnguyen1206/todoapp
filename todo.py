@@ -14,9 +14,13 @@ import sys
 import webbrowser
 from ui_utils import fit_window
 
-try:
-    import win32com.client
-except ImportError:
+if sys.platform == "win32":
+    try:
+        import win32com.client
+    except ImportError:
+        win32com = None
+else:
+    # pywin32 is intentionally unavailable on macOS and Linux.
     win32com = None
 
 # Import our custom modules with error handling
@@ -89,8 +93,23 @@ else:
     base_path = os.path.dirname(__file__)
 
 ICON_PATH = os.path.join(base_path, "clipboard.png")
-CHARACTER_FILE = str(Path.home()) + "/TODOapp/character.txt"
-VERSION_FILE = str(Path.home()) + "/TODOapp/version.txt"
+APP_DATA_DIR = Path.home() / "TODOapp"
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+CHARACTER_FILE = str(APP_DATA_DIR / "character.txt")
+VERSION_FILE = str(APP_DATA_DIR / "version.txt")
+
+# Seed the installed version for a first-time user. All mutable data remains in
+# the user's home directory, never inside a read-only macOS app bundle.
+if not Path(VERSION_FILE).exists():
+    bundled_version = Path(base_path) / "version.txt"
+    if bundled_version.exists():
+        try:
+            Path(VERSION_FILE).write_text(
+                bundled_version.read_text(encoding="utf-8").strip(),
+                encoding="utf-8"
+            )
+        except OSError:
+            pass
 
 class SingletonMeta(type):
     """Metaclass for singleton pattern"""
@@ -669,11 +688,11 @@ The app will continue to work normally for task management without AI features."
             )
 
     def check_startup_status(self):
-        """Check if the app is set to run at startup AND points to current executable"""
+        """Check whether this app has an auto-start entry for the current OS."""
         startup_path = self.get_startup_path()
         if not startup_path.exists():
             return False
-        if win32com is None:
+        if sys.platform != "win32" or win32com is None:
             return True
         
         # Verify the shortcut points to the current executable/script
@@ -699,9 +718,21 @@ The app will continue to work normally for task management without AI features."
             return startup_path.exists()
 
     def get_startup_path(self):
-        """Get the path to the startup shortcut"""
-        startup_folder = Path(os.path.expandvars("%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"))
-        return startup_folder / "TODOApp.lnk"
+        """Return the native per-user auto-start file for the current OS."""
+        if sys.platform == "win32":
+            startup_folder = Path(os.path.expandvars(
+                "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+            ))
+            return startup_folder / "TODOApp.lnk"
+        if sys.platform == "darwin":
+            return Path.home() / "Library" / "LaunchAgents" / "com.kairu.todoapp.plist"
+        return Path.home() / ".config" / "autostart" / "todoapp.desktop"
+
+    def get_launch_command(self):
+        """Return the executable and arguments needed to start this installation."""
+        if getattr(sys, "frozen", False):
+            return [sys.executable]
+        return [sys.executable, os.path.abspath(sys.argv[0])]
 
     def toggle_startup(self):
         """Toggle startup status"""
@@ -711,8 +742,8 @@ The app will continue to work normally for task management without AI features."
             self.disable_startup()
 
     def enable_startup(self):
-        """Enable startup with Windows"""
-        if win32com is None:
+        """Enable startup using the current operating system's native mechanism."""
+        if sys.platform == "win32" and win32com is None:
             messagebox.showerror(
                 "Missing Windows dependency",
                 "Starting with Windows requires pywin32. Install it with:\n\n"
@@ -722,33 +753,55 @@ The app will continue to work normally for task management without AI features."
             self.startup_var.set(self.check_startup_status())
             return
         try:
-            # Get the path of the current executable
-            if getattr(sys, 'frozen', False):
-                # Running as compiled executable
-                app_path = sys.executable
-            else:
-                # Running as script - create a batch file that runs the script directly
-                script_path = os.path.abspath(sys.argv[0])
-                app_dir = os.path.dirname(script_path)
-                
-                # Create a batch file to run Python directly
-                batch_path = os.path.join(app_dir, "run_todo.bat")
-                with open(batch_path, "w") as f:
-                    f.write(f'@echo off\n"{sys.executable}" "{script_path}"\n')
-                
-                app_path = batch_path
-
+            launch_command = self.get_launch_command()
             startup_path = self.get_startup_path()
+            startup_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Create shortcut
-            shell = win32com.client.Dispatch("WScript.Shell")
-            shortcut = shell.CreateShortCut(str(startup_path))
-            shortcut.Targetpath = app_path
-            shortcut.WorkingDirectory = os.path.dirname(app_path)
-            shortcut.Description = "TODO App"
-            shortcut.save()
+            if sys.platform == "darwin":
+                import plistlib
+                plist = {
+                    "Label": "com.kairu.todoapp",
+                    "ProgramArguments": launch_command,
+                    "RunAtLoad": True,
+                    "WorkingDirectory": str(Path.home()),
+                }
+                with open(startup_path, "wb") as startup_file:
+                    plistlib.dump(plist, startup_file)
+                platform_name = "macOS"
+            elif sys.platform != "win32":
+                import shlex
+                desktop_entry = (
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=TODO App\n"
+                    f"Exec={' '.join(shlex.quote(part) for part in launch_command)}\n"
+                    "Terminal=false\n"
+                    "X-GNOME-Autostart-enabled=true\n"
+                )
+                with open(startup_path, "w", encoding="utf-8") as startup_file:
+                    startup_file.write(desktop_entry)
+                platform_name = "Linux"
+            else:
+                app_path = launch_command[0]
+                if not getattr(sys, 'frozen', False):
+                    # WScript shortcuts cannot store the script argument reliably, so
+                    # source mode uses a small batch launcher.
+                    script_path = launch_command[1]
+                    app_dir = os.path.dirname(script_path)
+                    batch_path = os.path.join(app_dir, "run_todo.bat")
+                    with open(batch_path, "w", encoding="utf-8") as batch_file:
+                        batch_file.write(f'@echo off\n"{sys.executable}" "{script_path}"\n')
+                    app_path = batch_path
 
-            messagebox.showinfo("Success", "TODO App will now start with Windows")
+                shell = win32com.client.Dispatch("WScript.Shell")
+                shortcut = shell.CreateShortCut(str(startup_path))
+                shortcut.Targetpath = app_path
+                shortcut.WorkingDirectory = os.path.dirname(app_path)
+                shortcut.Description = "TODO App"
+                shortcut.save()
+                platform_name = "Windows"
+
+            messagebox.showinfo("Success", f"TODO App will now start with {platform_name}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to enable startup: {str(e)}")
             self.startup_var.set(False)
@@ -759,7 +812,7 @@ The app will continue to work normally for task management without AI features."
             startup_path = self.get_startup_path()
             if startup_path.exists():
                 startup_path.unlink()
-            messagebox.showinfo("Success", "TODO App will no longer start with Windows")
+            messagebox.showinfo("Success", "TODO App will no longer start automatically")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to disable startup: {str(e)}")
             self.startup_var.set(True)
@@ -795,8 +848,12 @@ The app will continue to work normally for task management without AI features."
 
         # Startup checkbox - must specify master for proper BooleanVar behavior
         self.startup_var = tk.BooleanVar(master=self.root, value=self.startup_enabled)
+        startup_label = {
+            "win32": "Start with Windows",
+            "darwin": "Start with macOS",
+        }.get(sys.platform, "Start with Linux")
         self.options_menu.add_checkbutton(
-            label="Start with Windows",
+            label=startup_label,
             variable=self.startup_var,
             command=self.toggle_startup
         )

@@ -9,17 +9,19 @@ import subprocess
 import hashlib
 import importlib
 import uuid
+import platform
+import webbrowser
 from ui_utils import fit_window
 
 class ModularUpdater:
     def __init__(self, auto_check=False):
         self.app_dir = self.get_app_dir()
         self.legacy_app_dir = Path.home() / "TODOapp"
+        self.is_executable_mode = getattr(sys, 'frozen', False)
         self.version_file = self.resolve_state_file("version.txt")
         self.manifest_file = self.resolve_state_file("manifest.json")
         self.current_version = self.get_current_version()
         self.current_manifest = self.load_local_manifest()
-        self.is_executable_mode = getattr(sys, 'frozen', False)  # Detect if running as executable
         self.cleanup_legacy_update_artifacts()
         print(f"Current version: {self.current_version}")
         print(f"Application directory: {self.app_dir}")
@@ -39,25 +41,27 @@ class ModularUpdater:
         return Path(__file__).resolve().parent
 
     def resolve_state_file(self, filename):
-        """Use app-local state files and migrate from legacy home folder if needed."""
-        app_path = self.app_dir / filename
-        legacy_path = self.legacy_app_dir / filename
+        """Resolve mutable updater state without writing inside an app bundle."""
+        if not self.is_executable_mode:
+            return str(self.app_dir / filename)
 
-        if app_path.exists():
-            return str(app_path)
+        state_path = self.legacy_app_dir / filename
+        if state_path.exists():
+            return str(state_path)
 
-        if legacy_path.exists():
+        resource_root = Path(getattr(sys, '_MEIPASS', self.app_dir))
+        bundled_path = resource_root / filename
+        if bundled_path.exists():
             try:
-                app_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.parent.mkdir(parents=True, exist_ok=True)
                 import shutil
-                shutil.copy2(legacy_path, app_path)
-                return str(app_path)
+                shutil.copy2(bundled_path, state_path)
+                return str(state_path)
             except Exception as e:
-                print(f"Could not migrate {filename} to app directory: {e}")
-                return str(legacy_path)
+                print(f"Could not initialize {filename} in user data: {e}")
 
-        app_path.parent.mkdir(parents=True, exist_ok=True)
-        return str(app_path)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        return str(state_path)
 
     def cleanup_legacy_update_artifacts(self):
         """Remove stale updater artifacts from prior update attempts."""
@@ -120,7 +124,7 @@ class ModularUpdater:
                     "modular_updater.py": {"version": self.current_version, "hash": "", "type": "system"},
                     "clipboard.png": {"version": self.current_version, "hash": "", "type": "asset"},
                     "version.txt": {"version": self.current_version, "hash": "", "type": "config"},
-                    "cvm_config.json": {"version": self.current_version, "hash": "", "type": "config"}
+                    "cvm_defaults.json": {"version": self.current_version, "hash": "", "type": "config"}
                 }
             }
             self.save_local_manifest(default_manifest)
@@ -156,25 +160,23 @@ class ModularUpdater:
                 latest_version = latest_release["tag_name"].lstrip("v")
                 
                 if self.is_newer_version(latest_version, self.current_version):
-                    # In executable mode, look for zip file containing executable
+                    # Executables are OS-specific. Never offer (for example) a
+                    # Windows zip to a macOS installation just because it was the
+                    # first zip attached to the release.
                     if self.is_executable_mode:
-                        zip_asset = None
-                        exe_asset = None
-                        
-                        # Look for zip files first (preferred for GitHub releases)
-                        for asset in latest_release["assets"]:
-                            if asset["name"].endswith(".zip"):
-                                zip_asset = asset
-                                break
-                            elif asset["name"].endswith(".exe"):
-                                exe_asset = asset
-                        
-                        if zip_asset:
-                            self.prompt_full_update(latest_version, zip_asset["browser_download_url"])
-                        elif exe_asset:
-                            self.prompt_full_update(latest_version, exe_asset["browser_download_url"])
+                        platform_asset = self.select_platform_asset(latest_release["assets"])
+                        if platform_asset and sys.platform == "win32":
+                            self.prompt_full_update(
+                                latest_version,
+                                platform_asset["browser_download_url"]
+                            )
+                        elif platform_asset:
+                            self.prompt_manual_platform_update(
+                                latest_version,
+                                latest_release.get("html_url", "https://github.com/Kairu1206/todoapp/releases/latest")
+                            )
                         else:
-                            print("No executable or zip package found in release for executable mode")
+                            print(f"No release package found for {sys.platform}/{platform.machine()}")
                     else:
                         # Source code mode - check for modular updates
                         manifest_url = None
@@ -204,6 +206,38 @@ class ModularUpdater:
                     print("No updates available - you have the latest version")
         except Exception as e:
             print(f"Update check failed: {e}")
+
+    def select_platform_asset(self, assets):
+        """Select only a release package compatible with this computer."""
+        named_assets = [(asset.get("name", "").lower(), asset) for asset in assets]
+
+        if sys.platform == "win32":
+            markers = (("windows", ".zip"), ("windows", ".exe"), ("todo.exe", ".exe"))
+        elif sys.platform == "darwin":
+            machine = platform.machine().lower()
+            architecture = "apple-silicon" if machine in {"arm64", "aarch64"} else "intel"
+            markers = ((f"macos-{architecture}", ".zip"), ("macos", ".zip"))
+        else:
+            markers = (("linux", ".tar.gz"), ("linux", ".zip"))
+
+        for required_text, suffix in markers:
+            for name, asset in named_assets:
+                if required_text in name and name.endswith(suffix):
+                    return asset
+        return None
+
+    def prompt_manual_platform_update(self, new_version, release_url):
+        """Direct macOS/Linux users to their native package without mutating an app in use."""
+        system_name = "macOS" if sys.platform == "darwin" else "Linux"
+        should_open = messagebox.askyesno(
+            "Update Available",
+            f"TODO App {new_version} is available for {system_name}.\n\n"
+            "The release page will show the correct package for this computer. "
+            "Download it, close TODO App, and replace the old copy.\n\n"
+            "Open the release page now?"
+        )
+        if should_open:
+            webbrowser.open(release_url)
     
     def check_modular_updates(self, manifest_url, download_assets, new_version):
         """Check which modules need updating based on manifest"""
@@ -487,6 +521,13 @@ class ModularUpdater:
     
     def download_and_install_full(self, url, new_version):
         """Full update fallback (original method)"""
+        if sys.platform != "win32" and self.is_executable_mode:
+            messagebox.showinfo(
+                "Manual Update Required",
+                "Automatic in-place updates are currently supported on Windows only. "
+                "Please install the native package from the GitHub release page."
+            )
+            return
         try:
             response = requests.get(url, stream=True)
             if response.status_code == 200:

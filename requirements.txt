@@ -1,4 +1,8 @@
 tkcalendar
 requests
+Pillow
+cryptography
+mysql-connector-python
+keyring
 # Optional Windows startup integration (provides win32com.client).
 pywin32; sys_platform == "win32"

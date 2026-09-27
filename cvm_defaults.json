@@ -1,0 +1,8 @@
+{
+  "endpoints": {
+    "backend": "https://7ae3718bfb21f7feac51d3b223df22e26d7d67e1-5000.dstack-pha-prod5.phala.network/",
+    "ai_inference": "https://7ae3718bfb21f7feac51d3b223df22e26d7d67e1-5001.dstack-pha-prod5.phala.network/",
+    "task_sync": "https://7ae3718bfb21f7feac51d3b223df22e26d7d67e1-5002.dstack-pha-prod5.phala.network/",
+    "scheduler": "https://7ae3718bfb21f7feac51d3b223df22e26d7d67e1-5003.dstack-pha-prod5.phala.network/"
+  }
+}

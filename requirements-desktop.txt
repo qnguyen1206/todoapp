@@ -1,0 +1,12 @@
+# Runtime packages collected into the native desktop bundles.
+# End users do not install these; GitHub Actions/PyInstaller does.
+requests>=2.32,<3
+Pillow>=10,<13
+tkcalendar>=1.6,<2
+cryptography>=43,<47
+mysql-connector-python>=9,<10
+keyring>=25,<26
+pywin32>=306; sys_platform == "win32"
+
+# Build tool. PyInstaller embeds the Python interpreter in every package.
+pyinstaller>=6.12,<7

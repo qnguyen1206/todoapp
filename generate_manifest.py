@@ -39,7 +39,7 @@ class ManifestGenerator:
             # Assets
             "clipboard.png": {"type": "asset", "required": True},
             "version.txt": {"type": "config", "required": True},
-            "cvm_config.json": {"type": "config", "required": True},
+            "cvm_defaults.json": {"type": "config", "required": True},
             
             # Optional files
             "README.md": {"type": "docs", "required": False},
@@ -161,7 +161,7 @@ class ManifestGenerator:
                 print(f"Added to package: todo.exe (main executable)")
             
             # Add essential assets
-            essential_files = ["clipboard.png", "version.txt", "cvm_config.json"]
+            essential_files = ["clipboard.png", "version.txt", "cvm_defaults.json"]
             for file_name in essential_files:
                 file_path = os.path.join(self.app_dir, file_name)
                 if os.path.exists(file_path):

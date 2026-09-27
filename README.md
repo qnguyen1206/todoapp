@@ -2,14 +2,37 @@
 
 ---
 
-**REQUIREMENTS TO RUN THE APP:**
+**DOWNLOAD THE APP (NO PYTHON REQUIRED):**
 
 ---
 
-**CORE REQUIREMENTS (Always Required):**
+Download the package that matches the computer from the latest GitHub Release:
 
-- Python 3.13 (or later) - Download from https://www.python.org/
-- For running from source, install the desktop dependencies: `python -m pip install -r requirements.txt`
+- **Windows 10/11 (64-bit):** `TODO-App-Windows-x64.zip`, then run `todo.exe`
+- **Mac with Apple Silicon (M1/M2/M3/M4):** `TODO-App-macOS-Apple-Silicon.zip`
+- **Mac with an Intel processor:** `TODO-App-macOS-Intel.zip`
+- **Linux (64-bit):** `TODO-App-Linux-x64.tar.gz`
+
+Python and pip are embedded in these downloads. A Windows `.exe` is a Windows-only
+program and cannot run on a Mac. macOS users must download one of the `.app`
+packages above.
+
+The current macOS builds are not Apple-notarized. On first launch, macOS may require
+right-clicking **TODO App**, choosing **Open**, and confirming. Fully removing this
+warning requires signing and notarizing releases with an Apple Developer ID.
+
+Linux users can extract the archive and run:
+
+```bash
+chmod +x todo
+./todo
+```
+
+**RUNNING FROM SOURCE (DEVELOPERS ONLY):**
+
+- Install Python 3.13 or later.
+- Run `python -m pip install -r requirements-desktop.txt`.
+- Run `python todo.py`.
 
 **OPTIONAL FEATURES:**
 
@@ -40,13 +63,9 @@ If you have Ollama:
 
 **QUICK START (Minimal Setup):**
 
-1. Download the latest version from GitHub Release
-2. Extract the folder
-3. Run `todo.exe`, or install source dependencies with `python -m pip install -r requirements.txt` and run `python todo.py`
-
-If you see `ModuleNotFoundError: No module named 'win32com'`, install
-`pywin32` using `python -m pip install pywin32`. This package enables
-"Start with Windows"; local task management also works without it.
+1. Open the latest GitHub Release.
+2. Download the package for your operating system and processor.
+3. Extract it and launch `todo.exe`, `TODO App.app`, or `todo` as described above.
 
 **The app will work immediately for local task management!**
 
@@ -72,7 +91,7 @@ If you see `ModuleNotFoundError: No module named 'win32com'`, install
 
 1. Create a CVM at https://phala.com/
 2. Install Python packages: `pip install requests cryptography`
-3. Setup endpoints in "Configure Endpoints" in the app's Phala CVM meny
+3. Set up endpoints in "Configure Endpoints" in the app's Phala CVM menu
 4. Test the connection to make sure everything works
 
 **For shared Web + Desktop Accounts**
@@ -100,7 +119,19 @@ If you see `ModuleNotFoundError: No module named 'win32com'`, install
 - Enable MySQL Sharing to start using LAN features
   - If there are errors pop up, it is because the app was checking for first time run and creating files that is needed for the app to run properly.
 
-- The app will automatically check for updates and prompt the user to update if a new version is available.
+- The app checks for updates. Windows can update in place; macOS and Linux open the
+  release page so the user can replace the app with the correct native package.
+
+**CREATING A RELEASE:**
+
+The GitHub Actions workflow builds four self-contained packages on native runners:
+Windows x64, macOS Intel, macOS Apple Silicon, and Linux x64. Push a version tag to
+build the packages and attach them to a GitHub Release, for example:
+
+```bash
+git tag v1.8.0
+git push origin v1.8.0
+```
 
 ---
 
