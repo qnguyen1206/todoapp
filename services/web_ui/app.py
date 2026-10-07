@@ -2410,6 +2410,39 @@ def list_wallet_transactions():
         return jsonify({"status": "error", "message": str(exc)}), 503
 
 
+@app.route("/api/task-escrows", methods=["GET"])
+@login_required
+def list_task_escrows():
+    try:
+        response = _backend("GET", "/task-escrows", timeout=25)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/task-escrows/prepare", methods=["POST"])
+@login_required
+def prepare_task_escrow():
+    try:
+        response = _backend("POST", "/task-escrows/prepare", json=request.get_json(silent=True) or {}, timeout=40)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/task-escrows/<escrow_id>/prepare-action", methods=["POST"])
+@login_required
+def prepare_task_escrow_action(escrow_id):
+    try:
+        response = _backend(
+            "POST", f"/task-escrows/{escrow_id}/prepare-action",
+            json=request.get_json(silent=True) or {}, timeout=40,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
 @app.route("/api/settings", methods=["GET"])
 @login_required
 def get_settings():

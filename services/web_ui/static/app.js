@@ -24,6 +24,7 @@ let conversationHistory = [];
 let currentMeetingProposal = null;
 let currentWalletAddress = '';
 let currentWalletTransaction = null;
+let currentWalletContext = 'transfer';
 let walletStatusPollTimer = null;
 let bulkParsedTasks = [];
 const selectedTaskIds = new Set();
@@ -356,11 +357,21 @@ document.getElementById("trust-modal").addEventListener("click", function(e) {
 });
 
 /* ── Character / Stats ─────────────────────────────────────────── */
+function renderCharacterStats(stats = {}) {
+  const levelBadge = document.getElementById('level-badge');
+  const xpBadge = document.getElementById('xp-badge');
+  const totalXp = Number(stats.xp ?? 0);
+  const currentXp = Number(stats.xp_current ?? 0);
+  const neededXp = Number(stats.xp_needed ?? 50);
+  levelBadge.textContent = `Lv ${stats.level ?? 0}`;
+  xpBadge.textContent = `XP ${totalXp}`;
+  xpBadge.title = `${currentXp}/${neededXp} XP toward the next level`;
+}
+
 async function loadCharacter() {
   try {
     const d = await api('GET', '/api/character');
-    document.getElementById('level-badge').textContent = `Lv ${d.level ?? 0}`;
-    document.getElementById('xp-badge').textContent    = `XP ${d.xp_current}/${d.xp_needed}`;
+    renderCharacterStats(d);
   } catch {}
 }
 
@@ -487,9 +498,13 @@ async function finishSelectedTasks() {
   setBulkActionsBusy(true);
   try {
     const result = await api('POST', '/api/tasks/bulk/complete', {task_ids: taskIds}, 120000);
+    if (result.rewards && Number.isFinite(Number(result.rewards.xp))) {
+      renderCharacterStats(result.rewards);
+    }
     selectedTaskIds.clear();
     await loadTasks();
-    alert(`Finished ${result.updated ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.${result.warning ? `\n${result.warning}` : ''}`);
+    const rewardWarning = result.rewards?.warning || result.warning;
+    alert(`Finished ${result.updated ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.${rewardWarning ? `\n${rewardWarning}` : ''}`);
   } catch (error) {
     alert(`Could not finish selected tasks: ${error.message}`);
   } finally {
@@ -609,8 +624,13 @@ async function finishTask(id) {
   document.getElementById('remaining-badge').textContent = `Tasks: ${allTasks.filter(item => !item.completed).length}`;
 
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(id)}/complete`);
-    loadCharacter();
+    const result = await api('POST', `/api/tasks/${encodeURIComponent(id)}/complete`);
+    if (result.rewards && Number.isFinite(Number(result.rewards.xp))) {
+      renderCharacterStats(result.rewards);
+    } else {
+      await loadCharacter();
+    }
+    if (result.rewards?.warning) alert(result.rewards.warning);
   } catch (error) {
     task.completed = false;
     renderTasks();
@@ -870,6 +890,8 @@ function openAddTask() {
   document.getElementById('modal-title').textContent = 'Add Task';
   document.getElementById('edit-task-id').value = '';
   ['f-title','f-date','f-time','f-notes'].forEach(id => document.getElementById(id).value = '');
+  nativeTaskDatePicker.value = '';
+  document.getElementById('f-date').setCustomValidity('');
   document.getElementById('f-priority').value = '3';
   document.getElementById('f-reminder-email-enabled').checked = false;
   document.getElementById('f-reminder-email').value = '';
@@ -889,6 +911,12 @@ function openEditTask(id) {
   document.getElementById('edit-task-id').value  = id;
   document.getElementById('f-title').value        = t.title    || '';
   document.getElementById('f-date').value         = t.due_date || '';
+  if (isValidDueDate(t.due_date || '')) {
+    const [month, day, year] = t.due_date.split('-');
+    nativeTaskDatePicker.value = `${year}-${month}-${day}`;
+  } else {
+    nativeTaskDatePicker.value = '';
+  }
   document.getElementById('f-time').value         = timeForTaskInput(t.due_time || '');
   document.getElementById('f-priority').value     = t.priority || '3';
   document.getElementById('f-notes').value        = t.notes    || '';
@@ -981,6 +1009,10 @@ document.getElementById('f-date-picker-btn').addEventListener('click', () => {
   if (isValidDueDate(taskDateInput.value)) {
     const [month, day, year] = taskDateInput.value.split('-');
     nativeTaskDatePicker.value = `${year}-${month}-${day}`;
+  } else {
+    // Clear the prior selection so choosing the same date for a new task still
+    // fires a change event and fills the visible MM-DD-YYYY field.
+    nativeTaskDatePicker.value = '';
   }
   if (typeof nativeTaskDatePicker.showPicker === 'function') nativeTaskDatePicker.showPicker();
   else nativeTaskDatePicker.click();
@@ -2045,6 +2077,7 @@ async function loadWallet() {
     content.hidden = false;
     await loadWalletAudit();
     await loadRewards();
+    await loadTaskEscrows();
     if (data.portfolio_error) {
       status.className = 'wallet-status wallet-warning-status';
       status.textContent = `Address ready. ${data.portfolio_error}`;
@@ -2077,6 +2110,10 @@ function setWalletSendMessage(message, kind = '') {
 }
 
 function renderWalletQuote(transaction) {
+  const action = transaction.transaction_kind === 'task_escrow'
+    ? `${transaction.escrow_action || 'escrow'} task reward`
+    : 'transfer';
+  document.querySelector('#wallet-confirm-panel h4').textContent = `Confirm exact ${action}`;
   document.getElementById('wallet-quote-network').textContent = `${transaction.chain_name} · Chain ${transaction.chain_id}`;
   document.getElementById('wallet-quote-to').textContent = transaction.to;
   document.getElementById('wallet-quote-amount').textContent = `${walletAmount(transaction.amount_eth)} ETH`;
@@ -2106,6 +2143,7 @@ async function prepareWalletTransfer() {
       idempotency_key: walletIdempotencyKey(),
     }, 35000);
     currentWalletTransaction = data.transaction;
+    currentWalletContext = 'transfer';
     renderWalletQuote(currentWalletTransaction);
     document.getElementById('wallet-send-form').hidden = true;
     document.getElementById('wallet-confirm-panel').hidden = false;
@@ -2184,6 +2222,7 @@ async function confirmWalletTransfer() {
 
 function cancelWalletTransfer() {
   currentWalletTransaction = null;
+  currentWalletContext = 'transfer';
   document.getElementById('wallet-send-form').hidden = false;
   document.getElementById('wallet-confirm-panel').hidden = true;
   document.getElementById('wallet-code-section').hidden = true;
@@ -2199,8 +2238,11 @@ function walletAuditRow(transaction) {
     ? (explorer ? `<a href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">${escHtml(hash.slice(0, 10))}…</a>` : escHtml(`${hash.slice(0, 10)}…`))
     : '';
   const created = transaction.created_at ? new Date(transaction.created_at).toLocaleString() : '';
+  const detail = transaction.transaction_kind === 'task_escrow'
+    ? `Task escrow: ${transaction.escrow_action || 'action'}`
+    : `To ${transaction.to}`;
   return `<div class="wallet-transaction wallet-audit-row">
-    <div><strong>${escHtml(transaction.status)}</strong><span>To ${escHtml(transaction.to)}</span></div>
+    <div><strong>${escHtml(transaction.status)}</strong><span>${escHtml(detail)}</span></div>
     <div class="wallet-transaction-value">${escHtml(walletAmount(transaction.amount_eth))} ETH</div>
     <time>${escHtml(created)}${hashLink ? ` · ${hashLink}` : ''}</time>
   </div>`;
@@ -2217,6 +2259,128 @@ async function loadWalletAudit() {
       : '<div class="empty-msg">No transfer requests yet.</div>';
   } catch (error) {
     list.innerHTML = `<div class="empty-msg">${escHtml(error.message)}</div>`;
+  }
+}
+
+function setTaskEscrowMessage(message, kind = '') {
+  const element = document.getElementById('task-escrow-message');
+  if (!element) return;
+  element.textContent = message || '';
+  element.className = `wallet-send-message ${kind ? `wallet-send-${kind}` : ''}`;
+}
+
+function stageEscrowConfirmation(transaction) {
+  currentWalletTransaction = transaction;
+  currentWalletContext = 'task_escrow';
+  renderWalletQuote(transaction);
+  document.getElementById('wallet-send-form').hidden = true;
+  document.getElementById('wallet-confirm-panel').hidden = false;
+  document.getElementById('wallet-code-section').hidden = true;
+  document.getElementById('wallet-confirm-password').value = '';
+  document.getElementById('wallet-confirm-code').value = '';
+  setWalletSendMessage('Review every field, then re-enter your password to request an email confirmation code.', 'warning');
+  document.getElementById('wallet-send-card').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+
+function taskEscrowRow(escrow) {
+  const task = allTasks.find(item => String(item.task_id) === String(escrow.task_id));
+  const taskTitle = task?.title || task?.task || `Task ${escrow.task_id}`;
+  const deadline = escrow.deadline ? new Date(escrow.deadline) : null;
+  const expired = deadline && !Number.isNaN(deadline.getTime()) && deadline.getTime() <= Date.now();
+  const funded = escrow.status === 'funded';
+  const canRelease = funded && task?.completed === true;
+  const canRefund = funded && expired;
+  const actions = [
+    canRelease ? `<button class="btn btn-sm btn-primary" type="button" onclick="prepareTaskEscrowAction('${escHtml(escrow.id)}','release',this)">Release</button>` : '',
+    canRefund ? `<button class="btn btn-sm" type="button" onclick="prepareTaskEscrowAction('${escHtml(escrow.id)}','refund',this)">Refund</button>` : '',
+  ].join('');
+  return `<div class="wallet-transaction task-escrow-row">
+    <div><strong>${escHtml(taskTitle)}</strong><span>${escHtml(escrow.status)} · recipient ${escHtml(escrow.recipient_address)}</span></div>
+    <div class="wallet-transaction-value">${escHtml(walletAmount(escrow.amount_eth))} ETH</div>
+    <time>Deadline ${escHtml(deadline && !Number.isNaN(deadline.getTime()) ? deadline.toLocaleString() : 'unknown')}</time>
+    ${actions ? `<div class="task-escrow-actions">${actions}</div>` : ''}
+  </div>`;
+}
+
+async function loadTaskEscrows() {
+  const form = document.getElementById('task-escrow-form');
+  const disabled = document.getElementById('task-escrow-disabled');
+  const list = document.getElementById('task-escrow-list');
+  const select = document.getElementById('task-escrow-task');
+  if (!form || !disabled || !list || !select) return;
+  try {
+    const data = await api('GET', '/api/task-escrows', undefined, 30000);
+    const escrows = Array.isArray(data.escrows) ? data.escrows : [];
+    const escrowedTaskIds = new Set(escrows.map(item => String(item.task_id)));
+    const availableTasks = allTasks.filter(task => !task.completed && !escrowedTaskIds.has(String(task.task_id)));
+    select.innerHTML = availableTasks.length
+      ? `<option value="">Select a task</option>${availableTasks.map(task => `<option value="${escHtml(task.task_id)}">${escHtml(task.title || task.task || 'Untitled task')}</option>`).join('')}`
+      : '<option value="">No eligible tasks</option>';
+    const enabled = data.enabled === true;
+    disabled.hidden = enabled;
+    form.hidden = !enabled;
+    disabled.textContent = enabled ? '' : 'Escrow is disabled until the Base Sepolia contract is deployed and configured.';
+    const max = data.config?.maximum_escrow_eth;
+    if (max) document.getElementById('task-escrow-amount').max = max;
+    if (!document.getElementById('task-escrow-recipient').value) {
+      document.getElementById('task-escrow-recipient').value = currentWalletAddress;
+    }
+    const deadlineInput = document.getElementById('task-escrow-deadline');
+    if (!deadlineInput.value) {
+      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      deadlineInput.value = new Date(tomorrow.getTime() - tomorrow.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    }
+    list.innerHTML = escrows.length ? escrows.map(taskEscrowRow).join('') : '<div class="empty-msg">No task escrows yet.</div>';
+  } catch (error) {
+    form.hidden = true;
+    disabled.hidden = false;
+    disabled.textContent = `Escrow unavailable: ${error.message}`;
+    list.innerHTML = '<div class="empty-msg">Could not load task escrows.</div>';
+  }
+}
+
+async function prepareTaskEscrow() {
+  const taskId = document.getElementById('task-escrow-task').value;
+  const recipient = document.getElementById('task-escrow-recipient').value.trim();
+  const amount = document.getElementById('task-escrow-amount').value.trim();
+  const deadlineValue = document.getElementById('task-escrow-deadline').value;
+  const button = document.getElementById('task-escrow-prepare');
+  if (!taskId) return setTaskEscrowMessage('Choose an unfinished task.', 'error');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) return setTaskEscrowMessage('Enter a valid 0x recipient address.', 'error');
+  if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) return setTaskEscrowMessage('Enter a reward greater than zero.', 'error');
+  const deadline = new Date(deadlineValue);
+  if (!deadlineValue || Number.isNaN(deadline.getTime()) || deadline.getTime() <= Date.now()) return setTaskEscrowMessage('Choose a future refund deadline.', 'error');
+  button.disabled = true;
+  setTaskEscrowMessage('Preparing an exact escrow transaction...', 'working');
+  try {
+    const data = await api('POST', '/api/task-escrows/prepare', {
+      task_id: taskId, recipient, amount_eth: amount, deadline: deadline.toISOString(),
+      idempotency_key: walletIdempotencyKey(),
+    }, 40000);
+    stageEscrowConfirmation(data.transaction);
+    setTaskEscrowMessage('Escrow prepared. Complete password and email confirmation above.', 'success');
+    await loadWalletAudit();
+  } catch (error) {
+    setTaskEscrowMessage(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function prepareTaskEscrowAction(escrowId, action, button) {
+  button.disabled = true;
+  setTaskEscrowMessage(`Preparing ${action} transaction...`, 'working');
+  try {
+    const data = await api('POST', `/api/task-escrows/${encodeURIComponent(escrowId)}/prepare-action`, {
+      action, idempotency_key: walletIdempotencyKey(),
+    }, 40000);
+    stageEscrowConfirmation(data.transaction);
+    setTaskEscrowMessage(`${action === 'release' ? 'Release' : 'Refund'} prepared. Complete password and email confirmation above.`, 'success');
+    await loadWalletAudit();
+  } catch (error) {
+    setTaskEscrowMessage(error.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 }
 

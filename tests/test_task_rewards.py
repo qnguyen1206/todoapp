@@ -11,6 +11,7 @@ class TaskRewardContractTests(unittest.TestCase):
 
     def test_xp_is_backend_authoritative_and_idempotent_per_task(self):
         backend = self.read("services/backend/app.py")
+        self.assertIn("import hashlib", backend)
         self.assertIn("CREATE TABLE IF NOT EXISTS task_reward_events", backend)
         self.assertIn("PRIMARY KEY (user_id, task_id)", backend)
         self.assertIn("ON CONFLICT (user_id, task_id) DO NOTHING RETURNING xp_awarded", backend)
@@ -18,6 +19,9 @@ class TaskRewardContractTests(unittest.TestCase):
         self.assertIn("SAVEPOINT task_reward_award", backend)
         self.assertIn("Task completed, but rewards are temporarily unavailable", backend)
         self.assertIn('"rewards": rewards', backend)
+        self.assertIn("def _reconcile_completed_task_rewards", backend)
+        self.assertIn("_reconcile_completed_task_rewards(cur, g.user_id)", backend)
+        self.assertIn("cur, user_id, [task_id]", backend)
 
     def test_badge_issuer_is_narrow_and_base_sepolia_only(self):
         wallet = self.read("services/wallet/app.py")
@@ -41,7 +45,16 @@ class TaskRewardContractTests(unittest.TestCase):
         self.assertIn('id="reward-achievements"', template)
         self.assertIn("async function loadRewards()", script)
         self.assertIn("async function mintAchievement", script)
+        self.assertIn("renderCharacterStats(result.rewards)", script)
+        self.assertIn("xpBadge.textContent = `XP ${totalXp}`", script)
         self.assertIn("REWARD_BADGES_ENABLED: ${REWARD_BADGES_ENABLED:-false}", compose)
+
+    def test_add_task_resets_stale_native_date_picker(self):
+        script = self.read("services/web_ui/static/app.js")
+        open_add_task = script[script.index("function openAddTask()") : script.index("function openEditTask")]
+        self.assertIn("nativeTaskDatePicker.value = '';", open_add_task)
+        self.assertIn("setCustomValidity('')", open_add_task)
+        self.assertIn("choosing the same date for a new task", script)
 
 
 if __name__ == "__main__":

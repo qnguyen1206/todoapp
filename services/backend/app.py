@@ -8,6 +8,7 @@ import os
 import logging
 import re
 import base64
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -48,6 +49,8 @@ REWARD_XP_PER_TASK = max(1, int(os.environ.get("REWARD_XP_PER_TASK", "10")))
 REWARD_XP_PER_LEVEL = max(REWARD_XP_PER_TASK, int(os.environ.get("REWARD_XP_PER_LEVEL", "50")))
 REWARD_BADGES_ENABLED = os.environ.get("REWARD_BADGES_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 REWARD_BADGE_CONTRACT_ADDRESS = os.environ.get("REWARD_BADGE_CONTRACT_ADDRESS", "").strip()
+TASK_ESCROW_ENABLED = os.environ.get("TASK_ESCROW_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+TASK_ESCROW_MAX_ETH = Decimal(os.environ.get("TASK_ESCROW_MAX_ETH", "0.05"))
 
 REWARD_ACHIEVEMENTS = (
     {"code": "first_task", "id": 1, "name": "First Step", "description": "Complete your first task.", "tasks": 1},
@@ -155,7 +158,7 @@ def _send_verification_code(email, code):
         return False
 
 
-def _send_wallet_confirmation_code(email, code, recipient, amount_eth, chain_name):
+def _send_wallet_confirmation_code(email, code, recipient, amount_eth, chain_name, operation="transfer"):
     """Send a short-lived code for one already-prepared wallet transaction."""
     if os.environ.get("SMTP_ENABLED", "false").lower() != "true":
         log.warning("SMTP is disabled; cannot deliver wallet confirmation code to %s", email)
@@ -163,12 +166,12 @@ def _send_wallet_confirmation_code(email, code, recipient, amount_eth, chain_nam
     try:
         body = (
             f"Your TODO App wallet confirmation code is: {code}\n\n"
-            f"Network: {chain_name}\nAmount: {amount_eth} ETH\nTo: {recipient}\n\n"
-            "This code expires in 10 minutes. If you did not request this transfer, "
+            f"Operation: {operation}\nNetwork: {chain_name}\nAmount: {amount_eth} ETH\nTo: {recipient}\n\n"
+            "This code expires in 10 minutes. If you did not request this wallet action, "
             "do not share the code."
         )
         msg = MIMEText(body)
-        msg["Subject"] = "Confirm your TODO App testnet transfer"
+        msg["Subject"] = "Confirm your TODO App testnet wallet action"
         msg["From"] = os.environ.get("SMTP_USER", "")
         msg["To"] = email
         with smtplib.SMTP(os.environ.get("SMTP_HOST", ""), int(os.environ.get("SMTP_PORT", "587"))) as server:
@@ -245,11 +248,53 @@ def _wallet_transaction_payload(row):
         "transaction_hash": row.get("transaction_hash"),
         "explorer_url": row.get("explorer_url") or "",
         "error_message": row.get("error_message") or "",
+        "transaction_kind": row.get("transaction_kind") or "transfer",
+        "task_id": row.get("task_id") or "",
+        "escrow_action": row.get("escrow_action") or "",
+        "escrow_key": row.get("escrow_key") or "",
     }
     for field in ("created_at", "expires_at", "code_expires_at", "broadcast_at", "confirmed_at", "updated_at"):
         value = row.get(field)
         public[field] = value.isoformat() if value else None
     return public
+
+
+def _task_escrow_payload(row):
+    if not row:
+        return None
+    row = dict(row)
+    result = {
+        "id": str(row["id"]), "task_id": row["task_id"], "escrow_key": row["escrow_key"],
+        "sponsor_address": row["sponsor_address"], "recipient_address": row["recipient_address"],
+        "value_wei": str(row["value_wei"]), "amount_eth": _wei_to_eth(row["value_wei"]),
+        "status": row["status"],
+        "funding_transaction_id": str(row["funding_tx_id"]) if row.get("funding_tx_id") else None,
+        "settlement_transaction_id": str(row["settlement_tx_id"]) if row.get("settlement_tx_id") else None,
+    }
+    for field in ("deadline", "created_at", "updated_at"):
+        result[field] = row[field].isoformat() if row.get(field) else None
+    return result
+
+
+def _apply_escrow_transaction_result(cur, transaction_row, chain_status):
+    """Advance the linked escrow only after the exact transaction is confirmed."""
+    row = dict(transaction_row)
+    if row.get("transaction_kind") != "task_escrow" or not row.get("escrow_key"):
+        return
+    action = row.get("escrow_action")
+    if chain_status == "failed":
+        failure_status = "failed" if action == "create" else "funded"
+        cur.execute(
+            "UPDATE task_escrows SET status=%s, updated_at=NOW() WHERE user_id=%s AND escrow_key=%s",
+            (failure_status, row["user_id"], row["escrow_key"]),
+        )
+        return
+    next_status = {"create": "funded", "release": "released", "refund": "refunded"}.get(action)
+    if next_status:
+        cur.execute(
+            "UPDATE task_escrows SET status=%s, updated_at=NOW() WHERE user_id=%s AND escrow_key=%s",
+            (next_status, row["user_id"], row["escrow_key"]),
+        )
 
 
 def _ensure_reward_schema(cur):
@@ -367,6 +412,19 @@ def _record_task_completion_rewards(cur, user_id, task_ids):
             "achievements_unlocked": [],
             "warning": "Task completed, but rewards are temporarily unavailable",
         }
+
+
+def _reconcile_completed_task_rewards(cur, user_id):
+    """Repair missing idempotent reward events for every completed task."""
+    cur.execute(
+        "SELECT t.task_id FROM tasks t "
+        "LEFT JOIN task_reward_events e ON e.user_id=t.user_id AND e.task_id=t.task_id "
+        "WHERE t.user_id=%s AND t.completed=TRUE AND e.task_id IS NULL",
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    task_ids = [row.get("task_id") if isinstance(row, dict) else row[0] for row in rows]
+    return _record_task_completion_rewards(cur, user_id, task_ids)
 
 
 def _reward_payload(row):
@@ -989,6 +1047,30 @@ def init_db():
 
                 ALTER TABLE wallet_transactions
                     ADD COLUMN IF NOT EXISTS password_attempts INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS transaction_kind TEXT NOT NULL DEFAULT 'transfer';
+                ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS task_id TEXT;
+                ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS escrow_action TEXT;
+                ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS escrow_key TEXT;
+                ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS calldata TEXT;
+
+                CREATE TABLE IF NOT EXISTS task_escrows (
+                    id                UUID PRIMARY KEY,
+                    user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    task_id           TEXT NOT NULL,
+                    escrow_key        TEXT UNIQUE NOT NULL,
+                    sponsor_address   TEXT NOT NULL,
+                    recipient_address TEXT NOT NULL,
+                    value_wei         NUMERIC(78, 0) NOT NULL CHECK (value_wei > 0),
+                    deadline          TIMESTAMPTZ NOT NULL,
+                    status            TEXT NOT NULL DEFAULT 'preparing',
+                    funding_tx_id     UUID REFERENCES wallet_transactions(id),
+                    settlement_tx_id  UUID REFERENCES wallet_transactions(id),
+                    created_at        TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at        TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (user_id, task_id),
+                    CHECK (status IN ('preparing','funding','funded','release_pending','released','refund_pending','refunded','failed'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_escrows_user_created ON task_escrows(user_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS refresh_tokens (
                     token_hash   TEXT PRIMARY KEY,
@@ -1263,6 +1345,213 @@ def prepare_wallet_transaction():
         conn.close()
 
 
+def _parse_escrow_deadline(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        raise ValueError("Enter a valid escrow deadline")
+
+
+def _insert_escrow_wallet_transaction(cur, user_id, wallet, task_id, escrow_key, action, quote, idempotency_key):
+    transaction_id = uuid.uuid4()
+    cur.execute(
+        """
+        INSERT INTO wallet_transactions
+            (id,user_id,idempotency_key,address,to_address,value_wei,chain_id,chain_name,
+             nonce,gas_limit,max_fee_per_gas,max_priority_fee_per_gas,expires_at,
+             transaction_kind,task_id,escrow_action,escrow_key,calldata)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TO_TIMESTAMP(%s),'task_escrow',%s,%s,%s,%s)
+        RETURNING *
+        """,
+        (transaction_id, user_id, idempotency_key, quote["from"], quote["to"], quote["value_wei"],
+         int(quote["chain_id"]), wallet["chain_name"], int(quote["nonce"]), int(quote["gas_limit"]),
+         quote["max_fee_per_gas"], quote["max_priority_fee_per_gas"], int(quote["expires_at"]),
+         task_id, action, escrow_key, quote["data"]),
+    )
+    return cur.fetchone()
+
+
+@app.route("/task-escrows", methods=["GET"])
+@require_auth
+def list_task_escrows():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM task_escrows WHERE user_id=%s ORDER BY created_at DESC", (g.user_id,))
+            rows = cur.fetchall()
+        config = _wallet_request("/v1/escrows/config", {})
+        return jsonify({
+            "status": "success", "enabled": bool(TASK_ESCROW_ENABLED and config.get("enabled")),
+            "config": config, "escrows": [_task_escrow_payload(row) for row in rows],
+        })
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+
+@app.route("/task-escrows/prepare", methods=["POST"])
+@require_auth
+def prepare_task_escrow():
+    if not TASK_ESCROW_ENABLED:
+        return jsonify({"status": "error", "message": "Task escrow is disabled"}), 403
+    data = request.get_json(silent=True) or {}
+    task_id = str(data.get("task_id", "")).strip()
+    recipient = str(data.get("recipient", "")).strip()
+    idempotency_key = str(request.headers.get("Idempotency-Key") or data.get("idempotency_key") or "").strip()
+    if not task_id or not re.fullmatch(r"0x[0-9a-fA-F]{40}", recipient):
+        return jsonify({"status": "error", "message": "Choose a task and enter a valid recipient address"}), 400
+    if not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        return jsonify({"status": "error", "message": "A valid idempotency key is required"}), 400
+    try:
+        value_wei, amount = _eth_to_wei(data.get("amount_eth"))
+        if amount > TASK_ESCROW_MAX_ETH:
+            raise ValueError(f"Maximum task escrow is {TASK_ESCROW_MAX_ETH} ETH")
+        deadline = _parse_escrow_deadline(data.get("deadline"))
+        if deadline <= datetime.now(timezone.utc):
+            raise ValueError("Escrow deadline must be in the future")
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (g.user_id,))
+            cur.execute("SELECT * FROM wallet_transactions WHERE user_id=%s AND idempotency_key=%s", (g.user_id, idempotency_key))
+            existing_tx = cur.fetchone()
+            if existing_tx:
+                return jsonify({"status": "success", "transaction": _wallet_transaction_payload(existing_tx), "idempotent": True})
+            cur.execute(
+                "SELECT COUNT(*) AS count FROM wallet_transactions "
+                "WHERE user_id=%s AND created_at > NOW() - INTERVAL '1 hour'",
+                (g.user_id,),
+            )
+            if int(cur.fetchone()["count"]) >= WALLET_PREPARE_LIMIT_PER_HOUR:
+                return jsonify({"status": "error", "message": "Hourly wallet preparation limit reached"}), 429
+            cur.execute("SELECT completed FROM tasks WHERE user_id=%s AND task_id=%s", (g.user_id, task_id))
+            task = cur.fetchone()
+            if not task:
+                return jsonify({"status": "error", "message": "Task not found"}), 404
+            if task["completed"]:
+                return jsonify({"status": "error", "message": "A completed task cannot receive a new escrow"}), 409
+            cur.execute(
+                "SELECT te.*, wt.status AS funding_status, wt.expires_at AS funding_expires_at "
+                "FROM task_escrows te LEFT JOIN wallet_transactions wt ON wt.id=te.funding_tx_id "
+                "WHERE te.user_id=%s AND te.task_id=%s FOR UPDATE OF te",
+                (g.user_id, task_id),
+            )
+            existing_escrow = cur.fetchone()
+            if existing_escrow and existing_escrow["status"] == "preparing" and (
+                existing_escrow.get("funding_status") in ("failed", "expired")
+                or (existing_escrow.get("funding_expires_at") and existing_escrow["funding_expires_at"] <= datetime.now(timezone.utc))
+            ):
+                cur.execute("UPDATE task_escrows SET status='failed',updated_at=NOW() WHERE id=%s", (existing_escrow["id"],))
+                existing_escrow["status"] = "failed"
+            if existing_escrow and existing_escrow["status"] != "failed":
+                return jsonify({"status": "error", "message": "This task already has an escrow or pending escrow request"}), 409
+        wallet = _ensure_user_wallet(conn, g.user_id)
+        escrow_id = existing_escrow["id"] if existing_escrow else uuid.uuid4()
+        escrow_key = existing_escrow["escrow_key"] if existing_escrow else "0x" + hashlib.sha256(f"todoapp-escrow-v1:{g.user_id}:{task_id}".encode()).hexdigest()
+        quote = _wallet_request("/v1/escrows/quote", {
+            "user_id": g.user_id, "address": wallet["address"], "action": "create",
+            "escrow_key": escrow_key, "recipient": recipient, "deadline": int(deadline.timestamp()),
+            "value_wei": str(value_wei),
+        })["quote"]
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            tx = _insert_escrow_wallet_transaction(cur, g.user_id, wallet, task_id, escrow_key, "create", quote, idempotency_key)
+            if existing_escrow:
+                cur.execute(
+                    "UPDATE task_escrows SET sponsor_address=%s,recipient_address=%s,value_wei=%s,deadline=%s,"
+                    "status='preparing',funding_tx_id=%s,settlement_tx_id=NULL,updated_at=NOW() WHERE id=%s RETURNING *",
+                    (wallet["address"], recipient, str(value_wei), deadline, tx["id"], escrow_id),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO task_escrows (id,user_id,task_id,escrow_key,sponsor_address,recipient_address,value_wei,deadline,status,funding_tx_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'preparing',%s) RETURNING *",
+                    (escrow_id, g.user_id, task_id, escrow_key, wallet["address"], recipient, str(value_wei), deadline, tx["id"]),
+                )
+            escrow = cur.fetchone()
+        conn.commit()
+        return jsonify({"status": "success", "escrow": _task_escrow_payload(escrow), "transaction": _wallet_transaction_payload(tx)})
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Task escrow preparation failed")
+        code = getattr(exc, "status_code", 503)
+        return jsonify({"status": "error", "message": str(exc)}), code if code in (400, 403, 409, 429, 503) else 503
+    finally:
+        conn.close()
+
+
+@app.route("/task-escrows/<escrow_id>/prepare-action", methods=["POST"])
+@require_auth
+def prepare_task_escrow_action(escrow_id):
+    if not TASK_ESCROW_ENABLED:
+        return jsonify({"status": "error", "message": "Task escrow is disabled"}), 403
+    try:
+        parsed_id = uuid.UUID(escrow_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid escrow ID"}), 400
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action", "")).lower()
+    idempotency_key = str(request.headers.get("Idempotency-Key") or data.get("idempotency_key") or "").strip()
+    if action not in ("release", "refund") or not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        return jsonify({"status": "error", "message": "Valid action and idempotency key required"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (g.user_id,))
+            cur.execute(
+                "SELECT * FROM wallet_transactions WHERE user_id=%s AND idempotency_key=%s",
+                (g.user_id, idempotency_key),
+            )
+            existing_tx = cur.fetchone()
+            if existing_tx:
+                return jsonify({"status": "success", "transaction": _wallet_transaction_payload(existing_tx), "idempotent": True})
+            cur.execute(
+                "SELECT COUNT(*) AS count FROM wallet_transactions "
+                "WHERE user_id=%s AND created_at > NOW() - INTERVAL '1 hour'",
+                (g.user_id,),
+            )
+            if int(cur.fetchone()["count"]) >= WALLET_PREPARE_LIMIT_PER_HOUR:
+                return jsonify({"status": "error", "message": "Hourly wallet preparation limit reached"}), 429
+            cur.execute("SELECT * FROM task_escrows WHERE id=%s AND user_id=%s FOR UPDATE", (parsed_id, g.user_id))
+            escrow = cur.fetchone()
+            if not escrow:
+                return jsonify({"status": "error", "message": "Escrow not found"}), 404
+            if escrow["status"] != "funded":
+                return jsonify({"status": "error", "message": "Only a funded escrow can be settled"}), 409
+            if action == "release":
+                cur.execute("SELECT completed FROM tasks WHERE user_id=%s AND task_id=%s", (g.user_id, escrow["task_id"]))
+                task = cur.fetchone()
+                if not task or not task["completed"]:
+                    return jsonify({"status": "error", "message": "Complete the task before releasing its reward"}), 409
+            if action == "refund" and escrow["deadline"] > datetime.now(timezone.utc):
+                return jsonify({"status": "error", "message": "Refund is available only after the escrow deadline"}), 409
+        wallet = _ensure_user_wallet(conn, g.user_id)
+        quote = _wallet_request("/v1/escrows/quote", {
+            "user_id": g.user_id, "address": wallet["address"], "action": action,
+            "escrow_key": escrow["escrow_key"], "recipient": escrow["recipient_address"],
+            "deadline": int(escrow["deadline"].timestamp()), "value_wei": "0",
+        })["quote"]
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            tx = _insert_escrow_wallet_transaction(cur, g.user_id, wallet, escrow["task_id"], escrow["escrow_key"], action, quote, idempotency_key)
+            cur.execute(
+                "UPDATE task_escrows SET settlement_tx_id=%s,updated_at=NOW() WHERE id=%s RETURNING *",
+                (tx["id"], parsed_id),
+            )
+            escrow = cur.fetchone()
+        conn.commit()
+        return jsonify({"status": "success", "escrow": _task_escrow_payload(escrow), "transaction": _wallet_transaction_payload(tx)})
+    except Exception as exc:
+        conn.rollback()
+        return jsonify({"status": "error", "message": str(exc)}), getattr(exc, "status_code", 503)
+    finally:
+        conn.close()
+
+
 @app.route("/wallet/transactions/<transaction_id>/request-code", methods=["POST"])
 @require_auth
 def request_wallet_transaction_code(transaction_id):
@@ -1289,6 +1578,7 @@ def request_wallet_transaction_code(transaction_id):
             now = datetime.now(timezone.utc)
             if row["expires_at"] <= now:
                 cur.execute("UPDATE wallet_transactions SET status='expired', updated_at=NOW() WHERE id=%s", (parsed_id,))
+                _apply_escrow_transaction_result(cur, row, "failed")
                 conn.commit()
                 return jsonify({"status": "error", "message": "Transaction quote expired; prepare it again"}), 409
             if row["code_sent_at"] and (now - row["code_sent_at"]).total_seconds() < 60:
@@ -1306,6 +1596,8 @@ def request_wallet_transaction_code(transaction_id):
                         parsed_id,
                     ),
                 )
+                if next_status == "failed":
+                    _apply_escrow_transaction_result(cur, row, "failed")
                 conn.commit()
                 message = (
                     "Transaction locked after too many incorrect password attempts"
@@ -1314,8 +1606,11 @@ def request_wallet_transaction_code(transaction_id):
                 return jsonify({"status": "error", "message": message}), 401
             code = f"{secrets.randbelow(1_000_000):06d}"
             code_hash = auth_lib.hash_token(f"wallet:{parsed_id}:{code}")
+            operation = "transfer"
+            if row.get("transaction_kind") == "task_escrow":
+                operation = f"task escrow {row.get('escrow_action') or 'action'}"
             if not _send_wallet_confirmation_code(
-                row["email"], code, row["to_address"], _wei_to_eth(row["value_wei"]), row["chain_name"]
+                row["email"], code, row["to_address"], _wei_to_eth(row["value_wei"]), row["chain_name"], operation
             ):
                 return jsonify({"status": "error", "message": "Could not send confirmation email"}), 503
             cur.execute(
@@ -1390,6 +1685,7 @@ def confirm_wallet_transaction(transaction_id):
                 now = datetime.now(timezone.utc)
                 if row["expires_at"] <= now or not row["code_expires_at"] or row["code_expires_at"] <= now:
                     cur.execute("UPDATE wallet_transactions SET status='expired', updated_at=NOW() WHERE id=%s", (parsed_id,))
+                    _apply_escrow_transaction_result(cur, row, "failed")
                     conn.commit()
                     return jsonify({"status": "error", "message": "Transaction or confirmation code expired"}), 409
                 supplied_hash = auth_lib.hash_token(f"wallet:{parsed_id}:{code}")
@@ -1400,28 +1696,44 @@ def confirm_wallet_transaction(transaction_id):
                         "UPDATE wallet_transactions SET code_attempts=%s, status=%s, updated_at=NOW() WHERE id=%s",
                         (attempts, new_status, parsed_id),
                     )
+                    if new_status == "failed":
+                        _apply_escrow_transaction_result(cur, row, "failed")
                     conn.commit()
                     message = "Too many incorrect codes; prepare a new transaction" if attempts >= 5 else "Invalid confirmation code"
                     return jsonify({"status": "error", "message": message}), 400
                 try:
-                    signed = _wallet_request("/v1/wallets/authorize-transfer", {
-                        "user_id": g.user_id,
-                        "address": row["address"],
-                        "to": row["to_address"],
-                        "value_wei": str(row["value_wei"]),
-                        "chain_id": int(row["chain_id"]),
-                        "nonce": int(row["nonce"]),
+                    authorization = {
+                        "user_id": g.user_id, "address": row["address"],
+                        "to": row["to_address"], "value_wei": str(row["value_wei"]),
+                        "chain_id": int(row["chain_id"]), "nonce": int(row["nonce"]),
                         "gas_limit": int(row["gas_limit"]),
                         "max_fee_per_gas": str(row["max_fee_per_gas"]),
                         "max_priority_fee_per_gas": str(row["max_priority_fee_per_gas"]),
                         "expires_at": int(row["expires_at"].timestamp()),
-                    }, timeout=30)
+                    }
+                    authorization_path = "/v1/wallets/authorize-transfer"
+                    if row.get("transaction_kind") == "task_escrow":
+                        cur.execute(
+                            "SELECT * FROM task_escrows WHERE user_id=%s AND escrow_key=%s",
+                            (g.user_id, row["escrow_key"]),
+                        )
+                        escrow = cur.fetchone()
+                        if not escrow:
+                            raise RuntimeError("Linked task escrow not found")
+                        authorization.update({
+                            "action": row["escrow_action"], "escrow_key": row["escrow_key"],
+                            "recipient": escrow["recipient_address"],
+                            "deadline": int(escrow["deadline"].timestamp()), "data": row["calldata"],
+                        })
+                        authorization_path = "/v1/escrows/authorize"
+                    signed = _wallet_request(authorization_path, authorization, timeout=30)
                 except RuntimeError as exc:
                     if getattr(exc, "status_code", 503) == 400:
                         cur.execute(
                             "UPDATE wallet_transactions SET status='expired', error_message=%s, updated_at=NOW() WHERE id=%s",
                             (str(exc), parsed_id),
                         )
+                        _apply_escrow_transaction_result(cur, row, "failed")
                         conn.commit()
                         return jsonify({"status": "error", "message": str(exc)}), 409
                     raise
@@ -1456,6 +1768,14 @@ def confirm_wallet_transaction(transaction_id):
                     (explorer_url, parsed_id, g.user_id),
                 )
                 row = cur.fetchone()
+                if row and row.get("transaction_kind") == "task_escrow":
+                    pending = {"create": "funding", "release": "release_pending", "refund": "refund_pending"}.get(row.get("escrow_action"))
+                    if pending:
+                        cur.execute(
+                            "UPDATE task_escrows SET status=%s,updated_at=NOW() "
+                            "WHERE user_id=%s AND escrow_key=%s",
+                            (pending, g.user_id, row["escrow_key"]),
+                        )
             update_conn.commit()
         finally:
             update_conn.close()
@@ -1506,6 +1826,7 @@ def get_wallet_transaction(transaction_id):
                             (chain_status, chain_status, parsed_id),
                         )
                         row = cur.fetchone()
+                        _apply_escrow_transaction_result(cur, row, chain_status)
                         conn.commit()
                 except Exception as exc:
                     log.warning("Could not refresh wallet transaction %s: %s", parsed_id, exc)
@@ -1537,6 +1858,9 @@ def get_rewards():
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _ensure_reward_schema(cur)
+            # A completion may have committed while optional reward processing
+            # failed. Reconcile on every read so missed XP repairs itself.
+            _reconcile_completed_task_rewards(cur, g.user_id)
             cur.execute(
                 "SELECT xp, tasks_completed FROM user_reward_stats WHERE user_id=%s",
                 (g.user_id,),
@@ -2096,16 +2420,10 @@ def store_tasks():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            newly_completed_ids = []
+            completed_reward_ids = []
             for task in tasks:
                 task_id = str(task.get("id", ""))
                 completed = bool(task.get("completed", False))
-                cur.execute(
-                    "SELECT completed FROM tasks WHERE user_id=%s AND task_id=%s FOR UPDATE",
-                    (user_id, task_id),
-                )
-                previous = cur.fetchone()
-                was_completed = bool(previous[0]) if previous else False
                 conflict_clause = (
                     "ON CONFLICT (user_id, task_id) DO NOTHING"
                     if preserve_remote else
@@ -2129,9 +2447,11 @@ def store_tasks():
                     task.get("notes", ""),
                     completed,
                 ))
-                if completed and not was_completed and cur.rowcount:
-                    newly_completed_ids.append(task_id)
-            rewards = _record_task_completion_rewards(cur, user_id, newly_completed_ids)
+                # Include already-completed rows too. The reward-event primary
+                # key prevents duplicates and lets a retry heal a prior miss.
+                if completed and cur.rowcount:
+                    completed_reward_ids.append(task_id)
+            rewards = _record_task_completion_rewards(cur, user_id, completed_reward_ids)
         conn.commit()
         return jsonify({"status": "success", "stored": len(tasks), "rewards": rewards})
     except Exception as exc:
@@ -2222,15 +2542,12 @@ def sync_tasks():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            newly_completed_ids = []
             if completed_task_ids:
                 cur.execute(
                     "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
-                    "WHERE user_id = %s AND task_id = ANY(%s) AND completed = FALSE "
-                    "RETURNING task_id",
+                    "WHERE user_id = %s AND task_id = ANY(%s) AND completed = FALSE ",
                     (user_id, completed_task_ids),
                 )
-                newly_completed_ids.extend(row["task_id"] for row in cur.fetchall())
             if deleted_task_ids:
                 cur.execute(
                     "DELETE FROM reminder_deliveries WHERE user_id = %s AND task_id = ANY(%s)",
@@ -2250,7 +2567,6 @@ def sync_tasks():
                     INSERT INTO tasks (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (user_id, task_id) DO NOTHING
-                    RETURNING task_id, completed
                 """, (
                     user_id,
                     str(task.get("id", "")),
@@ -2261,10 +2577,19 @@ def sync_tasks():
                     task.get("notes", ""),
                     bool(task.get("completed", False)),
                 ))
-                inserted = cur.fetchone()
-                if inserted and inserted["completed"]:
-                    newly_completed_ids.append(inserted["task_id"])
-            rewards = _record_task_completion_rewards(cur, user_id, newly_completed_ids)
+            reward_candidates = list(completed_task_ids)
+            reward_candidates.extend(
+                str(task.get("id", "")) for task in local_tasks if task.get("completed", False)
+            )
+            reward_candidates = [task_id for task_id in dict.fromkeys(reward_candidates) if task_id]
+            completed_reward_ids = []
+            if reward_candidates:
+                cur.execute(
+                    "SELECT task_id FROM tasks WHERE user_id=%s AND task_id=ANY(%s) AND completed=TRUE",
+                    (user_id, reward_candidates),
+                )
+                completed_reward_ids = [row["task_id"] for row in cur.fetchall()]
+            rewards = _record_task_completion_rewards(cur, user_id, completed_reward_ids)
             # Return the full merged list
             cur.execute("""
                 SELECT task_id AS id, title, due_date, due_time, priority, notes, completed, updated_at
@@ -2416,9 +2741,9 @@ def complete_task(task_id):
                 if not existing:
                     conn.rollback()
                     return jsonify({"status": "error", "message": "Task not found"}), 404
-            rewards = _record_task_completion_rewards(
-                cur, user_id, [completed_row[0]] if completed_row else []
-            )
+            # Retry reward accounting even when the task was already complete;
+            # the unique reward event makes this safe and self-healing.
+            rewards = _record_task_completion_rewards(cur, user_id, [task_id])
         conn.commit()
         return jsonify({"status": "success", "completed": True, "updated": updated, "rewards": rewards})
     except Exception as exc:
@@ -2444,6 +2769,13 @@ def delete_task(task_id):
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM task_escrows WHERE user_id=%s AND task_id=%s "
+                "AND status NOT IN ('released','refunded','failed') LIMIT 1",
+                (user_id, task_id),
+            )
+            if cur.fetchone():
+                return jsonify({"status": "error", "message": "Settle or refund this task's escrow before deleting it"}), 409
             cur.execute("DELETE FROM tasks WHERE user_id = %s AND task_id = %s", (user_id, task_id))
             deleted = cur.rowcount
             cur.execute("DELETE FROM task_reminders WHERE user_id = %s AND task_id = %s", (user_id, task_id))
@@ -2489,12 +2821,13 @@ def complete_tasks_batch():
             completed_rows = cur.fetchall()
             updated = len(completed_rows)
             cur.execute(
-                "SELECT COUNT(*) FROM tasks WHERE user_id = %s AND task_id = ANY(%s)",
+                "SELECT task_id FROM tasks WHERE user_id = %s AND task_id = ANY(%s) AND completed=TRUE",
                 (g.user_id, task_ids),
             )
-            matched = cur.fetchone()[0]
+            matched_rows = cur.fetchall()
+            matched = len(matched_rows)
             rewards = _record_task_completion_rewards(
-                cur, g.user_id, [row[0] for row in completed_rows]
+                cur, g.user_id, [row[0] for row in matched_rows]
             )
         conn.commit()
         return jsonify({
@@ -2523,6 +2856,13 @@ def delete_tasks_batch():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT task_id FROM task_escrows WHERE user_id=%s AND task_id = ANY(%s) "
+                "AND status NOT IN ('released','refunded','failed') LIMIT 1",
+                (g.user_id, task_ids),
+            )
+            if cur.fetchone():
+                return jsonify({"status": "error", "message": "Settle or refund task escrows before deleting those tasks"}), 409
             cur.execute("DELETE FROM tasks WHERE user_id = %s AND task_id = ANY(%s)", (g.user_id, task_ids))
             deleted = cur.rowcount
             cur.execute("DELETE FROM task_reminders WHERE user_id = %s AND task_id = ANY(%s)", (g.user_id, task_ids))
@@ -2569,6 +2909,16 @@ def replace_tasks():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM task_escrows WHERE user_id=%s "
+                "AND status NOT IN ('released','refunded','failed') LIMIT 1",
+                (user_id,),
+            )
+            if cur.fetchone():
+                return jsonify({
+                    "status": "error",
+                    "message": "Settle or refund all task escrows before replacing the task list",
+                }), 409
             # Wipe everything for this user
             cur.execute("DELETE FROM reminder_deliveries WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM task_reminders WHERE user_id = %s", (user_id,))

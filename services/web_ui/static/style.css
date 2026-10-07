@@ -426,6 +426,12 @@ header {
 .wallet-send-working { color: var(--primary); }
 .wallet-audit-row strong { text-transform: capitalize; }
 .wallet-rewards-card { grid-column: 1 / -1; }
+.wallet-escrow-card { grid-column: 1 / -1; }
+.task-escrow-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; align-items: end; }
+.task-escrow-form[hidden] { display: none; }
+.task-escrow-form .btn { justify-self: start; margin-bottom: 11px; }
+.task-escrow-row { grid-template-columns: minmax(0, 1fr) auto; }
+.task-escrow-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .reward-summary { margin-bottom: 12px; padding: 12px; border-radius: 8px; background: #f5f3ff; color: #4c1d95; font-weight: 700; }
 .reward-achievements { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-top: 12px; }
 .reward-achievement { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 13px; border: 1px solid #e4e4e7; border-radius: 9px; background: #fafafa; }
@@ -749,6 +755,7 @@ header {
   .notes-body.notes-body-lg { min-height: 45dvh; }
 
   .wallet-layout { grid-template-columns: 1fr; }
+  .task-escrow-form { grid-template-columns: 1fr; }
   .wallet-receive-grid { grid-template-columns: 1fr; }
   .wallet-qr { width: min(220px, 100%); height: auto; aspect-ratio: 1; margin: 0 auto; }
   .wallet-toolbar { align-items: center; }

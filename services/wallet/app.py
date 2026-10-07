@@ -1,7 +1,8 @@
 """Controlled testnet EVM wallet backed by deterministic dstack TEE keys.
 
-Only narrowly validated Base Sepolia native-ETH transfers may be signed. There
-is no arbitrary message, calldata, private-key, seed, or mnemonic endpoint.
+Only narrowly validated Base Sepolia native-ETH transfers and task-escrow calls
+may be signed. There is no arbitrary message, calldata, private-key, seed, or
+mnemonic endpoint.
 """
 
 import hashlib
@@ -53,11 +54,16 @@ WALLET_MAX_TRANSFER_WEI = int(WALLET_MAX_TRANSFER_ETH * Decimal(10**18))
 WALLET_MAX_FEE_GWEI = Decimal(os.getenv("WALLET_MAX_FEE_GWEI", "5"))
 WALLET_MAX_FEE_WEI = int(WALLET_MAX_FEE_GWEI * Decimal(10**9))
 WALLET_QUOTE_TTL_SECONDS = min(900, max(60, int(os.getenv("WALLET_QUOTE_TTL_SECONDS", "600"))))
-SEND_ENABLED_CHAIN_IDS = {84532}  # Base Sepolia only for wallet v2.
+SEND_ENABLED_CHAIN_IDS = {84532}  # Base Sepolia only for wallet v3.
 REWARD_BADGES_ENABLED = os.getenv("REWARD_BADGES_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 REWARD_BADGE_CONTRACT_ADDRESS = os.getenv("REWARD_BADGE_CONTRACT_ADDRESS", "").strip()
 REWARD_ALLOWED_ACHIEVEMENT_IDS = {1, 10, 50, 100}
 REWARD_MAX_GAS = min(300_000, max(80_000, int(os.getenv("REWARD_MAX_GAS", "200000"))))
+TASK_ESCROW_ENABLED = os.getenv("TASK_ESCROW_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+TASK_ESCROW_CONTRACT_ADDRESS = os.getenv("TASK_ESCROW_CONTRACT_ADDRESS", "").strip()
+TASK_ESCROW_MAX_ETH = Decimal(os.getenv("TASK_ESCROW_MAX_ETH", "0.05"))
+TASK_ESCROW_MAX_WEI = int(TASK_ESCROW_MAX_ETH * Decimal(10**18))
+TASK_ESCROW_MAX_GAS = min(350_000, max(100_000, int(os.getenv("TASK_ESCROW_MAX_GAS", "250000"))))
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -133,6 +139,125 @@ def _achievement_calldata(recipient, achievement_id, claim_id):
     achievement_word = int(achievement_id).to_bytes(32, "big")
     claim_word = bytes.fromhex(claim_id[2:])
     return "0x" + (selector + recipient_word + achievement_word + claim_word).hex()
+
+
+def _escrow_contract():
+    if not TASK_ESCROW_ENABLED:
+        raise ValueError("Task escrow is disabled by the operator")
+    if WALLET_CHAIN_ID not in SEND_ENABLED_CHAIN_IDS:
+        raise ValueError("Task escrow is restricted to Base Sepolia")
+    if is_address is None or not is_address(TASK_ESCROW_CONTRACT_ADDRESS):
+        raise ValueError("TASK_ESCROW_CONTRACT_ADDRESS is not configured")
+    contract = to_checksum_address(TASK_ESCROW_CONTRACT_ADDRESS)
+    if _rpc("eth_getCode", [contract, "latest"]) in (None, "0x", "0x0", "0x00"):
+        raise ValueError("Task escrow contract is not deployed on the configured chain")
+    return contract
+
+
+def _escrow_calldata(action, escrow_key, recipient="", deadline=0):
+    if keccak is None or not re.fullmatch(r"0x[a-f0-9]{64}", escrow_key):
+        raise ValueError("Invalid escrow key")
+    key_word = bytes.fromhex(escrow_key[2:])
+    if action == "create":
+        if is_address is None or not is_address(recipient):
+            raise ValueError("Invalid escrow recipient")
+        selector = keccak(text="createEscrow(bytes32,address,uint64)")[:4]
+        recipient_word = bytes.fromhex(to_checksum_address(recipient)[2:]).rjust(32, b"\x00")
+        deadline_word = int(deadline).to_bytes(32, "big")
+        return "0x" + (selector + key_word + recipient_word + deadline_word).hex()
+    signature = {"release": "release(bytes32)", "refund": "refund(bytes32)"}.get(action)
+    if not signature:
+        raise ValueError("Unsupported escrow action")
+    return "0x" + (keccak(text=signature)[:4] + key_word).hex()
+
+
+def _validated_escrow_fields(data):
+    _assert_send_available()
+    contract = _escrow_contract()
+    user_id = str(data.get("user_id", "")).strip()
+    expected_address = str(data.get("address", "")).strip()
+    action = str(data.get("action", "")).strip().lower()
+    escrow_key = str(data.get("escrow_key", "")).strip().lower()
+    if not USER_ID_RE.fullmatch(user_id) or is_address is None or not is_address(expected_address):
+        raise ValueError("Invalid wallet identity")
+    account = _derive_account(user_id)
+    expected_address = to_checksum_address(expected_address)
+    if account.address.lower() != expected_address.lower():
+        raise ValueError("Wallet derivation continuity check failed")
+    try:
+        value_wei = int(str(data.get("value_wei", "0")))
+        deadline = int(data.get("deadline", 0))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid escrow value or deadline")
+    if action == "create":
+        if value_wei <= 0 or value_wei > TASK_ESCROW_MAX_WEI:
+            raise ValueError(f"Escrow must be between 0 and {TASK_ESCROW_MAX_ETH} ETH")
+        if deadline <= int(time.time()) + 300 or deadline > int(time.time()) + 366 * 86400:
+            raise ValueError("Escrow deadline must be between 5 minutes and 366 days away")
+    elif action in ("release", "refund"):
+        value_wei = 0
+    else:
+        raise ValueError("Unsupported escrow action")
+    calldata = _escrow_calldata(action, escrow_key, str(data.get("recipient", "")), deadline)
+    return account, expected_address, contract, action, escrow_key, value_wei, deadline, calldata
+
+
+def _quote_escrow(data):
+    account, sender, contract, action, escrow_key, value_wei, deadline, calldata = _validated_escrow_fields(data)
+    max_fee, priority_fee = _fee_quote()
+    estimate = int(_rpc("eth_estimateGas", [{
+        "from": sender, "to": contract, "value": hex(value_wei), "data": calldata,
+    }]), 16)
+    if estimate > TASK_ESCROW_MAX_GAS:
+        raise ValueError("Escrow action exceeds the configured gas policy")
+    gas_limit = min(TASK_ESCROW_MAX_GAS, max(100_000, (estimate * 120 + 99) // 100))
+    nonce = int(_rpc("eth_getTransactionCount", [sender, "pending"]), 16)
+    balance = int(_rpc("eth_getBalance", [sender, "pending"]), 16)
+    if balance < value_wei + gas_limit * max_fee:
+        raise ValueError("Insufficient balance for escrow value and maximum network fee")
+    now = int(time.time())
+    return {
+        "from": sender, "to": contract, "value_wei": str(value_wei), "data": calldata,
+        "action": action, "escrow_key": escrow_key, "deadline": deadline,
+        "nonce": nonce, "gas_limit": gas_limit, "max_fee_per_gas": str(max_fee),
+        "max_priority_fee_per_gas": str(priority_fee), "chain_id": WALLET_CHAIN_ID,
+        "quoted_at": now, "expires_at": now + WALLET_QUOTE_TTL_SECONDS,
+    }
+
+
+def _authorize_escrow(data):
+    account, sender, contract, action, escrow_key, value_wei, deadline, calldata = _validated_escrow_fields(data)
+    try:
+        nonce = int(data["nonce"]); gas_limit = int(data["gas_limit"])
+        max_fee = int(str(data["max_fee_per_gas"])); priority_fee = int(str(data["max_priority_fee_per_gas"]))
+        expires_at = int(data["expires_at"]); chain_id = int(data["chain_id"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Malformed prepared escrow action")
+    if chain_id != WALLET_CHAIN_ID or int(time.time()) > expires_at:
+        raise ValueError("Escrow quote expired or has the wrong chain")
+    if str(data.get("data", "")).lower() != calldata.lower():
+        raise ValueError("Escrow calldata does not match the approved action")
+    if not 100_000 <= gas_limit <= TASK_ESCROW_MAX_GAS:
+        raise ValueError("Invalid escrow gas limit")
+    if priority_fee <= 0 or max_fee < priority_fee or max_fee > WALLET_MAX_FEE_WEI:
+        raise ValueError("Prepared network fee is outside the safety policy")
+    if int(_rpc("eth_getTransactionCount", [sender, "pending"]), 16) != nonce:
+        raise ValueError("Wallet nonce changed; prepare the escrow action again")
+    estimate = int(_rpc("eth_estimateGas", [{
+        "from": sender, "to": contract, "value": hex(value_wei), "data": calldata,
+    }]), 16)
+    if estimate > gas_limit:
+        raise ValueError("Escrow gas estimate changed; prepare again")
+    transaction = {
+        "type": 2, "chainId": chain_id, "nonce": nonce, "to": contract,
+        "value": value_wei, "data": calldata, "gas": gas_limit,
+        "maxFeePerGas": max_fee, "maxPriorityFeePerGas": priority_fee,
+    }
+    signed = account.sign_transaction(transaction)
+    raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+    raw_hex = raw.hex(); tx_hash = signed.hash.hex()
+    return (raw_hex if raw_hex.startswith("0x") else "0x" + raw_hex,
+            tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash)
 
 
 def _authorize_achievement(data):
@@ -425,6 +550,8 @@ def health():
         "rpc_error": rpc_error,
         "reward_badges_enabled": REWARD_BADGES_ENABLED,
         "reward_contract_configured": bool(REWARD_BADGE_CONTRACT_ADDRESS),
+        "task_escrow_enabled": TASK_ESCROW_ENABLED,
+        "task_escrow_contract_configured": bool(TASK_ESCROW_CONTRACT_ADDRESS),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }), 200 if ok else 503
 
@@ -474,6 +601,50 @@ def reward_config():
         })
     except Exception as exc:
         return jsonify({"status": "error", "message": f"Reward configuration unavailable: {exc}"}), 503
+
+
+@app.route("/v1/escrows/config", methods=["POST"])
+def escrow_config():
+    contract = ""
+    if TASK_ESCROW_CONTRACT_ADDRESS and is_address and is_address(TASK_ESCROW_CONTRACT_ADDRESS):
+        contract = to_checksum_address(TASK_ESCROW_CONTRACT_ADDRESS)
+    enabled = bool(
+        TASK_ESCROW_ENABLED and WALLET_SEND_ENABLED
+        and WALLET_CHAIN_ID in SEND_ENABLED_CHAIN_IDS and contract
+    )
+    return jsonify({
+        "status": "success", "enabled": enabled,
+        "chain_id": WALLET_CHAIN_ID, "chain_name": WALLET_CHAIN_NAME,
+        "contract_address": contract, "maximum_escrow_eth": str(TASK_ESCROW_MAX_ETH),
+        "contract_explorer_url": f"{WALLET_EXPLORER_URL}/address/{contract}" if contract else "",
+    })
+
+
+@app.route("/v1/escrows/quote", methods=["POST"])
+def quote_escrow():
+    try:
+        return jsonify({"status": "success", "quote": _quote_escrow(request.get_json(silent=True) or {})})
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception as exc:
+        log.exception("Escrow quote failed")
+        return jsonify({"status": "error", "message": f"Escrow quote unavailable: {exc}"}), 503
+
+
+@app.route("/v1/escrows/authorize", methods=["POST"])
+def authorize_escrow():
+    """Sign only create, release, or refund calls to the configured escrow contract."""
+    try:
+        raw_transaction, transaction_hash = _authorize_escrow(request.get_json(silent=True) or {})
+        return jsonify({
+            "status": "success", "raw_transaction": raw_transaction,
+            "transaction_hash": transaction_hash,
+        })
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception as exc:
+        log.exception("Escrow authorization failed")
+        return jsonify({"status": "error", "message": f"Escrow authorization unavailable: {exc}"}), 503
 
 
 @app.route("/v1/rewards/authorize-achievement", methods=["POST"])

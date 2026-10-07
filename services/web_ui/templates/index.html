@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>TODO App</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📋</text></svg>"/>
-  <link rel="stylesheet" href="/static/style.css?v=20261007-rewards-v1" />
+  <link rel="stylesheet" href="/static/style.css?v=20261007-wallet-v3" />
 </head>
 <body>
   <!-- ── Header ─────────────────────────────────────────────────── -->
@@ -17,7 +17,7 @@
     </div>
     <div class="header-right">
       <span class="stat-badge" id="level-badge">Lv 0</span>
-      <span class="stat-badge" id="xp-badge">XP 0/5</span>
+      <span class="stat-badge" id="xp-badge" title="0/50 XP toward the next level">XP 0</span>
       <span class="stat-badge" id="remaining-badge">Tasks: –</span>
     </div>
   </header>
@@ -264,6 +264,25 @@
         <div id="reward-summary" class="reward-summary">Loading rewards…</div>
         <div id="reward-badge-status" class="help-text"></div>
         <div id="reward-achievements" class="reward-achievements"></div>
+      </article>
+      <article class="wallet-card wallet-escrow-card">
+        <div class="wallet-heading-row">
+          <div>
+            <h3>Task reward escrow (V3)</h3>
+            <p class="help-text">Lock Base Sepolia test ETH to a task. Release requires task completion and your explicit confirmation; refunds are available after the deadline.</p>
+          </div>
+          <button class="btn" type="button" onclick="loadTaskEscrows()">Refresh Escrows</button>
+        </div>
+        <div id="task-escrow-disabled" class="wallet-warning">Escrow is disabled until the contract is deployed and configured.</div>
+        <div id="task-escrow-form" class="task-escrow-form" hidden>
+          <label class="wallet-field">Task<select id="task-escrow-task" class="input"></select></label>
+          <label class="wallet-field">Recipient address<input id="task-escrow-recipient" class="input" placeholder="0x…" autocomplete="off"/></label>
+          <label class="wallet-field">Reward (test ETH)<input id="task-escrow-amount" class="input" type="number" min="0" step="0.000000000000000001" placeholder="0.001"/></label>
+          <label class="wallet-field">Refund deadline<input id="task-escrow-deadline" class="input" type="datetime-local"/></label>
+          <button id="task-escrow-prepare" class="btn btn-primary" type="button" onclick="prepareTaskEscrow()">Review Escrow</button>
+        </div>
+        <div id="task-escrow-message" class="wallet-send-message" aria-live="polite"></div>
+        <div id="task-escrow-list" class="wallet-transactions"><div class="empty-msg">No task escrows yet.</div></div>
       </article>
     </div>
   </section>
@@ -570,6 +589,6 @@
       </iframe>
     </div>
   </div>
-  <script src="/static/app.js?v=20261007-rewards-v1"></script>
+  <script src="/static/app.js?v=20261007-wallet-v3"></script>
 </body>
 </html>
