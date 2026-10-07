@@ -11,6 +11,7 @@
 #        docker build -t kairu1206/cvm-scheduler:latest ./services/scheduler    && docker push kairu1206/cvm-scheduler:latest
 #        docker build -t kairu1206/cvm-webui:latest ./services/web_ui && docker push kairu1206/cvm-webui:latest
 #        docker build -t kairu1206/cvm-openclaw:latest ./services/openclaw && docker push kairu1206/cvm-openclaw:latest
+#        docker build -t kairu1206/cvm-wallet:latest ./services/wallet && docker push kairu1206/cvm-wallet:latest
 #
 #   1. Paste this file into https://cloud.phala.com → Create CVM → Advanced tab.
 #   2. Set ALL env vars marked [SECURE] in the Phala dashboard "Environment Variables" panel.
@@ -52,6 +53,52 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------
+  # Controlled Base Sepolia wallet service
+  # Internal only: derives per-user addresses and signs policy-bound native
+  # testnet transfers through dstack. No arbitrary signing or public port.
+  # ----------------------------------------------------------
+  wallet:
+    image: kairu1206/cvm-wallet:latest
+    expose:
+      - "5004"
+    environment:
+      API_KEY: ${API_KEY}                              # [SECURE] - internal service authentication
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WALLET_NAMESPACE: ${WALLET_NAMESPACE:-todoapp-wallet}
+      # SECURITY: never change this after funding an address; use a migration instead.
+      WALLET_DERIVATION_VERSION: ${WALLET_DERIVATION_VERSION:-v1}
+      WALLET_CHAIN_ID: ${WALLET_CHAIN_ID:-84532}
+      WALLET_CHAIN_NAME: ${WALLET_CHAIN_NAME:-Base Sepolia}
+      WALLET_NATIVE_SYMBOL: ${WALLET_NATIVE_SYMBOL:-ETH}
+      WALLET_RPC_URL: ${WALLET_RPC_URL:-https://sepolia.base.org}
+      WALLET_EXPLORER_API_URL: ${WALLET_EXPLORER_API_URL:-https://base-sepolia.blockscout.com/api/v2}
+      WALLET_EXPLORER_URL: ${WALLET_EXPLORER_URL:-https://base-sepolia.blockscout.com}
+      # Version 2 is hard-restricted in code to Base Sepolia native ETH transfers.
+      WALLET_SEND_ENABLED: ${WALLET_SEND_ENABLED:-true}
+      WALLET_MAX_TRANSFER_ETH: ${WALLET_MAX_TRANSFER_ETH:-0.1}
+      WALLET_MAX_FEE_GWEI: ${WALLET_MAX_FEE_GWEI:-5}
+      WALLET_QUOTE_TTL_SECONDS: ${WALLET_QUOTE_TTL_SECONDS:-600}
+      # XP works without a contract. Enable badges only after deploying the
+      # allowlisted non-transferable contract described in REWARDS.md.
+      REWARD_BADGES_ENABLED: ${REWARD_BADGES_ENABLED:-false}
+      REWARD_BADGE_CONTRACT_ADDRESS: ${REWARD_BADGE_CONTRACT_ADDRESS:-}
+      REWARD_MAX_GAS: ${REWARD_MAX_GAS:-200000}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
   # Backend Storage Service
   # Internal URL: http://backend:5000
   # Public HTTPS:  https://<app-id>-5000.dstack-prod5.phala.network
@@ -72,11 +119,23 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASSWORD: ${SMTP_PASSWORD}                  # [SECURE] – Gmail App Password
       OPENCLAW_WEBHOOK_SECRET: ${OPENCLAW_WEBHOOK_SECRET} # [SECURE] – authenticates meeting proposals
+      WALLET_URL: http://wallet:5004
+      WALLET_SEND_ENABLED: ${WALLET_SEND_ENABLED:-true}
+      WALLET_MAX_TRANSFER_ETH: ${WALLET_MAX_TRANSFER_ETH:-0.1}
+      WALLET_DAILY_LIMIT_ETH: ${WALLET_DAILY_LIMIT_ETH:-0.25}
+      WALLET_PREPARE_LIMIT_PER_HOUR: ${WALLET_PREPARE_LIMIT_PER_HOUR:-10}
+      WALLET_EXPLORER_URL: ${WALLET_EXPLORER_URL:-https://base-sepolia.blockscout.com}
+      REWARD_XP_PER_TASK: ${REWARD_XP_PER_TASK:-10}
+      REWARD_XP_PER_LEVEL: ${REWARD_XP_PER_LEVEL:-50}
+      REWARD_BADGES_ENABLED: ${REWARD_BADGES_ENABLED:-false}
+      REWARD_BADGE_CONTRACT_ADDRESS: ${REWARD_BADGE_CONTRACT_ADDRESS:-}
       ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       postgres:
         condition: service_healthy
+      wallet:
+        condition: service_started
     volumes:
       - backend_data:/app/data
     healthcheck:
@@ -133,6 +192,7 @@ services:
     volumes:
       - openclaw_data:/home/node/.openclaw
       - openclaw_auth:/home/node/.config/openclaw
+      - clawdi_data:/home/node/.clawdi
     depends_on:
       - backend
     healthcheck:
@@ -141,6 +201,69 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Clawdi connector - optional cloud memory/MCP/session layer
+  # This does not replace OpenClaw and exposes no public port.
+  # Authenticate it interactively after the first deployment.
+  # ----------------------------------------------------------
+  clawdi_connector:
+    image: kairu1206/cvm-openclaw:latest
+    environment:
+      HOME: /home/node
+      CLAWDI_HOME: /home/node/.clawdi
+      # Match the gateway container exactly so Clawdi resolves the same
+      # OpenClaw roster, main agent, sessions, skills, and workspace.
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_AGENT_ID: main
+      # The connector is a separate container, so OpenClaw CLI gateway calls
+      # must target the gateway service instead of this container's loopback.
+      OPENCLAW_GATEWAY_URL: ws://openclaw:18789
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}       # [SECURE]
+      CLAWDI_ENABLED: ${CLAWDI_ENABLED:-false}
+      # The CLI is pinned in the image; updates happen through reviewed rebuilds.
+      CLAWDI_NO_AUTO_UPDATE: "1"
+    command:
+      - sh
+      - -lc
+      - |
+        if ! echo "$${CLAWDI_ENABLED}" | grep -Eiq '^(1|true|yes|on)$'; then
+          echo "Clawdi connector disabled; set CLAWDI_ENABLED=true after authentication."
+          exec tail -f /dev/null
+        fi
+        while true; do
+          clawdi daemon run
+          code=$$?
+          echo "Clawdi daemon exited with status $$code; retrying in 30 seconds."
+          sleep 30
+        done
+    init: true
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - openclaw_data:/home/node/.openclaw
+      - openclaw_auth:/home/node/.config/openclaw
+      - clawdi_data:/home/node/.clawdi
+    depends_on:
+      openclaw:
+        condition: service_healthy
+    # Override the shared image's port-18789 healthcheck: this companion has no
+    # HTTP listener. Keep the check authentication-independent so the service
+    # can start safely while CLAWDI_ENABLED is false during initial setup.
+    healthcheck:
+      test: ["CMD", "clawdi", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   # ----------------------------------------------------------
@@ -243,7 +366,7 @@ services:
 
   # ----------------------------------------------------------
   # Web UI – browser-based frontend matching the Python desktop app
-  # Tabs: Tasks, Daily Tasks, AI Assistant, Calendar, Weekly, Settings
+  # Tabs: Tasks, Daily Tasks, AI Assistant, Calendar, Weekly, Wallet, Settings
   # Public HTTPS: https://<app-id>-8080.dstack-pha-prod9.phala.network
   # ----------------------------------------------------------
   web_ui:
@@ -256,6 +379,7 @@ services:
       SYNC_URL:      http://task_sync:5002
       SCHEDULER_URL: http://scheduler:5003
       OPENCLAW_URL:  http://openclaw:18789
+      WALLET_URL:    http://wallet:5004
       API_KEY:       ${API_KEY}             # [SECURE] – Phala dashboard (same key as other services)
       SECRET_KEY:    ${WEB_SECRET_KEY}      # [SECURE] – Flask session signing key
       WEB_USER_ID:   ${WEB_USER_ID:-}       # Optional: set to match your desktop user ID
@@ -286,3 +410,4 @@ volumes:
   webui_data:
   openclaw_data:
   openclaw_auth:
+  clawdi_data:

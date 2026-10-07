@@ -1,0 +1,5 @@
+flask==3.1.1
+requests==2.32.3
+gunicorn==23.0.0
+dstack-sdk[ethereum]>=0.5.0,<1.0
+

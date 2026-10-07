@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>TODO App</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📋</text></svg>"/>
-  <link rel="stylesheet" href="/static/style.css?v=20260912-mobile-calendar" />
+  <link rel="stylesheet" href="/static/style.css?v=20261007-rewards-v1" />
 </head>
 <body>
   <!-- ── Header ─────────────────────────────────────────────────── -->
@@ -29,6 +29,7 @@
     <button class="tab" data-tab="ai">🤖 AI Assistant</button>
     <button class="tab" data-tab="calendar">📅 Calendar</button>
     <button class="tab" data-tab="weekly">📆 Weekly</button>
+    <button class="tab" data-tab="wallet">👛 Wallet</button>
     <button class="tab" data-tab="settings">⚙️ Settings</button>
   </nav>
 
@@ -180,6 +181,93 @@
   <!-- ══════════════════════════════════════════════════════════════ -->
   <!-- TAB: Settings                                                 -->
   <!-- ══════════════════════════════════════════════════════════════ -->
+  <section id="tab-wallet" class="tab-content">
+    <div class="wallet-toolbar">
+      <div>
+        <h2>Wallet</h2>
+        <p class="help-text">Protected Base Sepolia testnet wallet. Native testnet ETH transfers require password and email confirmation.</p>
+      </div>
+      <button id="wallet-refresh-btn" class="btn" type="button" onclick="loadWallet()">↻ Refresh</button>
+    </div>
+    <div id="wallet-status" class="wallet-status" aria-live="polite">Open this tab to create your wallet.</div>
+    <div id="wallet-content" class="wallet-layout" hidden>
+      <article class="wallet-card wallet-summary">
+        <div class="wallet-heading-row">
+          <span id="wallet-network" class="wallet-network"></span>
+          <span id="wallet-mode" class="wallet-mode">Receive only</span>
+        </div>
+        <div class="wallet-balance-label">Balance</div>
+        <div id="wallet-balance" class="wallet-balance">—</div>
+        <div class="wallet-receive-grid">
+          <img id="wallet-qr" class="wallet-qr" alt="Wallet receive QR code" />
+          <div class="wallet-address-block">
+            <label>Receive address</label>
+            <code id="wallet-address" class="wallet-address"></code>
+            <div class="wallet-actions">
+              <button class="btn btn-primary" type="button" onclick="copyWalletAddress()">Copy Address</button>
+              <a id="wallet-explorer-link" class="btn" target="_blank" rel="noopener noreferrer">View Explorer</a>
+            </div>
+          </div>
+        </div>
+        <p class="wallet-warning">Testnet assets have no monetary value. Only use Base Sepolia. This wallet does not support tokens, contracts, swaps, or mainnet.</p>
+      </article>
+      <article id="wallet-send-card" class="wallet-card" hidden>
+        <h3>Send testnet ETH</h3>
+        <div id="wallet-send-form">
+          <label class="wallet-field">Recipient address
+            <input id="wallet-send-to" class="input" autocomplete="off" spellcheck="false" placeholder="0x…" />
+          </label>
+          <label class="wallet-field">Amount (ETH)
+            <input id="wallet-send-amount" class="input" type="number" min="0" max="0.1" step="0.000000000000000001" inputmode="decimal" placeholder="0.001" />
+          </label>
+          <button id="wallet-prepare-btn" class="btn btn-primary" type="button" onclick="prepareWalletTransfer()">Review Transfer</button>
+        </div>
+        <div id="wallet-confirm-panel" class="wallet-confirm-panel" hidden>
+          <h4>Confirm exact transaction</h4>
+          <dl class="wallet-quote">
+            <div><dt>Network</dt><dd id="wallet-quote-network"></dd></div>
+            <div><dt>To</dt><dd><code id="wallet-quote-to"></code></dd></div>
+            <div><dt>Amount</dt><dd id="wallet-quote-amount"></dd></div>
+            <div><dt>Maximum fee</dt><dd id="wallet-quote-fee"></dd></div>
+            <div><dt>Expires</dt><dd id="wallet-quote-expires"></dd></div>
+          </dl>
+          <label class="wallet-field">Re-enter your password
+            <input id="wallet-confirm-password" class="input" type="password" autocomplete="current-password" />
+          </label>
+          <button id="wallet-code-btn" class="btn" type="button" onclick="requestWalletCode()">Email Confirmation Code</button>
+          <div id="wallet-code-section" hidden>
+            <label class="wallet-field">6-digit confirmation code
+              <input id="wallet-confirm-code" class="input" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" autocomplete="one-time-code" />
+            </label>
+            <button id="wallet-confirm-btn" class="btn btn-primary" type="button" onclick="confirmWalletTransfer()">Confirm and Send</button>
+          </div>
+          <button class="btn" type="button" onclick="cancelWalletTransfer()">Cancel</button>
+        </div>
+        <div id="wallet-send-message" class="wallet-send-message" aria-live="polite"></div>
+      </article>
+      <article class="wallet-card wallet-audit-card">
+        <h3>Your transfer requests</h3>
+        <div id="wallet-audit" class="wallet-transactions"><div class="empty-msg">No transfer requests yet.</div></div>
+      </article>
+      <article class="wallet-card wallet-history-card">
+        <h3>Recent transactions</h3>
+        <div id="wallet-transactions" class="wallet-transactions"><div class="empty-msg">No transactions yet.</div></div>
+      </article>
+      <article class="wallet-card wallet-rewards-card">
+        <div class="wallet-heading-row">
+          <div>
+            <h3>Task rewards</h3>
+            <p class="help-text">Each uniquely completed task earns XP. Milestones unlock non-transferable Base Sepolia badges, not currency.</p>
+          </div>
+          <button class="btn" type="button" onclick="loadRewards()">Refresh Rewards</button>
+        </div>
+        <div id="reward-summary" class="reward-summary">Loading rewards…</div>
+        <div id="reward-badge-status" class="help-text"></div>
+        <div id="reward-achievements" class="reward-achievements"></div>
+      </article>
+    </div>
+  </section>
+
   <section id="tab-settings" class="tab-content">
     <div class="settings-card">
       <h3>Display</h3>
@@ -202,7 +290,7 @@
     </div>
     <div class="settings-card">
       <h3>System Health</h3>
-      <p class="help-text">Check the Web UI, storage backend, database, AI, sync, scheduler, and OpenClaw services.</p>
+      <p class="help-text">Check the Web UI, storage backend, database, AI, sync, scheduler, OpenClaw, and wallet services.</p>
       <div class="health-toolbar">
         <button id="health-check-btn" class="btn" onclick="checkHealth()">Check All Services</button>
         <span id="health-last-checked" class="health-last-checked">Not checked yet</span>
@@ -482,6 +570,6 @@
       </iframe>
     </div>
   </div>
-  <script src="/static/app.js?v=20260912-mobile-calendar"></script>
+  <script src="/static/app.js?v=20261007-rewards-v1"></script>
 </body>
 </html>

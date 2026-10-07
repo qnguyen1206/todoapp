@@ -8,6 +8,7 @@ import os
 import json
 import hashlib
 import base64
+import io
 import logging
 import sqlite3
 import uuid
@@ -18,7 +19,8 @@ from pathlib import Path
 from time import perf_counter
 
 import requests as req
-from flask import Flask, render_template, request, jsonify, redirect, url_for, Response, g
+import qrcode
+from flask import Flask, render_template, request, jsonify, redirect, url_for, Response, g, send_file
 from flask_cors import CORS
 
 from auth import auth_bp, login_required, current_user_id, is_logged_in, get_valid_access_token
@@ -71,6 +73,7 @@ AI_URL           = os.getenv("AI_URL",         "http://ai_inference:5001")
 SYNC_URL         = os.getenv("SYNC_URL",       "http://task_sync:5002")
 SCHEDULER_URL    = os.getenv("SCHEDULER_URL",  "http://scheduler:5003")
 OPENCLAW_URL     = os.getenv("OPENCLAW_URL",   "http://openclaw:18789")
+WALLET_URL       = os.getenv("WALLET_URL",     "http://wallet:5004")
 API_KEY          = os.getenv("API_KEY",        "")
 AI_PROXY_TIMEOUT = int(os.getenv("AI_PROXY_TIMEOUT", "100"))
 
@@ -80,6 +83,13 @@ KEY_WRAP_INFO = b"todoapp-keywrap-v1"
 TASK_INFO_PREFIX = "todoapp-task-v2"
 _WORKSPACE_KEY_CACHE = {}
 MAX_AI_TOOL_ROUNDS = 50
+
+BADGE_METADATA = {
+    1: ("First Step", "Completed the first TODO App task.", "#7c3aed"),
+    10: ("Getting Things Done", "Completed 10 unique TODO App tasks.", "#2563eb"),
+    50: ("Momentum", "Completed 50 unique TODO App tasks.", "#059669"),
+    100: ("Centurion", "Completed 100 unique TODO App tasks.", "#d97706"),
+}
 
 BUILTIN_TOOLS = [
     {
@@ -1270,26 +1280,9 @@ def complete_tasks_bulk():
         if response.status_code != 200:
             return jsonify({"status": "error", "message": response.text}), response.status_code
         result = response.json()
-        newly_completed = int(result.get("updated", 0))
-        stats_warning = None
-        if newly_completed:
-            try:
-                conn = get_db()
-                try:
-                    row = conn.execute("SELECT value FROM character WHERE key='tasks_completed'").fetchone()
-                    completed = int(row[0]) if row else 0
-                    new_completed = completed + newly_completed
-                    conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('tasks_completed',?)", (str(new_completed),))
-                    conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('level',?)", (str(new_completed // 5),))
-                    conn.commit()
-                finally:
-                    conn.close()
-            except Exception as stats_exc:
-                # The task mutation already committed in the backend. Never report
-                # it as failed merely because optional local XP bookkeeping failed.
-                stats_warning = f"Tasks were completed, but XP could not be updated: {stats_exc}"
-                app.logger.warning(stats_warning)
-        return jsonify({"status": "success", **result, **({"warning": stats_warning} if stats_warning else {})})
+        # Reward accounting commits atomically with the backend task mutation.
+        # Never report a successful completion as failed because of optional UI work.
+        return jsonify({"status": "success", **result})
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 503
 
@@ -1415,17 +1408,10 @@ def complete_task(task_id):
         if not backend_result.get("updated"):
             return jsonify({"status": "success", "task_id": task_id, "already_completed": True})
 
-        # Also update character stats
-        conn = get_db()
-        row = conn.execute("SELECT value FROM character WHERE key='tasks_completed'").fetchone()
-        completed = int(row[0]) if row else 0
-        new_completed = completed + 1
-        level = new_completed // 5
-        conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('tasks_completed',?)", (str(new_completed),))
-        conn.execute("INSERT OR REPLACE INTO character(key,value) VALUES('level',?)", (str(level),))
-        conn.commit()
-        conn.close()
-        return jsonify({"status": "success", "task_id": task_id})
+        return jsonify({
+            "status": "success", "task_id": task_id,
+            "rewards": backend_result.get("rewards", {}),
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
@@ -2264,20 +2250,166 @@ def weekly_data():
 @app.route("/api/character", methods=["GET"])
 @login_required
 def get_character():
-    conn = get_db()
-    rows = conn.execute("SELECT key,value FROM character").fetchall()
-    conn.close()
-    data = {r["key"]: r["value"] for r in rows}
-    completed = int(data.get("tasks_completed", 0))
-    level = completed // 5
-    xp_current = completed % 5
-    return jsonify({"status": "success", "level": level,
-                    "tasks_completed": completed,
-                    "xp_current": xp_current, "xp_needed": 5})
+    try:
+        response = _backend("GET", "/rewards", timeout=25)
+        payload = response.json()
+        if response.status_code != 200:
+            return jsonify(payload), response.status_code
+        return jsonify({"status": "success", **payload.get("stats", {})})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/rewards", methods=["GET"])
+@login_required
+def get_rewards():
+    try:
+        response = _backend("GET", "/rewards", timeout=25)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/rewards/metadata/<achievement_token>.json", methods=["GET"])
+def reward_badge_metadata(achievement_token):
+    """Public immutable-style metadata endpoint for Base Sepolia badge viewers."""
+    try:
+        # ERC-1155 clients replace {id} with a 64-character lowercase hex ID.
+        achievement_id = (
+            int(achievement_token, 16)
+            if len(achievement_token) == 64 and re.fullmatch(r"[0-9a-fA-F]{64}", achievement_token)
+            else int(achievement_token, 10)
+        )
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Unknown achievement"}), 404
+    metadata = BADGE_METADATA.get(achievement_id)
+    if not metadata:
+        return jsonify({"status": "error", "message": "Unknown achievement"}), 404
+    name, description, color = metadata
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">'
+        f'<rect width="512" height="512" rx="72" fill="{color}"/>'
+        '<circle cx="256" cy="205" r="112" fill="none" stroke="white" stroke-width="22"/>'
+        '<path d="M190 205l45 45 91-100" fill="none" stroke="white" stroke-width="24" '
+        'stroke-linecap="round" stroke-linejoin="round"/>'
+        f'<text x="256" y="390" text-anchor="middle" fill="white" font-size="46" '
+        f'font-family="sans-serif" font-weight="700">{achievement_id} TASKS</text></svg>'
+    )
+    image = "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return jsonify({
+        "name": f"TODO App — {name}",
+        "description": description + " This badge is non-transferable and has no monetary value.",
+        "image": image,
+        "attributes": [
+            {"trait_type": "Completed tasks", "value": achievement_id},
+            {"trait_type": "Network", "value": "Base Sepolia"},
+            {"trait_type": "Transferable", "value": "No"},
+        ],
+    })
+
+
+@app.route("/api/rewards/achievements/<achievement_code>/mint", methods=["POST"])
+@login_required
+def mint_reward_achievement(achievement_code):
+    try:
+        response = _backend(
+            "POST", f"/rewards/achievements/{achievement_code}/mint", timeout=45
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
 
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
+@app.route("/api/wallet", methods=["GET"])
+@login_required
+def get_wallet():
+    try:
+        response = _backend("GET", "/wallet", timeout=25)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/wallet/qr", methods=["GET"])
+@login_required
+def wallet_qr():
+    """Render the authenticated user's public receive URI without a third-party QR service."""
+    try:
+        response = _backend("GET", "/wallet?include_portfolio=false", timeout=25)
+        payload = response.json()
+        if response.status_code != 200:
+            return jsonify(payload), response.status_code
+        receive_uri = payload.get("wallet", {}).get("receive_uri", "")
+        if not receive_uri:
+            return jsonify({"status": "error", "message": "Wallet receive URI is unavailable"}), 503
+        image = qrcode.make(receive_uri)
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        output.seek(0)
+        return send_file(output, mimetype="image/png", max_age=0)
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/wallet/transactions/prepare", methods=["POST"])
+@login_required
+def prepare_wallet_transaction():
+    try:
+        payload = request.get_json(silent=True) or {}
+        response = _backend("POST", "/wallet/transactions/prepare", json=payload, timeout=30)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/wallet/transactions/<transaction_id>/request-code", methods=["POST"])
+@login_required
+def request_wallet_transaction_code(transaction_id):
+    try:
+        response = _backend(
+            "POST", f"/wallet/transactions/{transaction_id}/request-code",
+            json=request.get_json(silent=True) or {}, timeout=30,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/wallet/transactions/<transaction_id>/confirm", methods=["POST"])
+@login_required
+def confirm_wallet_transaction(transaction_id):
+    try:
+        response = _backend(
+            "POST", f"/wallet/transactions/{transaction_id}/confirm",
+            json=request.get_json(silent=True) or {}, timeout=45,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/wallet/transactions/<transaction_id>", methods=["GET"])
+@login_required
+def get_wallet_transaction(transaction_id):
+    try:
+        response = _backend("GET", f"/wallet/transactions/{transaction_id}", timeout=20)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+@app.route("/api/wallet/transactions", methods=["GET"])
+@login_required
+def list_wallet_transactions():
+    try:
+        response = _backend("GET", "/wallet/transactions", timeout=20)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
 @app.route("/api/settings", methods=["GET"])
 @login_required
 def get_settings():
@@ -2377,6 +2509,7 @@ def health_all():
         "task_sync": f"{SYNC_URL}/health",
         "scheduler": f"{SCHEDULER_URL}/health",
         "openclaw": f"{OPENCLAW_URL}/healthz",
+        "wallet": f"{WALLET_URL}/health",
     }
 
     def probe(name, url):

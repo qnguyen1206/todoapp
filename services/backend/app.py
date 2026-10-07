@@ -10,6 +10,7 @@ import re
 import base64
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, request, jsonify, g
@@ -37,8 +38,26 @@ CORS(app)
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
 OPENCLAW_WEBHOOK_SECRET = os.environ.get("OPENCLAW_WEBHOOK_SECRET", "")
+WALLET_URL = os.environ.get("WALLET_URL", "http://wallet:5004").rstrip("/")
+WALLET_SEND_ENABLED = os.environ.get("WALLET_SEND_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+WALLET_MAX_TRANSFER_ETH = Decimal(os.environ.get("WALLET_MAX_TRANSFER_ETH", "0.1"))
+WALLET_DAILY_LIMIT_ETH = Decimal(os.environ.get("WALLET_DAILY_LIMIT_ETH", "0.25"))
+WALLET_PREPARE_LIMIT_PER_HOUR = int(os.environ.get("WALLET_PREPARE_LIMIT_PER_HOUR", "10"))
+WALLET_EXPLORER_URL = os.environ.get("WALLET_EXPLORER_URL", "https://base-sepolia.blockscout.com").rstrip("/")
+REWARD_XP_PER_TASK = max(1, int(os.environ.get("REWARD_XP_PER_TASK", "10")))
+REWARD_XP_PER_LEVEL = max(REWARD_XP_PER_TASK, int(os.environ.get("REWARD_XP_PER_LEVEL", "50")))
+REWARD_BADGES_ENABLED = os.environ.get("REWARD_BADGES_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+REWARD_BADGE_CONTRACT_ADDRESS = os.environ.get("REWARD_BADGE_CONTRACT_ADDRESS", "").strip()
+
+REWARD_ACHIEVEMENTS = (
+    {"code": "first_task", "id": 1, "name": "First Step", "description": "Complete your first task.", "tasks": 1},
+    {"code": "task_10", "id": 10, "name": "Getting Things Done", "description": "Complete 10 tasks.", "tasks": 10},
+    {"code": "task_50", "id": 50, "name": "Momentum", "description": "Complete 50 tasks.", "tasks": 50},
+    {"code": "task_100", "id": 100, "name": "Centurion", "description": "Complete 100 tasks.", "tasks": 100},
+)
 
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 KEY_WRAP_INFO = "todoapp-keywrap-v1"
 
 
@@ -119,6 +138,8 @@ def _send_verification_code(email, code):
     if os.environ.get("SMTP_ENABLED", "false").lower() != "true":
         log.warning("SMTP is disabled; cannot deliver verification email to %s", email)
         return False
+
+
     try:
         msg = MIMEText(f"Your TODO App verification code is: {code}\n\nIt expires in 15 minutes.")
         msg["Subject"] = "Verify your TODO App account"
@@ -132,6 +153,302 @@ def _send_verification_code(email, code):
     except Exception as exc:
         log.error("Failed to send verification email: %s", exc)
         return False
+
+
+def _send_wallet_confirmation_code(email, code, recipient, amount_eth, chain_name):
+    """Send a short-lived code for one already-prepared wallet transaction."""
+    if os.environ.get("SMTP_ENABLED", "false").lower() != "true":
+        log.warning("SMTP is disabled; cannot deliver wallet confirmation code to %s", email)
+        return False
+    try:
+        body = (
+            f"Your TODO App wallet confirmation code is: {code}\n\n"
+            f"Network: {chain_name}\nAmount: {amount_eth} ETH\nTo: {recipient}\n\n"
+            "This code expires in 10 minutes. If you did not request this transfer, "
+            "do not share the code."
+        )
+        msg = MIMEText(body)
+        msg["Subject"] = "Confirm your TODO App testnet transfer"
+        msg["From"] = os.environ.get("SMTP_USER", "")
+        msg["To"] = email
+        with smtplib.SMTP(os.environ.get("SMTP_HOST", ""), int(os.environ.get("SMTP_PORT", "587"))) as server:
+            server.starttls()
+            server.login(os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASSWORD", ""))
+            server.sendmail(msg["From"], [email], msg.as_string())
+        return True
+    except Exception as exc:
+        log.error("Failed to send wallet confirmation email: %s", exc)
+        return False
+
+
+def _wallet_headers():
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-API-Key"] = API_KEY
+    return headers
+
+
+def _wallet_request(path, payload, timeout=25):
+    response = http_requests.post(
+        f"{WALLET_URL}{path}", headers=_wallet_headers(), json=payload, timeout=timeout
+    )
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    if response.status_code != 200:
+        message = data.get("message", f"Wallet service returned HTTP {response.status_code}")
+        error = RuntimeError(message)
+        error.status_code = response.status_code
+        raise error
+    return data
+
+
+def _eth_to_wei(value):
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("Enter a valid ETH amount")
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("Transfer amount must be greater than zero")
+    scaled = amount * Decimal(10**18)
+    if scaled != scaled.to_integral_value():
+        raise ValueError("ETH amount supports at most 18 decimal places")
+    if amount > WALLET_MAX_TRANSFER_ETH:
+        raise ValueError(f"Maximum transfer is {WALLET_MAX_TRANSFER_ETH} ETH")
+    return int(scaled), amount
+
+
+def _wei_to_eth(value):
+    return format(Decimal(str(value)) / Decimal(10**18), "f")
+
+
+def _wallet_transaction_payload(row):
+    if not row:
+        return None
+    row = dict(row)
+    public = {
+        "id": str(row["id"]),
+        "status": row["status"],
+        "from": row["address"],
+        "to": row["to_address"],
+        "value_wei": str(row["value_wei"]),
+        "amount_eth": _wei_to_eth(row["value_wei"]),
+        "chain_id": int(row["chain_id"]),
+        "chain_name": row["chain_name"],
+        "nonce": int(row["nonce"]),
+        "gas_limit": int(row["gas_limit"]),
+        "max_fee_per_gas": str(row["max_fee_per_gas"]),
+        "max_priority_fee_per_gas": str(row["max_priority_fee_per_gas"]),
+        "maximum_fee_wei": str(Decimal(row["gas_limit"]) * Decimal(row["max_fee_per_gas"])),
+        "maximum_fee_eth": _wei_to_eth(Decimal(row["gas_limit"]) * Decimal(row["max_fee_per_gas"])),
+        "transaction_hash": row.get("transaction_hash"),
+        "explorer_url": row.get("explorer_url") or "",
+        "error_message": row.get("error_message") or "",
+    }
+    for field in ("created_at", "expires_at", "code_expires_at", "broadcast_at", "confirmed_at", "updated_at"):
+        value = row.get(field)
+        public[field] = value.isoformat() if value else None
+    return public
+
+
+def _ensure_reward_schema(cur):
+    """Idempotently install reward tables for startup and rolling-deploy safety."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_reward_stats (
+            user_id          TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            xp               BIGINT NOT NULL DEFAULT 0 CHECK (xp >= 0),
+            tasks_completed  BIGINT NOT NULL DEFAULT 0 CHECK (tasks_completed >= 0),
+            updated_at       TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS task_reward_events (
+            user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            task_id       TEXT NOT NULL,
+            xp_awarded    INTEGER NOT NULL CHECK (xp_awarded > 0),
+            awarded_at    TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (user_id, task_id)
+        );
+        CREATE TABLE IF NOT EXISTS user_achievements (
+            user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            achievement_code    TEXT NOT NULL,
+            achievement_id      BIGINT NOT NULL,
+            claim_id            TEXT UNIQUE NOT NULL,
+            status              TEXT NOT NULL DEFAULT 'eligible',
+            raw_transaction     TEXT,
+            transaction_hash    TEXT,
+            explorer_url        TEXT,
+            error_message       TEXT,
+            unlocked_at         TIMESTAMPTZ DEFAULT NOW(),
+            minted_at           TIMESTAMPTZ,
+            updated_at          TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (user_id, achievement_code),
+            CHECK (status IN ('eligible', 'signed', 'broadcast', 'minted', 'failed'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_achievements_status
+            ON user_achievements(status, updated_at);
+    """)
+
+
+def _record_task_completion_rewards_in_transaction(cur, user_id, task_ids):
+    """Core reward award operation. The caller provides its own savepoint."""
+    unique_ids = list(dict.fromkeys(str(task_id) for task_id in task_ids if str(task_id)))
+    awarded = 0
+    for task_id in unique_ids:
+        cur.execute(
+            "INSERT INTO task_reward_events (user_id, task_id, xp_awarded) VALUES (%s,%s,%s) "
+            "ON CONFLICT (user_id, task_id) DO NOTHING RETURNING xp_awarded",
+            (user_id, task_id, REWARD_XP_PER_TASK),
+        )
+        row = cur.fetchone()
+        if row:
+            awarded += int(row.get("xp_awarded") if isinstance(row, dict) else row[0])
+
+    if awarded:
+        cur.execute(
+            "INSERT INTO user_reward_stats (user_id, xp, tasks_completed, updated_at) "
+            "VALUES (%s,%s,%s,NOW()) ON CONFLICT (user_id) DO UPDATE SET "
+            "xp=user_reward_stats.xp + EXCLUDED.xp, "
+            "tasks_completed=user_reward_stats.tasks_completed + EXCLUDED.tasks_completed, "
+            "updated_at=NOW()",
+            (user_id, awarded, awarded // REWARD_XP_PER_TASK),
+        )
+    cur.execute(
+        "SELECT xp, tasks_completed FROM user_reward_stats WHERE user_id=%s",
+        (user_id,),
+    )
+    stats_row = cur.fetchone()
+    if isinstance(stats_row, dict):
+        xp = int(stats_row["xp"])
+        completed = int(stats_row["tasks_completed"])
+    else:
+        xp = int(stats_row[0]) if stats_row else 0
+        completed = int(stats_row[1]) if stats_row else 0
+    unlocked = []
+    for achievement in REWARD_ACHIEVEMENTS:
+        if completed < achievement["tasks"]:
+            continue
+        claim_id = "0x" + hashlib.sha256(
+            f"todoapp-achievement-v1:{user_id}:{achievement['code']}".encode("utf-8")
+        ).hexdigest()
+        cur.execute(
+            "INSERT INTO user_achievements "
+            "(user_id, achievement_code, achievement_id, claim_id, status, unlocked_at) "
+            "VALUES (%s,%s,%s,%s,'eligible',NOW()) "
+            "ON CONFLICT (user_id, achievement_code) DO NOTHING RETURNING achievement_code",
+            (user_id, achievement["code"], achievement["id"], claim_id),
+        )
+        if cur.fetchone():
+            unlocked.append(achievement["code"])
+    return {
+        "xp_awarded": awarded,
+        "xp": xp,
+        "tasks_completed": completed,
+        "level": xp // REWARD_XP_PER_LEVEL,
+        "xp_current": xp % REWARD_XP_PER_LEVEL,
+        "xp_needed": REWARD_XP_PER_LEVEL,
+        "achievements_unlocked": unlocked,
+    }
+
+
+def _record_task_completion_rewards(cur, user_id, task_ids):
+    """Award rewards without ever allowing optional XP work to break a task mutation."""
+    cur.execute("SAVEPOINT task_reward_award")
+    try:
+        _ensure_reward_schema(cur)
+        result = _record_task_completion_rewards_in_transaction(cur, user_id, task_ids)
+        cur.execute("RELEASE SAVEPOINT task_reward_award")
+        return result
+    except Exception as exc:
+        cur.execute("ROLLBACK TO SAVEPOINT task_reward_award")
+        cur.execute("RELEASE SAVEPOINT task_reward_award")
+        log.exception("Reward award skipped for user %s: %s", user_id, exc)
+        return {
+            "xp_awarded": 0,
+            "achievements_unlocked": [],
+            "warning": "Task completed, but rewards are temporarily unavailable",
+        }
+
+
+def _reward_payload(row):
+    row = dict(row)
+    result = {
+        "code": row["achievement_code"],
+        "achievement_id": int(row["achievement_id"]),
+        "claim_id": row["claim_id"],
+        "status": row["status"],
+        "transaction_hash": row.get("transaction_hash"),
+        "explorer_url": row.get("explorer_url") or "",
+        "error_message": row.get("error_message") or "",
+    }
+    for field in ("unlocked_at", "minted_at", "updated_at"):
+        value = row.get(field)
+        result[field] = value.isoformat() if value else None
+    return result
+
+
+def _ensure_user_wallet(conn, user_id):
+    """Derive and verify the current TEE address, then persist its public metadata."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT address, chain_id, chain_name, native_symbol, derivation_version, "
+            "receive_uri, explorer_url, created_at FROM user_wallets WHERE user_id = %s",
+            (user_id,),
+        )
+        stored_wallet = cur.fetchone()
+
+    response = http_requests.post(
+        f"{WALLET_URL}/v1/wallets/derive",
+        headers=_wallet_headers(),
+        json={"user_id": user_id},
+        timeout=20,
+    )
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    if response.status_code != 200:
+        raise RuntimeError(payload.get("message", "Wallet service is unavailable"))
+
+    if stored_wallet:
+        stored_wallet = dict(stored_wallet)
+        continuity_matches = (
+            stored_wallet["address"].lower() == str(payload.get("address", "")).lower()
+            and int(stored_wallet["chain_id"]) == int(payload.get("chain_id", -1))
+            and stored_wallet["derivation_version"] == payload.get("derivation_version")
+        )
+        if not continuity_matches:
+            raise RuntimeError(
+                "Wallet derivation identity changed. Deposits are disabled until the original "
+                "CVM identity and wallet derivation settings are restored."
+            )
+        stored_wallet["derivation_verified"] = True
+        return stored_wallet
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO user_wallets
+                (user_id, address, chain_id, chain_name, native_symbol,
+                 derivation_version, receive_uri, explorer_url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            (
+                user_id, payload["address"], int(payload["chain_id"]),
+                payload.get("chain_name", "EVM"), payload.get("native_symbol", "ETH"),
+                payload["derivation_version"], payload.get("receive_uri", ""),
+                payload.get("explorer_url", ""),
+            ),
+        )
+        cur.execute(
+            "SELECT address, chain_id, chain_name, native_symbol, derivation_version, "
+            "receive_uri, explorer_url, created_at FROM user_wallets WHERE user_id = %s",
+            (user_id,),
+        )
+        wallet = dict(cur.fetchone())
+    conn.commit()
+    wallet["derivation_verified"] = True
+    return wallet
 
 
 def _create_verification_code(conn, user_id):
@@ -588,6 +905,91 @@ def init_db():
                     created_at     TIMESTAMPTZ DEFAULT NOW()
                 );
 
+                CREATE TABLE IF NOT EXISTS user_reward_stats (
+                    user_id          TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    xp               BIGINT NOT NULL DEFAULT 0 CHECK (xp >= 0),
+                    tasks_completed  BIGINT NOT NULL DEFAULT 0 CHECK (tasks_completed >= 0),
+                    updated_at       TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS task_reward_events (
+                    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    task_id       TEXT NOT NULL,
+                    xp_awarded    INTEGER NOT NULL CHECK (xp_awarded > 0),
+                    awarded_at    TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, task_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_achievements (
+                    user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    achievement_code    TEXT NOT NULL,
+                    achievement_id      BIGINT NOT NULL,
+                    claim_id            TEXT UNIQUE NOT NULL,
+                    status              TEXT NOT NULL DEFAULT 'eligible',
+                    raw_transaction     TEXT,
+                    transaction_hash    TEXT,
+                    explorer_url        TEXT,
+                    error_message       TEXT,
+                    unlocked_at         TIMESTAMPTZ DEFAULT NOW(),
+                    minted_at           TIMESTAMPTZ,
+                    updated_at          TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, achievement_code),
+                    CHECK (status IN ('eligible', 'signed', 'broadcast', 'minted', 'failed'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_achievements_status
+                    ON user_achievements(status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS user_wallets (
+                    user_id            TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    address            TEXT UNIQUE NOT NULL,
+                    chain_id           BIGINT NOT NULL,
+                    chain_name         TEXT NOT NULL,
+                    native_symbol      TEXT NOT NULL DEFAULT 'ETH',
+                    derivation_version TEXT NOT NULL,
+                    receive_uri        TEXT NOT NULL,
+                    explorer_url       TEXT NOT NULL,
+                    created_at         TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS wallet_transactions (
+                    id                       UUID PRIMARY KEY,
+                    user_id                  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    idempotency_key           TEXT NOT NULL,
+                    address                   TEXT NOT NULL,
+                    to_address                TEXT NOT NULL,
+                    value_wei                 NUMERIC(78, 0) NOT NULL,
+                    chain_id                  BIGINT NOT NULL,
+                    chain_name                TEXT NOT NULL,
+                    nonce                     BIGINT NOT NULL,
+                    gas_limit                 BIGINT NOT NULL,
+                    max_fee_per_gas            NUMERIC(78, 0) NOT NULL,
+                    max_priority_fee_per_gas   NUMERIC(78, 0) NOT NULL,
+                    status                    TEXT NOT NULL DEFAULT 'prepared',
+                    code_hash                 TEXT,
+                    code_expires_at           TIMESTAMPTZ,
+                    code_attempts              INTEGER NOT NULL DEFAULT 0,
+                    password_attempts          INTEGER NOT NULL DEFAULT 0,
+                    code_sent_at               TIMESTAMPTZ,
+                    raw_transaction            TEXT,
+                    transaction_hash           TEXT,
+                    explorer_url               TEXT,
+                    error_message              TEXT,
+                    created_at                 TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at                 TIMESTAMPTZ NOT NULL,
+                    updated_at                 TIMESTAMPTZ DEFAULT NOW(),
+                    broadcast_at               TIMESTAMPTZ,
+                    confirmed_at               TIMESTAMPTZ,
+                    UNIQUE (user_id, idempotency_key),
+                    CHECK (status IN ('prepared', 'code_sent', 'signed', 'broadcast', 'confirmed', 'failed', 'expired'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_created
+                    ON wallet_transactions(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_wallet_transactions_hash
+                    ON wallet_transactions(transaction_hash) WHERE transaction_hash IS NOT NULL;
+
+                ALTER TABLE wallet_transactions
+                    ADD COLUMN IF NOT EXISTS password_attempts INTEGER NOT NULL DEFAULT 0;
+
                 CREATE TABLE IF NOT EXISTS refresh_tokens (
                     token_hash   TEXT PRIMARY KEY,
                     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -666,6 +1068,27 @@ def init_db():
                 ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_time TEXT;
                 ALTER TABLE task_reminders ADD COLUMN IF NOT EXISTS recurring_schedule JSONB NOT NULL DEFAULT '[]'::jsonb;
             """)
+            # One-time/idempotent migration for tasks completed before rewards existed.
+            cur.execute(
+                "INSERT INTO task_reward_events (user_id, task_id, xp_awarded) "
+                "SELECT t.user_id, t.task_id, %s FROM tasks t "
+                "JOIN users u ON u.id=t.user_id WHERE t.completed=TRUE "
+                "ON CONFLICT (user_id, task_id) DO NOTHING",
+                (REWARD_XP_PER_TASK,),
+            )
+            cur.execute("""
+                INSERT INTO user_reward_stats (user_id, xp, tasks_completed, updated_at)
+                SELECT user_id, SUM(xp_awarded), COUNT(*), NOW()
+                FROM task_reward_events GROUP BY user_id
+                ON CONFLICT (user_id) DO UPDATE SET
+                    xp=EXCLUDED.xp,
+                    tasks_completed=EXCLUDED.tasks_completed,
+                    updated_at=NOW()
+            """)
+            cur.execute("SELECT user_id FROM user_reward_stats")
+            reward_users = [row[0] for row in cur.fetchall()]
+            for reward_user_id in reward_users:
+                _record_task_completion_rewards(cur, reward_user_id, [])
         conn.commit()
         log.info("Database initialised")
     except Exception as exc:
@@ -709,6 +1132,580 @@ def health():
 # ---------------------------------------------------------------------------
 # Client-side encryption device registry
 # ---------------------------------------------------------------------------
+
+@app.route("/wallet", methods=["GET"])
+@require_auth
+def get_wallet():
+    """Create/read the signed-in user's controlled testnet wallet and portfolio."""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT email_verified FROM users WHERE id = %s", (g.user_id,))
+            user = cur.fetchone()
+        if not user or not user["email_verified"]:
+            return jsonify({"status": "error", "message": "Verify your email before creating a wallet"}), 403
+
+        wallet = _ensure_user_wallet(conn, g.user_id)
+        wallet["created_at"] = wallet["created_at"].isoformat() if wallet.get("created_at") else None
+
+        portfolio = {"balance": None, "transactions": [], "history_available": False}
+        portfolio_error = ""
+        include_portfolio = request.args.get("include_portfolio", "true").lower() not in ("0", "false", "no")
+        if include_portfolio:
+            try:
+                response = http_requests.post(
+                    f"{WALLET_URL}/v1/wallets/portfolio",
+                    headers=_wallet_headers(),
+                    json={"address": wallet["address"]},
+                    timeout=20,
+                )
+                data = response.json()
+                if response.status_code == 200:
+                    portfolio = data
+                else:
+                    portfolio_error = data.get("message", "Portfolio service is unavailable")
+            except Exception as exc:
+                portfolio_error = str(exc)
+
+        return jsonify({
+            "status": "success",
+            "wallet": wallet,
+            "balance": portfolio.get("balance"),
+            "transactions": portfolio.get("transactions", []),
+            "history_available": portfolio.get("history_available", False),
+            "history_message": portfolio.get("history_message", ""),
+            "portfolio_error": portfolio_error,
+            "mode": "controlled-testnet-send" if WALLET_SEND_ENABLED else "receive-only",
+            "send_enabled": WALLET_SEND_ENABLED,
+        })
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Wallet retrieval failed for user %s", g.user_id)
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+@app.route("/wallet/transactions/prepare", methods=["POST"])
+@require_auth
+def prepare_wallet_transaction():
+    if not WALLET_SEND_ENABLED:
+        return jsonify({"status": "error", "message": "Wallet sending is disabled"}), 403
+    data = request.get_json(silent=True) or {}
+    recipient = str(data.get("to", "")).strip()
+    idempotency_key = str(request.headers.get("Idempotency-Key") or data.get("idempotency_key") or "").strip()
+    if not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        return jsonify({"status": "error", "message": "A valid idempotency key is required"}), 400
+    try:
+        value_wei, _ = _eth_to_wei(data.get("amount_eth"))
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM wallet_transactions WHERE user_id=%s AND idempotency_key=%s",
+                (g.user_id, idempotency_key),
+            )
+            existing = cur.fetchone()
+            if existing:
+                return jsonify({"status": "success", "transaction": _wallet_transaction_payload(existing), "idempotent": True})
+            cur.execute(
+                "SELECT COUNT(*) AS count FROM wallet_transactions "
+                "WHERE user_id=%s AND created_at > NOW() - INTERVAL '1 hour'",
+                (g.user_id,),
+            )
+            if int(cur.fetchone()["count"]) >= WALLET_PREPARE_LIMIT_PER_HOUR:
+                return jsonify({"status": "error", "message": "Hourly wallet preparation limit reached"}), 429
+            cur.execute(
+                "SELECT COALESCE(SUM(value_wei), 0) AS total FROM wallet_transactions "
+                "WHERE user_id=%s AND created_at > NOW() - INTERVAL '24 hours' "
+                "AND status IN ('signed', 'broadcast', 'confirmed')",
+                (g.user_id,),
+            )
+            sent_wei = Decimal(cur.fetchone()["total"])
+            if sent_wei + Decimal(value_wei) > WALLET_DAILY_LIMIT_ETH * Decimal(10**18):
+                return jsonify({"status": "error", "message": f"Daily transfer limit is {WALLET_DAILY_LIMIT_ETH} ETH"}), 400
+        wallet = _ensure_user_wallet(conn, g.user_id)
+        quote = _wallet_request("/v1/wallets/quote-transfer", {
+            "user_id": g.user_id, "address": wallet["address"],
+            "to": recipient, "value_wei": str(value_wei),
+        })["quote"]
+        transaction_id = uuid.uuid4()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO wallet_transactions
+                    (id, user_id, idempotency_key, address, to_address, value_wei,
+                     chain_id, chain_name, nonce, gas_limit, max_fee_per_gas,
+                     max_priority_fee_per_gas, expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TO_TIMESTAMP(%s))
+                RETURNING *
+                """,
+                (
+                    transaction_id, g.user_id, idempotency_key, quote["from"], quote["to"],
+                    str(value_wei), int(quote["chain_id"]), wallet["chain_name"], int(quote["nonce"]),
+                    int(quote["gas_limit"]), quote["max_fee_per_gas"],
+                    quote["max_priority_fee_per_gas"], int(quote["expires_at"]),
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return jsonify({"status": "success", "transaction": _wallet_transaction_payload(row)})
+    except (ValueError, RuntimeError) as exc:
+        conn.rollback()
+        code = getattr(exc, "status_code", 400)
+        return jsonify({"status": "error", "message": str(exc)}), code if code in (400, 403, 409, 429, 503) else 503
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Wallet transaction preparation failed")
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+
+@app.route("/wallet/transactions/<transaction_id>/request-code", methods=["POST"])
+@require_auth
+def request_wallet_transaction_code(transaction_id):
+    try:
+        parsed_id = uuid.UUID(transaction_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid transaction ID"}), 400
+    password = str((request.get_json(silent=True) or {}).get("password", ""))
+    if not password:
+        return jsonify({"status": "error", "message": "Password is required"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT wt.*, u.email, u.password_hash FROM wallet_transactions wt "
+                "JOIN users u ON u.id=wt.user_id WHERE wt.id=%s AND wt.user_id=%s FOR UPDATE",
+                (parsed_id, g.user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Transaction not found"}), 404
+            if row["status"] not in ("prepared", "code_sent"):
+                return jsonify({"status": "error", "message": "Transaction can no longer be confirmed"}), 409
+            now = datetime.now(timezone.utc)
+            if row["expires_at"] <= now:
+                cur.execute("UPDATE wallet_transactions SET status='expired', updated_at=NOW() WHERE id=%s", (parsed_id,))
+                conn.commit()
+                return jsonify({"status": "error", "message": "Transaction quote expired; prepare it again"}), 409
+            if row["code_sent_at"] and (now - row["code_sent_at"]).total_seconds() < 60:
+                return jsonify({"status": "error", "message": "Wait one minute before requesting another code"}), 429
+            if not row["password_hash"] or not auth_lib.verify_password(password, row["password_hash"]):
+                password_attempts = int(row.get("password_attempts") or 0) + 1
+                next_status = "failed" if password_attempts >= 5 else row["status"]
+                cur.execute(
+                    "UPDATE wallet_transactions SET password_attempts=%s, status=%s, "
+                    "error_message=%s, updated_at=NOW() WHERE id=%s",
+                    (
+                        password_attempts,
+                        next_status,
+                        "Too many incorrect password attempts" if next_status == "failed" else None,
+                        parsed_id,
+                    ),
+                )
+                conn.commit()
+                message = (
+                    "Transaction locked after too many incorrect password attempts"
+                    if next_status == "failed" else "Incorrect password"
+                )
+                return jsonify({"status": "error", "message": message}), 401
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            code_hash = auth_lib.hash_token(f"wallet:{parsed_id}:{code}")
+            if not _send_wallet_confirmation_code(
+                row["email"], code, row["to_address"], _wei_to_eth(row["value_wei"]), row["chain_name"]
+            ):
+                return jsonify({"status": "error", "message": "Could not send confirmation email"}), 503
+            cur.execute(
+                "UPDATE wallet_transactions SET status='code_sent', code_hash=%s, "
+                "code_expires_at=NOW() + INTERVAL '10 minutes', code_attempts=0, "
+                "password_attempts=0, code_sent_at=NOW(), error_message=NULL, "
+                "updated_at=NOW() WHERE id=%s RETURNING *",
+                (code_hash, parsed_id),
+            )
+            updated = cur.fetchone()
+        conn.commit()
+        return jsonify({"status": "success", "message": "Confirmation code sent", "transaction": _wallet_transaction_payload(updated)})
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Wallet confirmation-code request failed")
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+
+@app.route("/wallet/transactions/<transaction_id>/confirm", methods=["POST"])
+@require_auth
+def confirm_wallet_transaction(transaction_id):
+    try:
+        parsed_id = uuid.UUID(transaction_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid transaction ID"}), 400
+    code = str((request.get_json(silent=True) or {}).get("code", "")).strip()
+    conn = get_db()
+    raw_transaction = None
+    transaction_hash = None
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (g.user_id,))
+            cur.execute(
+                "SELECT * FROM wallet_transactions WHERE id=%s AND user_id=%s FOR UPDATE",
+                (parsed_id, g.user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Transaction not found"}), 404
+            if row["status"] in ("broadcast", "confirmed"):
+                return jsonify({"status": "success", "transaction": _wallet_transaction_payload(row), "idempotent": True})
+            if row["status"] == "signed" and row["raw_transaction"] and row["transaction_hash"]:
+                raw_transaction = row["raw_transaction"]
+                transaction_hash = row["transaction_hash"]
+            else:
+                if row["status"] != "code_sent":
+                    return jsonify({"status": "error", "message": "Request a confirmation code first"}), 409
+                cur.execute(
+                    "SELECT id FROM wallet_transactions WHERE user_id=%s AND id<>%s "
+                    "AND nonce=%s AND status IN ('signed', 'broadcast') LIMIT 1",
+                    (g.user_id, parsed_id, row["nonce"]),
+                )
+                if cur.fetchone():
+                    return jsonify({
+                        "status": "error",
+                        "message": "Another transfer already uses this nonce; wait for it to finish and prepare again",
+                    }), 409
+                cur.execute(
+                    "SELECT COALESCE(SUM(value_wei), 0) AS total FROM wallet_transactions "
+                    "WHERE user_id=%s AND id<>%s AND created_at > NOW() - INTERVAL '24 hours' "
+                    "AND status IN ('signed', 'broadcast', 'confirmed')",
+                    (g.user_id, parsed_id),
+                )
+                authorized_wei = Decimal(cur.fetchone()["total"])
+                if authorized_wei + Decimal(row["value_wei"]) > WALLET_DAILY_LIMIT_ETH * Decimal(10**18):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Daily transfer limit is {WALLET_DAILY_LIMIT_ETH} ETH",
+                    }), 409
+                now = datetime.now(timezone.utc)
+                if row["expires_at"] <= now or not row["code_expires_at"] or row["code_expires_at"] <= now:
+                    cur.execute("UPDATE wallet_transactions SET status='expired', updated_at=NOW() WHERE id=%s", (parsed_id,))
+                    conn.commit()
+                    return jsonify({"status": "error", "message": "Transaction or confirmation code expired"}), 409
+                supplied_hash = auth_lib.hash_token(f"wallet:{parsed_id}:{code}")
+                if not code or not row["code_hash"] or not secrets.compare_digest(row["code_hash"], supplied_hash):
+                    attempts = int(row["code_attempts"]) + 1
+                    new_status = "failed" if attempts >= 5 else "code_sent"
+                    cur.execute(
+                        "UPDATE wallet_transactions SET code_attempts=%s, status=%s, updated_at=NOW() WHERE id=%s",
+                        (attempts, new_status, parsed_id),
+                    )
+                    conn.commit()
+                    message = "Too many incorrect codes; prepare a new transaction" if attempts >= 5 else "Invalid confirmation code"
+                    return jsonify({"status": "error", "message": message}), 400
+                try:
+                    signed = _wallet_request("/v1/wallets/authorize-transfer", {
+                        "user_id": g.user_id,
+                        "address": row["address"],
+                        "to": row["to_address"],
+                        "value_wei": str(row["value_wei"]),
+                        "chain_id": int(row["chain_id"]),
+                        "nonce": int(row["nonce"]),
+                        "gas_limit": int(row["gas_limit"]),
+                        "max_fee_per_gas": str(row["max_fee_per_gas"]),
+                        "max_priority_fee_per_gas": str(row["max_priority_fee_per_gas"]),
+                        "expires_at": int(row["expires_at"].timestamp()),
+                    }, timeout=30)
+                except RuntimeError as exc:
+                    if getattr(exc, "status_code", 503) == 400:
+                        cur.execute(
+                            "UPDATE wallet_transactions SET status='expired', error_message=%s, updated_at=NOW() WHERE id=%s",
+                            (str(exc), parsed_id),
+                        )
+                        conn.commit()
+                        return jsonify({"status": "error", "message": str(exc)}), 409
+                    raise
+                raw_transaction = signed["raw_transaction"]
+                transaction_hash = signed["transaction_hash"]
+                cur.execute(
+                    "UPDATE wallet_transactions SET status='signed', raw_transaction=%s, transaction_hash=%s, "
+                    "code_hash=NULL, code_expires_at=NULL, updated_at=NOW() WHERE id=%s",
+                    (raw_transaction, transaction_hash, parsed_id),
+                )
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Wallet transaction authorization failed")
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+    try:
+        broadcast = _wallet_request("/v1/wallets/broadcast", {
+            "raw_transaction": raw_transaction,
+            "transaction_hash": transaction_hash,
+        }, timeout=30)
+        explorer_url = f"{WALLET_EXPLORER_URL}/tx/{broadcast['transaction_hash']}"
+        update_conn = get_db()
+        try:
+            with update_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "UPDATE wallet_transactions SET status='broadcast', explorer_url=%s, error_message=NULL, "
+                    "broadcast_at=COALESCE(broadcast_at, NOW()), updated_at=NOW() "
+                    "WHERE id=%s AND user_id=%s RETURNING *",
+                    (explorer_url, parsed_id, g.user_id),
+                )
+                row = cur.fetchone()
+            update_conn.commit()
+        finally:
+            update_conn.close()
+        return jsonify({"status": "success", "transaction": _wallet_transaction_payload(row)})
+    except Exception as exc:
+        update_conn = get_db()
+        try:
+            with update_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE wallet_transactions SET error_message=%s, updated_at=NOW() "
+                    "WHERE id=%s AND user_id=%s AND status='signed'",
+                    (str(exc), parsed_id, g.user_id),
+                )
+            update_conn.commit()
+        finally:
+            update_conn.close()
+        return jsonify({
+            "status": "error",
+            "message": "Transaction authorized but broadcast failed. Retry confirmation to resend the exact same transaction.",
+        }), 503
+
+
+@app.route("/wallet/transactions/<transaction_id>", methods=["GET"])
+@require_auth
+def get_wallet_transaction(transaction_id):
+    try:
+        parsed_id = uuid.UUID(transaction_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid transaction ID"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM wallet_transactions WHERE id=%s AND user_id=%s", (parsed_id, g.user_id))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Transaction not found"}), 404
+            if row["status"] == "broadcast" and row["transaction_hash"]:
+                try:
+                    result = _wallet_request("/v1/wallets/transaction-status", {
+                        "transaction_hash": row["transaction_hash"]
+                    })
+                    chain_status = result.get("transaction_status")
+                    if chain_status in ("confirmed", "failed"):
+                        cur.execute(
+                            "UPDATE wallet_transactions SET status=%s, "
+                            "confirmed_at=CASE WHEN %s='confirmed' THEN NOW() ELSE confirmed_at END, "
+                            "raw_transaction=NULL, updated_at=NOW() WHERE id=%s RETURNING *",
+                            (chain_status, chain_status, parsed_id),
+                        )
+                        row = cur.fetchone()
+                        conn.commit()
+                except Exception as exc:
+                    log.warning("Could not refresh wallet transaction %s: %s", parsed_id, exc)
+        return jsonify({"status": "success", "transaction": _wallet_transaction_payload(row)})
+    finally:
+        conn.close()
+
+
+@app.route("/wallet/transactions", methods=["GET"])
+@require_auth
+def list_wallet_transactions():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM wallet_transactions WHERE user_id=%s ORDER BY created_at DESC LIMIT 20",
+                (g.user_id,),
+            )
+            rows = cur.fetchall()
+        return jsonify({"status": "success", "transactions": [_wallet_transaction_payload(row) for row in rows]})
+    finally:
+        conn.close()
+
+
+@app.route("/rewards", methods=["GET"])
+@require_auth
+def get_rewards():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            _ensure_reward_schema(cur)
+            cur.execute(
+                "SELECT xp, tasks_completed FROM user_reward_stats WHERE user_id=%s",
+                (g.user_id,),
+            )
+            stats = cur.fetchone() or {"xp": 0, "tasks_completed": 0}
+            cur.execute(
+                "SELECT * FROM user_achievements WHERE user_id=%s ORDER BY achievement_id",
+                (g.user_id,),
+            )
+            achievement_rows = {row["achievement_code"]: row for row in cur.fetchall()}
+            for code, row in list(achievement_rows.items()):
+                if row["status"] != "broadcast" or not row["transaction_hash"]:
+                    continue
+                try:
+                    chain = _wallet_request("/v1/wallets/transaction-status", {
+                        "transaction_hash": row["transaction_hash"],
+                    })
+                    chain_status = chain.get("transaction_status")
+                    if chain_status in ("confirmed", "failed"):
+                        new_status = "minted" if chain_status == "confirmed" else "failed"
+                        cur.execute(
+                            "UPDATE user_achievements SET status=%s, "
+                            "minted_at=CASE WHEN %s='minted' THEN NOW() ELSE minted_at END, "
+                            "raw_transaction=NULL, updated_at=NOW() "
+                            "WHERE user_id=%s AND achievement_code=%s RETURNING *",
+                            (new_status, new_status, g.user_id, code),
+                        )
+                        achievement_rows[code] = cur.fetchone()
+                except Exception as exc:
+                    log.warning("Could not refresh achievement %s for %s: %s", code, g.user_id, exc)
+        conn.commit()
+        xp = int(stats["xp"])
+        completed = int(stats["tasks_completed"])
+        achievements = []
+        for definition in REWARD_ACHIEVEMENTS:
+            row = achievement_rows.get(definition["code"])
+            item = dict(definition)
+            item.update(_reward_payload(row) if row else {
+                "status": "locked", "transaction_hash": None,
+                "explorer_url": "", "error_message": "",
+            })
+            achievements.append(item)
+        reward_config = {"enabled": False}
+        if REWARD_BADGES_ENABLED:
+            try:
+                reward_config = _wallet_request("/v1/rewards/config", {})
+            except Exception as exc:
+                reward_config = {"enabled": False, "message": str(exc)}
+        return jsonify({
+            "status": "success",
+            "stats": {
+                "xp": xp, "tasks_completed": completed,
+                "level": xp // REWARD_XP_PER_LEVEL,
+                "xp_current": xp % REWARD_XP_PER_LEVEL,
+                "xp_needed": REWARD_XP_PER_LEVEL,
+            },
+            "achievements": achievements,
+            "badges_enabled": bool(REWARD_BADGES_ENABLED and reward_config.get("enabled")),
+            "badge_config": reward_config,
+        })
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Reward retrieval failed")
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+
+@app.route("/rewards/achievements/<achievement_code>/mint", methods=["POST"])
+@require_auth
+def mint_reward_achievement(achievement_code):
+    if not REWARD_BADGES_ENABLED:
+        return jsonify({"status": "error", "message": "On-chain achievement badges are disabled"}), 403
+    definition = next((item for item in REWARD_ACHIEVEMENTS if item["code"] == achievement_code), None)
+    if not definition:
+        return jsonify({"status": "error", "message": "Unknown achievement"}), 404
+    conn = get_db()
+    raw_transaction = None
+    transaction_hash = None
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            _ensure_reward_schema(cur)
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('todoapp-reward-issuer'))")
+            cur.execute(
+                "SELECT * FROM user_achievements WHERE user_id=%s AND achievement_code=%s FOR UPDATE",
+                (g.user_id, achievement_code),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Achievement is still locked"}), 409
+            if row["status"] in ("broadcast", "minted"):
+                return jsonify({"status": "success", "achievement": _reward_payload(row), "idempotent": True})
+            if row["status"] == "signed" and row["raw_transaction"] and row["transaction_hash"]:
+                raw_transaction = row["raw_transaction"]
+                transaction_hash = row["transaction_hash"]
+            else:
+                cur.execute(
+                    "SELECT 1 FROM user_achievements WHERE status IN ('signed','broadcast') "
+                    "AND NOT (user_id=%s AND achievement_code=%s) LIMIT 1",
+                    (g.user_id, achievement_code),
+                )
+                if cur.fetchone():
+                    return jsonify({
+                        "status": "error",
+                        "message": "Another achievement mint is pending; wait for it to finish",
+                    }), 409
+                wallet = _ensure_user_wallet(conn, g.user_id)
+                signed = _wallet_request("/v1/rewards/authorize-achievement", {
+                    "recipient": wallet["address"],
+                    "achievement_id": int(row["achievement_id"]),
+                    "claim_id": row["claim_id"],
+                }, timeout=30)
+                raw_transaction = signed["raw_transaction"]
+                transaction_hash = signed["transaction_hash"]
+                cur.execute(
+                    "UPDATE user_achievements SET status='signed', raw_transaction=%s, "
+                    "transaction_hash=%s, error_message=NULL, updated_at=NOW() "
+                    "WHERE user_id=%s AND achievement_code=%s",
+                    (raw_transaction, transaction_hash, g.user_id, achievement_code),
+                )
+        conn.commit()
+    except (ValueError, RuntimeError) as exc:
+        conn.rollback()
+        code = getattr(exc, "status_code", 503)
+        return jsonify({"status": "error", "message": str(exc)}), 400 if code == 400 else 503
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Achievement authorization failed")
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    finally:
+        conn.close()
+
+    try:
+        broadcast = _wallet_request("/v1/wallets/broadcast", {
+            "raw_transaction": raw_transaction,
+            "transaction_hash": transaction_hash,
+        }, timeout=30)
+        explorer_url = f"{WALLET_EXPLORER_URL}/tx/{broadcast['transaction_hash']}"
+        update_conn = get_db()
+        try:
+            with update_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "UPDATE user_achievements SET status='broadcast', explorer_url=%s, "
+                    "error_message=NULL, updated_at=NOW() WHERE user_id=%s AND achievement_code=%s "
+                    "RETURNING *",
+                    (explorer_url, g.user_id, achievement_code),
+                )
+                row = cur.fetchone()
+            update_conn.commit()
+        finally:
+            update_conn.close()
+        return jsonify({"status": "success", "achievement": _reward_payload(row)})
+    except Exception as exc:
+        update_conn = get_db()
+        try:
+            with update_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE user_achievements SET error_message=%s, updated_at=NOW() "
+                    "WHERE user_id=%s AND achievement_code=%s AND status='signed'",
+                    (str(exc), g.user_id, achievement_code),
+                )
+            update_conn.commit()
+        finally:
+            update_conn.close()
+        return jsonify({
+            "status": "error",
+            "message": "Badge authorized but broadcast failed. Retry to resend the same transaction.",
+        }), 503
+
 
 @app.route("/crypto/devices", methods=["GET"])
 @require_auth
@@ -1099,7 +2096,16 @@ def store_tasks():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            newly_completed_ids = []
             for task in tasks:
+                task_id = str(task.get("id", ""))
+                completed = bool(task.get("completed", False))
+                cur.execute(
+                    "SELECT completed FROM tasks WHERE user_id=%s AND task_id=%s FOR UPDATE",
+                    (user_id, task_id),
+                )
+                previous = cur.fetchone()
+                was_completed = bool(previous[0]) if previous else False
                 conflict_clause = (
                     "ON CONFLICT (user_id, task_id) DO NOTHING"
                     if preserve_remote else
@@ -1115,16 +2121,19 @@ def store_tasks():
                     {conflict_clause}
                 """, (
                     user_id,
-                    str(task.get("id", "")),
+                    task_id,
                     task.get("title", ""),
                     task.get("due_date"),
                     task.get("due_time"),
                     int(task.get("priority", 1)),
                     task.get("notes", ""),
-                    bool(task.get("completed", False)),
+                    completed,
                 ))
+                if completed and not was_completed and cur.rowcount:
+                    newly_completed_ids.append(task_id)
+            rewards = _record_task_completion_rewards(cur, user_id, newly_completed_ids)
         conn.commit()
-        return jsonify({"status": "success", "stored": len(tasks)})
+        return jsonify({"status": "success", "stored": len(tasks), "rewards": rewards})
     except Exception as exc:
         conn.rollback()
         log.error("store_tasks error: %s", exc)
@@ -1213,12 +2222,15 @@ def sync_tasks():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            newly_completed_ids = []
             if completed_task_ids:
                 cur.execute(
                     "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
-                    "WHERE user_id = %s AND task_id = ANY(%s)",
+                    "WHERE user_id = %s AND task_id = ANY(%s) AND completed = FALSE "
+                    "RETURNING task_id",
                     (user_id, completed_task_ids),
                 )
+                newly_completed_ids.extend(row["task_id"] for row in cur.fetchall())
             if deleted_task_ids:
                 cur.execute(
                     "DELETE FROM reminder_deliveries WHERE user_id = %s AND task_id = ANY(%s)",
@@ -1238,6 +2250,7 @@ def sync_tasks():
                     INSERT INTO tasks (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (user_id, task_id) DO NOTHING
+                    RETURNING task_id, completed
                 """, (
                     user_id,
                     str(task.get("id", "")),
@@ -1248,6 +2261,10 @@ def sync_tasks():
                     task.get("notes", ""),
                     bool(task.get("completed", False)),
                 ))
+                inserted = cur.fetchone()
+                if inserted and inserted["completed"]:
+                    newly_completed_ids.append(inserted["task_id"])
+            rewards = _record_task_completion_rewards(cur, user_id, newly_completed_ids)
             # Return the full merged list
             cur.execute("""
                 SELECT task_id AS id, title, due_date, due_time, priority, notes, completed, updated_at
@@ -1259,7 +2276,7 @@ def sync_tasks():
         for t in synced:
             if t.get("updated_at"):
                 t["updated_at"] = t["updated_at"].isoformat()
-        return jsonify({"status": "success", "synced_tasks": synced})
+        return jsonify({"status": "success", "synced_tasks": synced, "rewards": rewards})
     except Exception as exc:
         conn.rollback()
         log.error("sync_tasks error: %s", exc)
@@ -1385,10 +2402,11 @@ def complete_task(task_id):
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
-                "WHERE user_id = %s AND task_id = %s AND completed = FALSE",
+                "WHERE user_id = %s AND task_id = %s AND completed = FALSE RETURNING task_id",
                 (user_id, task_id),
             )
-            updated = cur.rowcount
+            completed_row = cur.fetchone()
+            updated = 1 if completed_row else 0
             if not updated:
                 cur.execute(
                     "SELECT completed FROM tasks WHERE user_id = %s AND task_id = %s",
@@ -1398,8 +2416,11 @@ def complete_task(task_id):
                 if not existing:
                     conn.rollback()
                     return jsonify({"status": "error", "message": "Task not found"}), 404
+            rewards = _record_task_completion_rewards(
+                cur, user_id, [completed_row[0]] if completed_row else []
+            )
         conn.commit()
-        return jsonify({"status": "success", "completed": True, "updated": updated})
+        return jsonify({"status": "success", "completed": True, "updated": updated, "rewards": rewards})
     except Exception as exc:
         conn.rollback()
         log.error("complete_task error: %s", exc)
@@ -1462,17 +2483,24 @@ def complete_tasks_batch():
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE tasks SET completed = TRUE, updated_at = NOW() "
-                "WHERE user_id = %s AND task_id = ANY(%s) AND completed = FALSE",
+                "WHERE user_id = %s AND task_id = ANY(%s) AND completed = FALSE RETURNING task_id",
                 (g.user_id, task_ids),
             )
-            updated = cur.rowcount
+            completed_rows = cur.fetchall()
+            updated = len(completed_rows)
             cur.execute(
                 "SELECT COUNT(*) FROM tasks WHERE user_id = %s AND task_id = ANY(%s)",
                 (g.user_id, task_ids),
             )
             matched = cur.fetchone()[0]
+            rewards = _record_task_completion_rewards(
+                cur, g.user_id, [row[0] for row in completed_rows]
+            )
         conn.commit()
-        return jsonify({"status": "success", "requested": len(task_ids), "matched": matched, "updated": updated})
+        return jsonify({
+            "status": "success", "requested": len(task_ids), "matched": matched,
+            "updated": updated, "rewards": rewards,
+        })
     except Exception as exc:
         conn.rollback()
         log.error("complete_tasks_batch error: %s", exc)

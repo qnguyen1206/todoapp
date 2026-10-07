@@ -22,6 +22,9 @@ let toolsEnabled = true;
 let streamEnabled = false;
 let conversationHistory = [];
 let currentMeetingProposal = null;
+let currentWalletAddress = '';
+let currentWalletTransaction = null;
+let walletStatusPollTimer = null;
 let bulkParsedTasks = [];
 const selectedTaskIds = new Set();
 const snoozedMeetingProposals = new Set();
@@ -116,6 +119,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.tab === 'ai')       initAI();
     if (btn.dataset.tab === 'calendar') renderCalendar();
     if (btn.dataset.tab === 'weekly')   loadWeekly();
+    if (btn.dataset.tab === 'wallet')   loadWallet();
     if (btn.dataset.tab === 'settings') {
       loadSettings();
       checkHealth();
@@ -1963,6 +1967,361 @@ function refreshWeeklyTimeMarker() {
 /* ══════════════════════════════════════════════════════════════════
    SETTINGS
 ══════════════════════════════════════════════════════════════════ */
+/* Controlled testnet wallet */
+function safeHttpUrl(value) {
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function walletAmount(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return String(value || '0');
+  return amount.toLocaleString(undefined, {maximumFractionDigits: 8});
+}
+
+async function loadWallet() {
+  const status = document.getElementById('wallet-status');
+  const content = document.getElementById('wallet-content');
+  const button = document.getElementById('wallet-refresh-btn');
+  if (!status || !content) return;
+  status.className = 'wallet-status wallet-loading';
+  status.textContent = 'Creating or loading your protected wallet...';
+  content.hidden = true;
+  if (button) button.disabled = true;
+  try {
+    const data = await api('GET', '/api/wallet', undefined, 30000);
+    const wallet = data.wallet || {};
+    currentWalletAddress = wallet.address || '';
+    const sendEnabled = data.send_enabled === true;
+    document.getElementById('wallet-network').textContent = `${wallet.chain_name || 'EVM'} · Chain ${wallet.chain_id || '—'}`;
+    document.getElementById('wallet-mode').textContent = sendEnabled ? 'Testnet send enabled' : 'Receive only';
+    document.getElementById('wallet-send-card').hidden = !sendEnabled;
+    document.getElementById('wallet-address').textContent = currentWalletAddress;
+    const symbol = data.balance?.symbol || wallet.native_symbol || 'ETH';
+    document.getElementById('wallet-balance').textContent = data.balance
+      ? `${walletAmount(data.balance.formatted)} ${symbol}`
+      : `Unavailable ${symbol}`;
+
+    const explorer = document.getElementById('wallet-explorer-link');
+    const explorerUrl = safeHttpUrl(wallet.explorer_url || '');
+    if (explorerUrl) {
+      explorer.href = explorerUrl;
+      explorer.hidden = false;
+    } else {
+      explorer.removeAttribute('href');
+      explorer.hidden = true;
+    }
+    document.getElementById('wallet-qr').src = `/api/wallet/qr?t=${Date.now()}`;
+
+    const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+    const list = document.getElementById('wallet-transactions');
+    if (transactions.length) {
+      list.innerHTML = transactions.map(tx => {
+        const sent = String(tx.from || '').toLowerCase() === currentWalletAddress.toLowerCase();
+        const hash = String(tx.hash || '');
+        const shortHash = hash ? `${hash.slice(0, 8)}…${hash.slice(-6)}` : 'Transaction';
+        const txUrl = safeHttpUrl(tx.explorer_url || '');
+        const title = txUrl
+          ? `<a href="${escHtml(txUrl)}" target="_blank" rel="noopener noreferrer">${escHtml(shortHash)}</a>`
+          : escHtml(shortHash);
+        const when = tx.timestamp ? new Date(tx.timestamp).toLocaleString() : '';
+        return `<div class="wallet-transaction">
+          <div><strong>${sent ? 'Sent' : 'Received'}</strong><span>${title}</span></div>
+          <div class="wallet-transaction-value ${sent ? 'sent' : 'received'}">${sent ? '−' : '+'}${escHtml(walletAmount(tx.value))} ${escHtml(tx.symbol || symbol)}</div>
+          <time>${escHtml(when)}</time>
+        </div>`;
+      }).join('');
+    } else {
+      const message = data.history_available === false && data.history_message
+        ? data.history_message
+        : 'No transactions yet.';
+      list.innerHTML = `<div class="empty-msg">${escHtml(message)}</div>`;
+    }
+
+    content.hidden = false;
+    await loadWalletAudit();
+    await loadRewards();
+    if (data.portfolio_error) {
+      status.className = 'wallet-status wallet-warning-status';
+      status.textContent = `Address ready. ${data.portfolio_error}`;
+    } else {
+      status.className = 'wallet-status wallet-ready';
+      status.textContent = sendEnabled
+        ? 'Wallet ready. Base Sepolia testnet transfers are enabled.'
+        : 'Wallet ready. Sending is disabled by the operator.';
+    }
+  } catch (error) {
+    currentWalletAddress = '';
+    status.className = 'wallet-status wallet-error';
+    status.textContent = error?.message || 'Wallet is unavailable.';
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function walletIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function setWalletSendMessage(message, kind = '') {
+  const element = document.getElementById('wallet-send-message');
+  element.textContent = message || '';
+  element.className = `wallet-send-message ${kind ? `wallet-send-${kind}` : ''}`;
+}
+
+function renderWalletQuote(transaction) {
+  document.getElementById('wallet-quote-network').textContent = `${transaction.chain_name} · Chain ${transaction.chain_id}`;
+  document.getElementById('wallet-quote-to').textContent = transaction.to;
+  document.getElementById('wallet-quote-amount').textContent = `${walletAmount(transaction.amount_eth)} ETH`;
+  document.getElementById('wallet-quote-fee').textContent = `${walletAmount(transaction.maximum_fee_eth)} ETH`;
+  const expiry = new Date(transaction.expires_at);
+  document.getElementById('wallet-quote-expires').textContent = Number.isNaN(expiry.getTime()) ? 'Soon' : expiry.toLocaleString();
+}
+
+async function prepareWalletTransfer() {
+  const recipient = document.getElementById('wallet-send-to').value.trim();
+  const amount = document.getElementById('wallet-send-amount').value.trim();
+  const button = document.getElementById('wallet-prepare-btn');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
+    setWalletSendMessage('Enter a valid 0x recipient address.', 'error');
+    return;
+  }
+  if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+    setWalletSendMessage('Enter an amount greater than zero.', 'error');
+    return;
+  }
+  button.disabled = true;
+  setWalletSendMessage('Validating balance, recipient, nonce, and network fee...', 'working');
+  try {
+    const data = await api('POST', '/api/wallet/transactions/prepare', {
+      to: recipient,
+      amount_eth: amount,
+      idempotency_key: walletIdempotencyKey(),
+    }, 35000);
+    currentWalletTransaction = data.transaction;
+    renderWalletQuote(currentWalletTransaction);
+    document.getElementById('wallet-send-form').hidden = true;
+    document.getElementById('wallet-confirm-panel').hidden = false;
+    document.getElementById('wallet-code-section').hidden = true;
+    document.getElementById('wallet-confirm-password').value = '';
+    document.getElementById('wallet-confirm-code').value = '';
+    setWalletSendMessage('Review every field, then re-enter your password to request a confirmation code.', 'warning');
+    await loadWalletAudit();
+  } catch (error) {
+    setWalletSendMessage(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function requestWalletCode() {
+  if (!currentWalletTransaction) return;
+  const passwordInput = document.getElementById('wallet-confirm-password');
+  const password = passwordInput.value;
+  const button = document.getElementById('wallet-code-btn');
+  if (!password) {
+    setWalletSendMessage('Enter your account password.', 'error');
+    return;
+  }
+  button.disabled = true;
+  setWalletSendMessage('Verifying password and sending the code...', 'working');
+  try {
+    const data = await api(
+      'POST', `/api/wallet/transactions/${encodeURIComponent(currentWalletTransaction.id)}/request-code`,
+      {password}, 35000,
+    );
+    currentWalletTransaction = data.transaction;
+    passwordInput.value = '';
+    document.getElementById('wallet-code-section').hidden = false;
+    document.getElementById('wallet-confirm-code').focus();
+    setWalletSendMessage('Code sent. It expires in 10 minutes.', 'success');
+    await loadWalletAudit();
+  } catch (error) {
+    passwordInput.value = '';
+    setWalletSendMessage(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function confirmWalletTransfer() {
+  if (!currentWalletTransaction) return;
+  const codeInput = document.getElementById('wallet-confirm-code');
+  const code = codeInput.value.trim();
+  const button = document.getElementById('wallet-confirm-btn');
+  if (!/^\d{6}$/.test(code) && currentWalletTransaction.status !== 'signed') {
+    setWalletSendMessage('Enter the 6-digit confirmation code.', 'error');
+    return;
+  }
+  button.disabled = true;
+  setWalletSendMessage('Authorizing the exact transaction inside the TEE...', 'working');
+  try {
+    const data = await api(
+      'POST', `/api/wallet/transactions/${encodeURIComponent(currentWalletTransaction.id)}/confirm`,
+      {code}, 50000,
+    );
+    currentWalletTransaction = data.transaction;
+    codeInput.value = '';
+    setWalletSendMessage('Transaction broadcast. Waiting for confirmation...', 'success');
+    await loadWalletAudit();
+    startWalletStatusPolling(currentWalletTransaction.id);
+  } catch (error) {
+    setWalletSendMessage(error.message, 'error');
+    // A failed broadcast keeps the exact signed transaction retryable without
+    // signing a replacement or consuming another nonce.
+    if (error.message.includes('broadcast failed')) currentWalletTransaction.status = 'signed';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function cancelWalletTransfer() {
+  currentWalletTransaction = null;
+  document.getElementById('wallet-send-form').hidden = false;
+  document.getElementById('wallet-confirm-panel').hidden = true;
+  document.getElementById('wallet-code-section').hidden = true;
+  document.getElementById('wallet-confirm-password').value = '';
+  document.getElementById('wallet-confirm-code').value = '';
+  setWalletSendMessage('');
+}
+
+function walletAuditRow(transaction) {
+  const hash = transaction.transaction_hash || '';
+  const explorer = safeHttpUrl(transaction.explorer_url || '');
+  const hashLink = hash
+    ? (explorer ? `<a href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">${escHtml(hash.slice(0, 10))}…</a>` : escHtml(`${hash.slice(0, 10)}…`))
+    : '';
+  const created = transaction.created_at ? new Date(transaction.created_at).toLocaleString() : '';
+  return `<div class="wallet-transaction wallet-audit-row">
+    <div><strong>${escHtml(transaction.status)}</strong><span>To ${escHtml(transaction.to)}</span></div>
+    <div class="wallet-transaction-value">${escHtml(walletAmount(transaction.amount_eth))} ETH</div>
+    <time>${escHtml(created)}${hashLink ? ` · ${hashLink}` : ''}</time>
+  </div>`;
+}
+
+async function loadWalletAudit() {
+  const list = document.getElementById('wallet-audit');
+  if (!list) return;
+  try {
+    const data = await api('GET', '/api/wallet/transactions');
+    const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+    list.innerHTML = transactions.length
+      ? transactions.map(walletAuditRow).join('')
+      : '<div class="empty-msg">No transfer requests yet.</div>';
+  } catch (error) {
+    list.innerHTML = `<div class="empty-msg">${escHtml(error.message)}</div>`;
+  }
+}
+
+function rewardAchievementCard(achievement, badgesEnabled) {
+  const state = String(achievement.status || 'locked');
+  const earned = state !== 'locked';
+  const explorer = safeHttpUrl(achievement.explorer_url || '');
+  let action = '';
+  if ((state === 'eligible' || state === 'failed') && badgesEnabled) {
+    action = `<button class="btn btn-sm btn-primary" type="button" onclick="mintAchievement('${escHtml(achievement.code)}', this)">Mint Badge</button>`;
+  } else if (state === 'broadcast') {
+    action = explorer
+      ? `<a class="btn btn-sm" href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">View Pending Mint</a>`
+      : '<span class="help-text">Mint submitted</span>';
+  } else if (state === 'minted') {
+    action = explorer
+      ? `<a class="btn btn-sm" href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">View Badge Mint</a>`
+      : '<span class="help-text">On-chain badge minted</span>';
+  } else if (earned && !badgesEnabled) {
+    action = '<span class="help-text">Eligible for on-chain mint</span>';
+  }
+  return `<div class="reward-achievement ${earned ? 'earned' : ''} ${state === 'minted' ? 'minted' : ''}">
+    <h4>${escHtml(achievement.name)}</h4>
+    <p>${escHtml(achievement.description)}</p>
+    <span class="reward-achievement-state">${escHtml(state)} · ${escHtml(String(achievement.tasks))} tasks</span>
+    ${achievement.error_message ? `<span class="wallet-send-error">${escHtml(achievement.error_message)}</span>` : ''}
+    ${action}
+  </div>`;
+}
+
+async function loadRewards() {
+  const summary = document.getElementById('reward-summary');
+  const list = document.getElementById('reward-achievements');
+  const badgeStatus = document.getElementById('reward-badge-status');
+  if (!summary || !list) return;
+  try {
+    const data = await api('GET', '/api/rewards', undefined, 30000);
+    const stats = data.stats || {};
+    summary.textContent = `Level ${stats.level ?? 0} · ${stats.xp ?? 0} total XP · ${stats.tasks_completed ?? 0} uniquely completed tasks`;
+    badgeStatus.textContent = data.badges_enabled
+      ? 'On-chain badge minting is enabled on Base Sepolia.'
+      : 'XP and achievements are active. On-chain badge minting remains disabled until the badge contract is configured.';
+    const achievements = Array.isArray(data.achievements) ? data.achievements : [];
+    list.innerHTML = achievements.map(item => rewardAchievementCard(item, data.badges_enabled === true)).join('');
+    loadCharacter();
+  } catch (error) {
+    summary.textContent = `Rewards unavailable: ${error.message}`;
+    list.innerHTML = '';
+  }
+}
+
+async function mintAchievement(code, button) {
+  button.disabled = true;
+  button.textContent = 'Minting…';
+  try {
+    await api('POST', `/api/rewards/achievements/${encodeURIComponent(code)}/mint`, {}, 50000);
+    await loadRewards();
+  } catch (error) {
+    alert(`Could not mint badge: ${error.message}`);
+    button.disabled = false;
+    button.textContent = 'Mint Badge';
+  }
+}
+
+function startWalletStatusPolling(transactionId) {
+  if (walletStatusPollTimer) clearInterval(walletStatusPollTimer);
+  const check = async () => {
+    try {
+      const data = await api('GET', `/api/wallet/transactions/${encodeURIComponent(transactionId)}`);
+      currentWalletTransaction = data.transaction;
+      await loadWalletAudit();
+      if (['confirmed', 'failed'].includes(data.transaction.status)) {
+        clearInterval(walletStatusPollTimer);
+        walletStatusPollTimer = null;
+        setWalletSendMessage(
+          data.transaction.status === 'confirmed' ? 'Transaction confirmed on Base Sepolia.' : 'Transaction failed on-chain.',
+          data.transaction.status === 'confirmed' ? 'success' : 'error',
+        );
+        await loadWallet();
+      }
+    } catch (_) {}
+  };
+  setTimeout(check, 3000);
+  walletStatusPollTimer = setInterval(check, 10000);
+}
+
+async function copyWalletAddress() {
+  if (!currentWalletAddress) return;
+  try {
+    await navigator.clipboard.writeText(currentWalletAddress);
+  } catch (_) {
+    const input = document.createElement('textarea');
+    input.value = currentWalletAddress;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
+  }
+  const status = document.getElementById('wallet-status');
+  status.className = 'wallet-status wallet-ready';
+  status.textContent = 'Address copied.';
+}
+
 async function loadSettings() {
   const d = await api('GET', '/api/settings');
   const s = d.settings ?? {};
@@ -2026,9 +2385,10 @@ async function checkHealth() {
       task_sync: 'Task Sync',
       scheduler: 'Scheduler',
       openclaw: 'OpenClaw',
+      wallet: 'Wallet',
     };
 
-    const order = ['web_ui', 'backend', 'postgres', 'ai_inference', 'task_sync', 'scheduler', 'openclaw'];
+    const order = ['web_ui', 'backend', 'postgres', 'ai_inference', 'task_sync', 'scheduler', 'openclaw', 'wallet'];
     const cards = [];
     const overallClass = data.overall_ok ? 'ok' : 'degraded';
     const overallText = data.overall_ok ? 'All systems operational' : 'One or more services need attention';
