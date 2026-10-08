@@ -299,6 +299,10 @@ def _apply_escrow_transaction_result(cur, transaction_row, chain_status):
 
 def _ensure_reward_schema(cur):
     """Idempotently install reward tables for startup and rolling-deploy safety."""
+    # Two Gunicorn workers can reach this rolling-deploy guard together. PostgreSQL
+    # may deadlock concurrent CREATE INDEX IF NOT EXISTS calls with later reward
+    # updates, so serialize the DDL before either request touches reward rows.
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext('todoapp-reward-schema'))")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_reward_stats (
             user_id          TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -1858,6 +1862,9 @@ def get_rewards():
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _ensure_reward_schema(cur)
+            # Release the schema advisory lock before reconciliation or remote
+            # wallet status checks. The remaining work starts a new transaction.
+            conn.commit()
             # A completion may have committed while optional reward processing
             # failed. Reconcile on every read so missed XP repairs itself.
             _reconcile_completed_task_rewards(cur, g.user_id)
@@ -1943,6 +1950,7 @@ def mint_reward_achievement(achievement_code):
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _ensure_reward_schema(cur)
+            conn.commit()
             cur.execute("SELECT pg_advisory_xact_lock(hashtext('todoapp-reward-issuer'))")
             cur.execute(
                 "SELECT * FROM user_achievements WHERE user_id=%s AND achievement_code=%s FOR UPDATE",

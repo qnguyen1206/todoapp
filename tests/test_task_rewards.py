@@ -22,6 +22,7 @@ class TaskRewardContractTests(unittest.TestCase):
         self.assertIn("def _reconcile_completed_task_rewards", backend)
         self.assertIn("_reconcile_completed_task_rewards(cur, g.user_id)", backend)
         self.assertIn("cur, user_id, [task_id]", backend)
+        self.assertIn("pg_advisory_xact_lock(hashtext('todoapp-reward-schema'))", backend)
 
     def test_badge_issuer_is_narrow_and_base_sepolia_only(self):
         wallet = self.read("services/wallet/app.py")
@@ -45,6 +46,12 @@ class TaskRewardContractTests(unittest.TestCase):
         self.assertIn('id="reward-achievements"', template)
         self.assertIn("async function loadRewards()", script)
         self.assertIn("async function mintAchievement", script)
+        self.assertIn('id="claim-all-badges"', template)
+        self.assertIn("async function claimEarnedBadges", script)
+        self.assertIn("Badges are free to claim", script)
+        reward_loader = script[script.index("async function loadRewards()") : script.index("async function mintAchievement")]
+        self.assertIn("renderCharacterStats(stats)", reward_loader)
+        self.assertNotIn("loadCharacter();", reward_loader)
         self.assertIn("renderCharacterStats(result.rewards)", script)
         self.assertIn("xpBadge.textContent = `XP ${totalXp}`", script)
         self.assertIn("REWARD_BADGES_ENABLED: ${REWARD_BADGES_ENABLED:-false}", compose)

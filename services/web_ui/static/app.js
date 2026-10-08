@@ -26,6 +26,7 @@ let currentWalletAddress = '';
 let currentWalletTransaction = null;
 let currentWalletContext = 'transfer';
 let walletStatusPollTimer = null;
+let rewardClaimInProgress = false;
 let bulkParsedTasks = [];
 const selectedTaskIds = new Set();
 const snoozedMeetingProposals = new Set();
@@ -504,7 +505,12 @@ async function finishSelectedTasks() {
     selectedTaskIds.clear();
     await loadTasks();
     const rewardWarning = result.rewards?.warning || result.warning;
-    alert(`Finished ${result.updated ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.${rewardWarning ? `\n${rewardWarning}` : ''}`);
+    const unlocked = Array.isArray(result.rewards?.achievements_unlocked)
+      ? result.rewards.achievements_unlocked.length : 0;
+    const badgeNotice = unlocked
+      ? `\nYou unlocked ${unlocked === 1 ? 'a badge' : `${unlocked} badges`}! Open Wallet and select Claim my ${unlocked === 1 ? 'badge' : 'badges'}.`
+      : '';
+    alert(`Finished ${result.updated ?? taskIds.length} ${taskIds.length === 1 ? 'task' : 'tasks'}.${badgeNotice}${rewardWarning ? `\n${rewardWarning}` : ''}`);
   } catch (error) {
     alert(`Could not finish selected tasks: ${error.message}`);
   } finally {
@@ -631,6 +637,9 @@ async function finishTask(id) {
       await loadCharacter();
     }
     if (result.rewards?.warning) alert(result.rewards.warning);
+    if (Array.isArray(result.rewards?.achievements_unlocked) && result.rewards.achievements_unlocked.length) {
+      alert('Badge unlocked! Open Wallet and select Claim my badge.');
+    }
   } catch (error) {
     task.completed = false;
     renderTasks();
@@ -2390,22 +2399,30 @@ function rewardAchievementCard(achievement, badgesEnabled) {
   const explorer = safeHttpUrl(achievement.explorer_url || '');
   let action = '';
   if ((state === 'eligible' || state === 'failed') && badgesEnabled) {
-    action = `<button class="btn btn-sm btn-primary" type="button" onclick="mintAchievement('${escHtml(achievement.code)}', this)">Mint Badge</button>`;
+    action = `<button class="btn btn-sm btn-primary" type="button" onclick="mintAchievement('${escHtml(achievement.code)}', this)">Claim badge</button>`;
   } else if (state === 'broadcast') {
     action = explorer
-      ? `<a class="btn btn-sm" href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">View Pending Mint</a>`
-      : '<span class="help-text">Mint submitted</span>';
+      ? `<a class="btn btn-sm" href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">View progress</a>`
+      : '<span class="help-text">Being added to your wallet</span>';
   } else if (state === 'minted') {
     action = explorer
-      ? `<a class="btn btn-sm" href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">View Badge Mint</a>`
-      : '<span class="help-text">On-chain badge minted</span>';
+      ? `<a class="btn btn-sm" href="${escHtml(explorer)}" target="_blank" rel="noopener noreferrer">View badge</a>`
+      : '<span class="help-text">Claimed</span>';
   } else if (earned && !badgesEnabled) {
-    action = '<span class="help-text">Eligible for on-chain mint</span>';
+    action = '<span class="help-text">Earned — badge claiming is not available yet</span>';
   }
+  const stateLabel = {
+    locked: `${achievement.tasks} tasks needed`,
+    eligible: 'Ready to claim',
+    failed: 'Ready to retry',
+    signed: 'Preparing your badge',
+    broadcast: 'Adding to your wallet',
+    minted: 'Claimed',
+  }[state] || state;
   return `<div class="reward-achievement ${earned ? 'earned' : ''} ${state === 'minted' ? 'minted' : ''}">
     <h4>${escHtml(achievement.name)}</h4>
     <p>${escHtml(achievement.description)}</p>
-    <span class="reward-achievement-state">${escHtml(state)} · ${escHtml(String(achievement.tasks))} tasks</span>
+    <span class="reward-achievement-state">${escHtml(stateLabel)}</span>
     ${achievement.error_message ? `<span class="wallet-send-error">${escHtml(achievement.error_message)}</span>` : ''}
     ${action}
   </div>`;
@@ -2421,11 +2438,26 @@ async function loadRewards() {
     const stats = data.stats || {};
     summary.textContent = `Level ${stats.level ?? 0} · ${stats.xp ?? 0} total XP · ${stats.tasks_completed ?? 0} uniquely completed tasks`;
     badgeStatus.textContent = data.badges_enabled
-      ? 'On-chain badge minting is enabled on Base Sepolia.'
-      : 'XP and achievements are active. On-chain badge minting remains disabled until the badge contract is configured.';
+      ? 'Badges are free to claim. The app handles the Base Sepolia transaction for you.'
+      : 'XP and achievements are active. Badge claiming is not available yet.';
     const achievements = Array.isArray(data.achievements) ? data.achievements : [];
     list.innerHTML = achievements.map(item => rewardAchievementCard(item, data.badges_enabled === true)).join('');
-    loadCharacter();
+    const claimable = achievements.filter(item => ['eligible', 'failed'].includes(String(item.status || '')));
+    const pending = achievements.some(item => ['signed', 'broadcast'].includes(String(item.status || '')));
+    const claimButton = document.getElementById('claim-all-badges');
+    if (claimButton) {
+      claimButton.hidden = data.badges_enabled !== true || claimable.length === 0 || pending;
+      claimButton.disabled = rewardClaimInProgress;
+      claimButton.textContent = claimable.length === 1 ? 'Claim my badge' : `Claim my ${claimable.length} badges`;
+    }
+    if (pending && !rewardClaimInProgress) {
+      document.getElementById('reward-claim-message').textContent = 'Your badge is being added. This page will update when you refresh.';
+    }
+    // /api/rewards already contains the character stats. Starting loadCharacter()
+    // here would issue a second concurrent /rewards request while a badge claim
+    // begins, which can contend with the claim transaction in another worker.
+    renderCharacterStats(stats);
+    return data;
   } catch (error) {
     summary.textContent = `Rewards unavailable: ${error.message}`;
     list.innerHTML = '';
@@ -2434,14 +2466,64 @@ async function loadRewards() {
 
 async function mintAchievement(code, button) {
   button.disabled = true;
-  button.textContent = 'Minting…';
+  button.textContent = 'Claiming…';
   try {
+    document.getElementById('reward-claim-message').textContent = 'Adding your badge to your wallet…';
     await api('POST', `/api/rewards/achievements/${encodeURIComponent(code)}/mint`, {}, 50000);
+    document.getElementById('reward-claim-message').textContent = 'Badge submitted. It should appear shortly.';
     await loadRewards();
   } catch (error) {
-    alert(`Could not mint badge: ${error.message}`);
+    document.getElementById('reward-claim-message').textContent = `Could not claim the badge: ${error.message}`;
     button.disabled = false;
-    button.textContent = 'Mint Badge';
+    button.textContent = 'Claim badge';
+  }
+}
+
+function waitForRewardUpdate(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function claimEarnedBadges(button) {
+  if (rewardClaimInProgress) return;
+  rewardClaimInProgress = true;
+  const message = document.getElementById('reward-claim-message');
+  button.disabled = true;
+  try {
+    let data = await loadRewards();
+    const claimable = (data.achievements || []).filter(item => ['eligible', 'failed'].includes(String(item.status || '')));
+    let claimed = 0;
+    for (const achievement of claimable) {
+      message.textContent = `Claiming ${achievement.name} (${claimed + 1} of ${claimable.length})…`;
+      await api('POST', `/api/rewards/achievements/${encodeURIComponent(achievement.code)}/mint`, {}, 50000);
+
+      let finished = false;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await waitForRewardUpdate(3000);
+        data = await loadRewards();
+        const updated = (data.achievements || []).find(item => item.code === achievement.code);
+        if (updated?.status === 'minted') {
+          claimed += 1;
+          finished = true;
+          break;
+        }
+        if (updated?.status === 'failed') {
+          throw new Error(updated.error_message || `${achievement.name} could not be added.`);
+        }
+      }
+      if (!finished) {
+        message.textContent = 'Your badge was submitted and is still processing. You can leave this page and check again later.';
+        return;
+      }
+    }
+    message.textContent = claimed === 1
+      ? 'Your badge is now in your wallet.'
+      : `All ${claimed} badges are now in your wallet.`;
+  } catch (error) {
+    message.textContent = `Could not finish claiming: ${error.message}`;
+  } finally {
+    rewardClaimInProgress = false;
+    button.disabled = false;
+    await loadRewards();
   }
 }
 
