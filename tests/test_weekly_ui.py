@@ -15,7 +15,7 @@ class WeeklyUIContractTests(unittest.TestCase):
         self.assertIn("filter(task => !normalizeDueTime(task.due_time))", javascript)
         self.assertIn("No due time", javascript)
         self.assertIn("max-height: 76px", css)
-        self.assertIn("grid-template-rows: 54px", css)
+        self.assertIn("grid.style.gridTemplateRows = `54px repeat(${visibleSlotCount}, 24px)`", javascript)
 
     def test_calendar_and_weekly_hover_text_use_the_task_title(self):
         javascript = (ROOT / "services" / "web_ui" / "static" / "app.js").read_text(encoding="utf-8")
@@ -31,6 +31,42 @@ class WeeklyUIContractTests(unittest.TestCase):
         self.assertIn("Math.ceil(totalMinutes / 15)", javascript)
         self.assertIn("Math.min(96, start + 1)", javascript)
         self.assertNotIn("Math.min(95, hour * 4 + Math.floor(minute / 15))", javascript)
+
+    def test_regular_tasks_support_optional_start_and_end_times(self):
+        template = (ROOT / "services" / "web_ui" / "templates" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "services" / "web_ui" / "static" / "app.js").read_text(encoding="utf-8")
+        web_app = (ROOT / "services" / "web_ui" / "app.py").read_text(encoding="utf-8")
+        backend = (ROOT / "services" / "backend" / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn('id="f-end-time"', template)
+        self.assertIn("fmtTaskTimeRange(t)", javascript)
+        self.assertIn("End time must be after start time", javascript)
+        self.assertIn('"end_time": end_time', web_app)
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS end_time TEXT", backend)
+        self.assertIn("t.due_time, t.end_time", backend)
+        self.assertIn('if "end_time" in task', backend)
+        self.assertIn('else "end_time = tasks.end_time"', backend)
+        self.assertIn('end_time_supplied = "end_time" in data', web_app)
+        self.assertIn("app.js?v=20261012-unified-calendar-v1", template)
+
+    def test_calendar_combines_year_month_week_and_day_views(self):
+        template = (ROOT / "services" / "web_ui" / "templates" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "services" / "web_ui" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertNotIn('data-tab="weekly"', template)
+        self.assertNotIn('id="tab-weekly"', template)
+        for view in ("year", "month", "week", "day"):
+            self.assertIn(f'data-calendar-view="{view}"', template)
+        self.assertIn('id="calendar-start-hour"', template)
+        self.assertIn('id="calendar-end-hour"', template)
+        self.assertIn('id="calendar-date-picker"', template)
+        self.assertIn("function setCalendarView(view)", javascript)
+        self.assertIn("function jumpToCalendarDate(value)", javascript)
+        self.assertIn("async function renderYearCalendar", javascript)
+        self.assertIn("async function loadCalendarSchedule", javascript)
+        self.assertIn("localStorage.setItem('calendarStartHour'", javascript)
+        self.assertIn("Math.max(task._start, startSlot)", javascript)
+        self.assertIn("Math.min(task._end, endSlot)", javascript)
 
 
 if __name__ == "__main__":

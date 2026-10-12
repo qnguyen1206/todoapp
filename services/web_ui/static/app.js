@@ -4,6 +4,11 @@ let sortKey       = 'due_date';
 let sortAsc       = true;
 let calYear       = new Date().getFullYear();
 let calMonth      = new Date().getMonth() + 1;  // 1-based
+let calendarCursor = new Date();
+let calendarView = 'month';
+let calendarStartHour = Number(localStorage.getItem('calendarStartHour') ?? 6);
+let calendarEndHour = Number(localStorage.getItem('calendarEndHour') ?? 22);
+let calendarRenderToken = 0;
 let calendarTasksByDay = {};
 let selectedCalendarDay = null;
 let use24Hour     = true;
@@ -119,8 +124,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.tab === 'tasks')    loadTasks();
     if (btn.dataset.tab === 'daily')    loadDaily();
     if (btn.dataset.tab === 'ai')       initAI();
-    if (btn.dataset.tab === 'calendar') renderCalendar();
-    if (btn.dataset.tab === 'weekly')   loadWeekly();
+    if (btn.dataset.tab === 'calendar') renderCalendarView();
     if (btn.dataset.tab === 'wallet')   loadWallet();
     if (btn.dataset.tab === 'settings') {
       loadSettings();
@@ -195,12 +199,23 @@ function timeForTaskInput(value) {
 
 function configureTaskTimeInput() {
   const input = document.getElementById('f-time');
+  const endInput = document.getElementById('f-end-time');
   const label = document.getElementById('f-time-label');
-  if (!input || !label) return;
+  const endLabel = document.getElementById('f-end-time-label');
+  if (!input || !endInput || !label || !endLabel) return;
   const normalized = normalizeDueTime(input.value);
+  const normalizedEnd = normalizeDueTime(endInput.value);
   if (normalized !== null) input.value = timeForTaskInput(normalized);
-  label.textContent = use24Hour ? 'Due Time (24-hour HH:MM)' : 'Due Time (12-hour HH:MM AM/PM)';
+  if (normalizedEnd !== null) endInput.value = timeForTaskInput(normalizedEnd);
+  label.textContent = use24Hour ? 'Start Time (optional, 24-hour HH:MM)' : 'Start Time (optional, 12-hour HH:MM AM/PM)';
+  endLabel.textContent = use24Hour ? 'End Time (optional, 24-hour HH:MM)' : 'End Time (optional, 12-hour HH:MM AM/PM)';
   input.placeholder = use24Hour ? '09:00' : '9:00 AM';
+  endInput.placeholder = use24Hour ? '10:00' : '10:00 AM';
+}
+
+function fmtTaskTimeRange(task) {
+  const start = fmtTime(task?.due_time);
+  return task?.end_time ? `${start} – ${fmtTime(task.end_time)}` : start;
 }
 
 function isValidDueDate(value) {
@@ -430,7 +445,7 @@ function renderTasks() {
       <td class="select-cell"><input class="task-select" data-task-id="${id}" type="checkbox" aria-label="Select ${title}" ${selectedTaskIds.has(String(t.task_id)) ? 'checked' : ''} onchange="toggleTaskSelection('${id}', this.checked)"/></td>
       <td class="task-name-cell" onclick="showNotes('${id}')">${title}</td>
       <td>${escHtml(t.due_date)}</td>
-      <td>${fmtTime(t.due_time)}</td>
+      <td>${escHtml(fmtTaskTimeRange(t))}</td>
       <td>${priorityPill(t.priority)}</td>
       <td class="actions-cell">
         <button class="btn btn-sm btn-primary" onclick="finishTask('${id}')">✓ Finish</button>
@@ -536,7 +551,7 @@ async function deleteSelectedTasks() {
 }
 
 function configureBulkEditInputs() {
-  ['date', 'time', 'priority', 'notes'].forEach(field => {
+  ['date', 'time', 'end-time', 'priority', 'notes'].forEach(field => {
     document.getElementById(`bulk-edit-${field}`).disabled = !document.getElementById(`bulk-edit-${field}-enabled`).checked;
   });
 }
@@ -544,14 +559,18 @@ function configureBulkEditInputs() {
 function openBulkEditModal() {
   const selectedIds = syncTaskSelectionFromDOM();
   if (!selectedIds.length) { alert('Select at least one task first.'); return; }
-  ['date', 'time', 'priority', 'notes'].forEach(field => {
+  ['date', 'time', 'end-time', 'priority', 'notes'].forEach(field => {
     document.getElementById(`bulk-edit-${field}-enabled`).checked = false;
   });
   document.getElementById('bulk-edit-date').value = '';
   document.getElementById('bulk-edit-time').value = '';
+  document.getElementById('bulk-edit-end-time').value = '';
   document.getElementById('bulk-edit-time').placeholder = use24Hour
     ? 'HH:MM, or leave empty to remove the time'
     : 'HH:MM AM/PM, or leave empty to remove the time';
+  document.getElementById('bulk-edit-end-time').placeholder = use24Hour
+    ? 'HH:MM, or leave empty to remove the end time'
+    : 'HH:MM AM/PM, or leave empty to remove the end time';
   document.getElementById('bulk-edit-priority').value = '3';
   document.getElementById('bulk-edit-notes').value = '';
   document.getElementById('bulk-edit-summary').textContent = `Editing ${selectedIds.length} selected ${selectedIds.length === 1 ? 'task' : 'tasks'}.`;
@@ -586,6 +605,16 @@ async function saveBulkTaskEdits() {
       return;
     }
     changes.due_time = normalized;
+  }
+  if (document.getElementById('bulk-edit-end-time-enabled').checked) {
+    const value = document.getElementById('bulk-edit-end-time').value.trim();
+    const normalized = normalizeDueTime(value);
+    if (normalized === null) {
+      error.textContent = use24Hour ? 'Enter end time as HH:MM.' : 'Enter end time as HH:MM AM/PM.';
+      error.style.display = 'block';
+      return;
+    }
+    changes.end_time = normalized;
   }
   if (document.getElementById('bulk-edit-priority-enabled').checked) {
     changes.priority = document.getElementById('bulk-edit-priority').value;
@@ -754,9 +783,20 @@ function normalizeBulkTime(raw) {
   return normalizeDueTime(value);
 }
 
+function normalizeBulkTimeRange(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return {due_time: '', end_time: ''};
+  const parts = value.split(/\s*(?:-|–|—|\bto\b)\s*/i);
+  if (parts.length > 2) return null;
+  const due_time = normalizeBulkTime(parts[0]);
+  const end_time = parts.length === 2 ? normalizeBulkTime(parts[1]) : '';
+  if (due_time === null || end_time === null || (end_time && end_time <= due_time)) return null;
+  return {due_time, end_time};
+}
+
 function parseBulkTaskLine(originalLine, lineNumber, defaults) {
   let text = String(originalLine || '').replace(/^\s*(?:[-*\u2022]\s+|\d+[.)]\s+|\[[ xX]\]\s*)/, '').trim();
-  const result = {line: lineNumber, title: '', due_date: defaults.due_date, due_time: '', priority: defaults.priority, notes: 'No notes', valid: false, error: ''};
+  const result = {line: lineNumber, title: '', due_date: defaults.due_date, due_time: '', end_time: '', priority: defaults.priority, notes: 'No notes', valid: false, error: ''};
   if (!text) return {...result, error: 'Empty line'};
 
   if (text.includes('|')) {
@@ -767,8 +807,9 @@ function parseBulkTaskLine(originalLine, lineNumber, defaults) {
       if (!result.due_date) result.error = 'Invalid date';
     }
     if (fields[2]) {
-      result.due_time = normalizeBulkTime(fields[2]);
-      if (result.due_time === null) result.error = result.error || 'Invalid time';
+      const range = normalizeBulkTimeRange(fields[2]);
+      if (range) Object.assign(result, range);
+      else result.error = result.error || 'Invalid time range';
     }
     if (fields[3]) {
       const priority = Number(fields[3].replace(/^(?:p|priority\s*)/i, ''));
@@ -804,10 +845,13 @@ function parseBulkTaskLine(originalLine, lineNumber, defaults) {
       text = `${text.slice(0, dateMatch.index)} ${text.slice(dateMatch.index + dateMatch[0].length)}`.trim();
     }
 
-    const timeMatch = text.match(/\b(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)\b/i);
+    const clockPattern = '(?:\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)|(?:[01]?\\d|2[0-3]):[0-5]\\d)';
+    const rangeMatch = text.match(new RegExp(`\\b(?:from\\s+|at\\s+)?(${clockPattern})\\s*(?:-|–|—|to)\\s*(${clockPattern})\\b`, 'i'));
+    const timeMatch = rangeMatch || text.match(new RegExp(`\\b(?:at\\s+)?(${clockPattern})\\b`, 'i'));
     if (timeMatch) {
-      result.due_time = normalizeBulkTime(timeMatch[1]);
-      if (result.due_time === null) result.error = result.error || 'Invalid time';
+      const range = normalizeBulkTimeRange(rangeMatch ? `${timeMatch[1]}-${timeMatch[2]}` : timeMatch[1]);
+      if (range) Object.assign(result, range);
+      else result.error = result.error || 'Invalid time range';
       text = `${text.slice(0, timeMatch.index)} ${text.slice(timeMatch.index + timeMatch[0].length)}`.trim();
     }
     result.title = text.replace(/[,:;\u2013\u2014-]+\s*$/, '').replace(/\b(?:due|on|at)\s*$/i, '').trim();
@@ -845,7 +889,7 @@ function renderBulkTaskPreview() {
   }
   const invalidCount = tasks.filter(task => !task.valid).length;
   preview.innerHTML = `<table class="bulk-preview-table"><thead><tr><th>Line</th><th>Task</th><th>Date</th><th>Time</th><th>Priority</th><th>Check</th></tr></thead><tbody>${tasks.map(task => `
-    <tr class="${task.valid ? '' : 'invalid'}"><td>${task.line}</td><td>${escHtml(task.title || 'â€”')}</td><td>${escHtml(task.due_date || 'â€”')}</td><td>${escHtml(task.due_time ? fmtTime(task.due_time) : 'No time')}</td><td>${escHtml(task.priority)}</td><td>${task.valid ? 'Ready' : escHtml(task.error)}</td></tr>`).join('')}</tbody></table>`;
+    <tr class="${task.valid ? '' : 'invalid'}"><td>${task.line}</td><td>${escHtml(task.title || 'â€”')}</td><td>${escHtml(task.due_date || 'â€”')}</td><td>${escHtml(task.due_time ? fmtTaskTimeRange(task) : 'No time')}</td><td>${escHtml(task.priority)}</td><td>${task.valid ? 'Ready' : escHtml(task.error)}</td></tr>`).join('')}</tbody></table>`;
   error.textContent = invalidCount ? `${invalidCount} ${invalidCount === 1 ? 'line needs' : 'lines need'} attention. Nothing will be saved until every line is valid.` : '';
   error.style.display = invalidCount ? 'block' : 'none';
   button.disabled = invalidCount > 0;
@@ -878,7 +922,7 @@ async function saveBulkTasks() {
   button.disabled = true;
   button.textContent = `Adding ${tasks.length}...`;
   try {
-    const data = await api('POST', '/api/tasks/bulk', {tasks: tasks.map(({title, due_date, due_time, priority, notes}) => ({title, due_date, due_time, priority, notes}))}, 120000);
+    const data = await api('POST', '/api/tasks/bulk', {tasks: tasks.map(({title, due_date, due_time, end_time, priority, notes}) => ({title, due_date, due_time, end_time, priority, notes}))}, 120000);
     closeBulkTaskModal();
     await loadTasks();
     alert(`Added ${data.added ?? tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}.`);
@@ -898,7 +942,7 @@ document.getElementById('bulk-default-priority').addEventListener('change', rend
 function openAddTask() {
   document.getElementById('modal-title').textContent = 'Add Task';
   document.getElementById('edit-task-id').value = '';
-  ['f-title','f-date','f-time','f-notes'].forEach(id => document.getElementById(id).value = '');
+  ['f-title','f-date','f-time','f-end-time','f-notes'].forEach(id => document.getElementById(id).value = '');
   nativeTaskDatePicker.value = '';
   document.getElementById('f-date').setCustomValidity('');
   document.getElementById('f-priority').value = '3';
@@ -927,6 +971,7 @@ function openEditTask(id) {
     nativeTaskDatePicker.value = '';
   }
   document.getElementById('f-time').value         = timeForTaskInput(t.due_time || '');
+  document.getElementById('f-end-time').value     = timeForTaskInput(t.end_time || '');
   document.getElementById('f-priority').value     = t.priority || '3';
   document.getElementById('f-notes').value        = t.notes    || '';
   document.getElementById('f-reminder-email-enabled').checked = Boolean(t.reminder_email_enabled);
@@ -955,6 +1000,8 @@ async function saveTask() {
   const due_date = document.getElementById('f-date').value.trim();
   const dueTimeInput = document.getElementById('f-time').value.trim();
   const due_time = normalizeDueTime(dueTimeInput);
+  const endTimeInput = document.getElementById('f-end-time').value.trim();
+  const end_time = normalizeDueTime(endTimeInput);
   const priority = document.getElementById('f-priority').value;
   const notes    = document.getElementById('f-notes').value.trim() || 'No notes';
   const emailEnabled = document.getElementById('f-reminder-email-enabled').checked;
@@ -977,8 +1024,20 @@ async function saveTask() {
     alert(use24Hour ? 'Enter time as HH:MM (for example, 09:30 or 17:30).' : 'Enter time as HH:MM AM/PM (for example, 9:30 AM or 5:30 PM).');
     return;
   }
+  if (end_time === null) {
+    alert(use24Hour ? 'Enter end time as HH:MM (for example, 10:30 or 18:30).' : 'Enter end time as HH:MM AM/PM (for example, 10:30 AM or 6:30 PM).');
+    return;
+  }
+  if (end_time && !due_time) {
+    alert('Enter a start time before adding an end time.');
+    return;
+  }
+  if (end_time && end_time <= due_time) {
+    alert('End time must be after start time.');
+    return;
+  }
   if ((emailEnabled || smsEnabled) && !due_time) {
-    alert('A due time is required when reminders are enabled.');
+    alert('A start time is required when reminders are enabled.');
     return;
   }
   if (emailEnabled && !document.getElementById('f-reminder-email').checkValidity()) {
@@ -991,9 +1050,9 @@ async function saveTask() {
   }
 
   if (id) {
-    await api('PUT', `/api/tasks/${id}`, { title, due_date, due_time, priority, notes, reminder });
+    await api('PUT', `/api/tasks/${id}`, { title, due_date, due_time, end_time, priority, notes, reminder });
   } else {
-    await api('POST', '/api/tasks', { title, due_date, due_time, priority, notes, reminder });
+    await api('POST', '/api/tasks', { title, due_date, due_time, end_time, priority, notes, reminder });
   }
   closeModal();
   loadTasks();
@@ -1747,9 +1806,124 @@ const MONTHS = ['January','February','March','April','May','June',
                 'July','August','September','October','November','December'];
 const DAYS   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
-async function renderCalendar() {
+function localDateKey(value) {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
+
+function backendDateKey(value) {
+  return `${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}-${value.getFullYear()}`;
+}
+
+function initializeCalendarTimeRange() {
+  if (!Number.isInteger(calendarStartHour) || calendarStartHour < 0 || calendarStartHour > 23) calendarStartHour = 6;
+  if (!Number.isInteger(calendarEndHour) || calendarEndHour < 1 || calendarEndHour > 24) calendarEndHour = 22;
+  if (calendarStartHour >= calendarEndHour) {
+    calendarStartHour = 6;
+    calendarEndHour = 22;
+  }
+  const start = document.getElementById('calendar-start-hour');
+  const end = document.getElementById('calendar-end-hour');
+  if (!start || !end) return;
+  const label = hour => hour === 24 ? '12:00 AM (next day)' : fmtTime(`${String(hour).padStart(2, '0')}:00`);
+  start.innerHTML = Array.from({length: 24}, (_, hour) => `<option value="${hour}">${escHtml(label(hour))}</option>`).join('');
+  end.innerHTML = Array.from({length: 24}, (_, index) => index + 1).map(hour => `<option value="${hour}">${escHtml(label(hour))}</option>`).join('');
+  start.value = String(calendarStartHour);
+  end.value = String(calendarEndHour);
+}
+
+function updateCalendarTimeRange() {
+  const start = Number(document.getElementById('calendar-start-hour').value);
+  const end = Number(document.getElementById('calendar-end-hour').value);
+  if (start >= end) {
+    alert('The visible end hour must be after the start hour.');
+    initializeCalendarTimeRange();
+    return;
+  }
+  calendarStartHour = start;
+  calendarEndHour = end;
+  localStorage.setItem('calendarStartHour', String(start));
+  localStorage.setItem('calendarEndHour', String(end));
+  renderCalendarView(false);
+}
+
+function setCalendarView(view) {
+  if (!['year', 'month', 'week', 'day'].includes(view)) return;
+  calendarView = view;
+  selectedCalendarDay = view === 'month' ? calendarCursor.getDate() : null;
+  renderCalendarView();
+}
+
+function openCalendarDay(year, month, day) {
+  calendarCursor = new Date(year, month - 1, day);
+  calendarView = 'day';
+  renderCalendarView();
+}
+
+async function renderCalendarView(scrollToCurrentTime = true) {
+  const token = ++calendarRenderToken;
+  calYear = calendarCursor.getFullYear();
+  calMonth = calendarCursor.getMonth() + 1;
+  document.getElementById('calendar-date-picker').value = localDateKey(calendarCursor);
+  document.querySelectorAll('.calendar-view-btn').forEach(button => {
+    const active = button.dataset.calendarView === calendarView;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  document.getElementById('calendar-year-view').hidden = calendarView !== 'year';
+  document.getElementById('calendar-month-view').hidden = calendarView !== 'month';
+  document.getElementById('calendar-schedule-view').hidden = !['week', 'day'].includes(calendarView);
+  document.getElementById('calendar-time-range').hidden = !['week', 'day'].includes(calendarView);
+
+  try {
+    if (calendarView === 'year') await renderYearCalendar(token);
+    else if (calendarView === 'month') await renderCalendar(token);
+    else await loadCalendarSchedule(scrollToCurrentTime, token);
+  } catch (error) {
+    if (token !== calendarRenderToken) return;
+    alert(error.message || 'Could not load the calendar.');
+  }
+}
+
+async function renderYearCalendar(token = calendarRenderToken) {
+  document.getElementById('cal-title').textContent = String(calYear);
+  const container = document.getElementById('calendar-year-view');
+  container.innerHTML = '<div class="empty-msg">Loading year…</div>';
+  const months = await Promise.all(Array.from({length: 12}, (_, index) =>
+    api('GET', `/api/calendar/${calYear}/${index + 1}`)
+  ));
+  if (token !== calendarRenderToken || calendarView !== 'year') return;
+  const today = new Date();
+  container.innerHTML = months.map((data, monthIndex) => {
+    const month = monthIndex + 1;
+    const firstDay = new Date(calYear, monthIndex, 1);
+    const lastDay = new Date(calYear, month, 0).getDate();
+    const startDow = (firstDay.getDay() + 6) % 7;
+    const byDay = data.tasks_by_day ?? {};
+    let cells = DAYS.map(day => `<span class="year-weekday">${day.slice(0, 1)}</span>`).join('');
+    cells += Array.from({length: startDow}, () => '<span class="year-day empty"></span>').join('');
+    for (let day = 1; day <= lastDay; day++) {
+      const count = (byDay[String(day)] ?? []).length;
+      const isToday = today.getFullYear() === calYear && today.getMonth() === monthIndex && today.getDate() === day;
+      cells += `<button type="button" class="year-day${count ? ' has-tasks' : ''}${isToday ? ' today-cell' : ''}"
+        onclick="openCalendarDay(${calYear}, ${month}, ${day})" title="${count} ${count === 1 ? 'task' : 'tasks'}">
+        <span>${day}</span>${count ? `<small>${count}</small>` : ''}
+      </button>`;
+    }
+    return `<section class="year-month"><button type="button" class="year-month-title" onclick="openCalendarMonth(${calYear}, ${month})">${MONTHS[monthIndex]}</button><div class="year-month-grid">${cells}</div></section>`;
+  }).join('');
+}
+
+function openCalendarMonth(year, month) {
+  calendarCursor = new Date(year, month - 1, 1);
+  calendarView = 'month';
+  selectedCalendarDay = null;
+  renderCalendarView();
+}
+
+async function renderCalendar(token = calendarRenderToken) {
   document.getElementById('cal-title').textContent = `${MONTHS[calMonth-1]} ${calYear}`;
   const data = await api('GET', `/api/calendar/${calYear}/${calMonth}`);
+  if (token !== calendarRenderToken || calendarView !== 'month') return;
   const byDay = data.tasks_by_day ?? {};
   calendarTasksByDay = byDay;
 
@@ -1775,11 +1949,11 @@ async function renderCalendar() {
     const isToday = today.getFullYear() === calYear && today.getMonth()+1 === calMonth && today.getDate() === day;
     const tasks = byDay[String(day)] ?? [];
     const dots  = tasks.map(t => {
-      const time = t.due_time ? `${fmtTime(t.due_time)} ` : '';
+      const time = t.due_time ? `${fmtTaskTimeRange(t)} ` : '';
       const marker = t.type === 'daily' ? '&#8635; ' : '';
       return `<div class="cal-dot ${t.color||'normal'}" title="${escHtml(t.title)}">${marker}${escHtml(time + t.title)}</div>`;
     }).join('');
-    html += `<div class="cal-cell${isToday?' today-cell':''}">
+    html += `<div class="cal-cell${isToday?' today-cell':''}" onclick="openCalendarDay(${calYear}, ${calMonth}, ${day})" role="button" tabindex="0">
                <div class="cal-day">${day}</div>${dots}</div>`;
     const taskCount = tasks.length;
     const taskLabel = taskCount === 1 ? '1 task' : `${taskCount} tasks`;
@@ -1837,16 +2011,34 @@ function renderCalendarDayDetails() {
 }
 
 function calPrev() {
-  calMonth--;
-  if (calMonth < 1) { calMonth = 12; calYear--; }
+  if (calendarView === 'year') calendarCursor.setFullYear(calendarCursor.getFullYear() - 1);
+  else if (calendarView === 'month') calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() - 1, 1);
+  else if (calendarView === 'week') calendarCursor.setDate(calendarCursor.getDate() - 7);
+  else calendarCursor.setDate(calendarCursor.getDate() - 1);
   selectedCalendarDay = null;
-  renderCalendar();
+  renderCalendarView();
 }
 function calNext() {
-  calMonth++;
-  if (calMonth > 12) { calMonth = 1; calYear++; }
+  if (calendarView === 'year') calendarCursor.setFullYear(calendarCursor.getFullYear() + 1);
+  else if (calendarView === 'month') calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + 1, 1);
+  else if (calendarView === 'week') calendarCursor.setDate(calendarCursor.getDate() + 7);
+  else calendarCursor.setDate(calendarCursor.getDate() + 1);
   selectedCalendarDay = null;
-  renderCalendar();
+  renderCalendarView();
+}
+
+function calToday() {
+  calendarCursor = new Date();
+  selectedCalendarDay = null;
+  renderCalendarView();
+}
+
+function jumpToCalendarDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || '');
+  if (!match) return;
+  calendarCursor = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  selectedCalendarDay = calendarView === 'month' ? calendarCursor.getDate() : null;
+  renderCalendarView();
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1873,15 +2065,33 @@ function weeklyEndSlot(value, startSlot) {
   return slot <= startSlot ? 96 : slot;
 }
 
-async function loadWeekly(scrollToCurrentTime = true) {
+async function loadCalendarSchedule(scrollToCurrentTime = true, token = calendarRenderToken) {
   const now = new Date();
-  const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  const localDate = localDateKey(calendarCursor);
   const data = await api('GET', `/api/weekly?date=${localDate}`);
+  if (token !== calendarRenderToken || !['week', 'day'].includes(calendarView)) return;
   const week = data.week ?? {};
-  const days = data.week_days ?? [];
-  const dates = data.week_dates ?? [];
+  const allDays = data.week_days ?? [];
+  const allDates = data.week_dates ?? [];
+  const wantedDate = backendDateKey(calendarCursor);
+  const indexes = calendarView === 'day'
+    ? allDates.map((date, index) => date === wantedDate ? index : -1).filter(index => index >= 0)
+    : allDates.map((_, index) => index);
+  const days = indexes.map(index => allDays[index]);
+  const dates = indexes.map(index => allDates[index]);
   const today = now;
   const todayStr = `${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}-${today.getFullYear()}`;
+  const showsToday = dates.includes(todayStr);
+
+  if (calendarView === 'day') {
+    document.getElementById('cal-title').textContent = calendarCursor.toLocaleDateString(undefined, {weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'});
+  } else {
+    const start = new Date(calendarCursor);
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    const end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    document.getElementById('cal-title').textContent = `${start.toLocaleDateString(undefined, {month: 'short', day: 'numeric'})} – ${end.toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'})}`;
+  }
 
   const grid = document.getElementById('weekly-grid');
   const unscheduled = document.getElementById('weekly-unscheduled');
@@ -1947,6 +2157,13 @@ async function loadWeekly(scrollToCurrentTime = true) {
     unscheduled.innerHTML = '';
   }
 
+  const startSlot = calendarStartHour * 4;
+  const endSlot = calendarEndHour * 4;
+  const visibleSlotCount = endSlot - startSlot;
+  grid.classList.toggle('day-view', calendarView === 'day');
+  grid.style.gridTemplateColumns = `72px repeat(${dates.length}, minmax(${calendarView === 'day' ? '220px' : '92px'}, 1fr))`;
+  grid.style.gridTemplateRows = `54px repeat(${visibleSlotCount}, 24px)`;
+
   let html = '<div class="weekly-corner">Time</div>';
   dates.forEach((date, i) => {
     html += `<div class="weekly-day-header${date === todayStr ? ' today-col' : ''}" style="grid-column:${i + 2};grid-row:1">
@@ -1954,27 +2171,30 @@ async function loadWeekly(scrollToCurrentTime = true) {
     </div>`;
   });
 
-  for (let slot = 0; slot < 96; slot++) {
+  for (let slot = startSlot; slot < endSlot; slot++) {
     const hour = Math.floor(slot / 4);
     const minute = (slot % 4) * 15;
     const rawTime = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-    const isCurrentSlot = slot === now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
-    html += `<div class="weekly-time-label${isCurrentSlot ? ' current-time-label' : ''}" data-slot="${slot}" style="grid-column:1;grid-row:${slot + 2}">${escHtml(fmtTime(rawTime))}</div>`;
-    for (let dayIndex = 0; dayIndex < 7; dayIndex++) {
+    const isCurrentSlot = showsToday && slot === now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+    const visibleRow = slot - startSlot + 2;
+    html += `<div class="weekly-time-label${isCurrentSlot ? ' current-time-label' : ''}" data-slot="${slot}" style="grid-column:1;grid-row:${visibleRow}">${escHtml(fmtTime(rawTime))}</div>`;
+    for (let dayIndex = 0; dayIndex < dates.length; dayIndex++) {
       const isToday = dates[dayIndex] === todayStr;
-      html += `<div class="weekly-slot${isToday ? ' today-slot' : ''}${isToday && isCurrentSlot ? ' current-time-slot' : ''}${slot % 4 === 0 ? ' hour-line' : ''}" data-slot="${slot}" data-date="${dates[dayIndex]}" style="grid-column:${dayIndex + 2};grid-row:${slot + 2}"></div>`;
+      html += `<div class="weekly-slot${isToday ? ' today-slot' : ''}${isToday && isCurrentSlot ? ' current-time-slot' : ''}${slot % 4 === 0 ? ' hour-line' : ''}" data-slot="${slot}" data-date="${dates[dayIndex]}" style="grid-column:${dayIndex + 2};grid-row:${visibleRow}"></div>`;
     }
   }
 
   dates.forEach((date, dayIndex) => {
     layoutOverlaps(week[date] ?? []).forEach(task => {
-      const start = task._start;
-      const span = task._end - task._start;
+      const start = Math.max(task._start, startSlot);
+      const finish = Math.min(task._end, endSlot);
+      if (finish <= start) return;
+      const span = finish - start;
       const endLabel = task.end_time ? ` - ${fmtTime(task.end_time)}` : '';
       const marker = task.type === 'daily' ? '&#8635; ' : '';
       const laneWidth = 100 / task._laneCount;
       const laneLeft = laneWidth * task._lane;
-      html += `<div class="weekly-event ${task.color || 'normal'}" style="grid-column:${dayIndex + 2};grid-row:${start + 2} / span ${span};--event-width:${laneWidth}%;--event-left:${laneLeft}%" title="${escHtml(task.title)}">
+      html += `<div class="weekly-event ${task.color || 'normal'}" style="grid-column:${dayIndex + 2};grid-row:${start - startSlot + 2} / span ${span};--event-width:${laneWidth}%;--event-left:${laneLeft}%" title="${escHtml(task.title)}">
         <span class="weekly-event-time">${escHtml(fmtTime(task.due_time) + endLabel)}</span>
         <span>${marker}${escHtml(task.title)}</span>
       </div>`;
@@ -1990,17 +2210,14 @@ async function loadWeekly(scrollToCurrentTime = true) {
 
 function refreshWeeklyTimeMarker() {
   const grid = document.getElementById('weekly-grid');
-  if (!grid || !document.getElementById('tab-weekly').classList.contains('active')) return;
+  if (!grid || !document.getElementById('tab-calendar').classList.contains('active') || !['week', 'day'].includes(calendarView)) return;
   const now = new Date();
   const dateKey = `${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}-${now.getFullYear()}`;
   const slot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
   const currentDaySlot = grid.querySelector(`.weekly-slot[data-date="${dateKey}"][data-slot="${slot}"]`);
-  if (!currentDaySlot) {
-    loadWeekly();
-    return;
-  }
   grid.querySelectorAll('.current-time-slot').forEach(element => element.classList.remove('current-time-slot'));
   grid.querySelectorAll('.current-time-label').forEach(element => element.classList.remove('current-time-label'));
+  if (!currentDaySlot) return;
   currentDaySlot.classList.add('current-time-slot');
   grid.querySelector(`.weekly-time-label[data-slot="${slot}"]`)?.classList.add('current-time-label');
 }
@@ -2692,13 +2909,13 @@ document.addEventListener('keydown', e => {
 loadTasks();
 loadCharacter();
 loadSettings();
+initializeCalendarTimeRange();
 checkMeetingProposals();
 setInterval(checkMeetingProposals, 30000);
 setInterval(() => {
   if (document.getElementById('tab-daily').classList.contains('active')) loadDaily();
 }, 60000);
 setInterval(() => {
-  if (document.getElementById('tab-calendar').classList.contains('active')) renderCalendar();
-  if (document.getElementById('tab-weekly').classList.contains('active')) loadWeekly(false);
+  if (document.getElementById('tab-calendar').classList.contains('active')) renderCalendarView(false);
 }, 60000);
 setInterval(refreshWeeklyTimeMarker, 60000);

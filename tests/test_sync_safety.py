@@ -48,6 +48,12 @@ class SyncSafetyContractTests(unittest.TestCase):
             self.assertNotIn("/tasks/replace", source)
             self.assertIn('"DELETE"', source)
 
+    def test_pull_and_force_push_retire_only_superseded_mutations(self):
+        for name in ("pull_tasks_from_cvm", "force_push_tasks_to_cvm"):
+            source = function_source("cvm_manager.py", name)
+            self.assertIn("superseded_mutations = self._pending_mutations_snapshot()", source)
+            self.assertIn("self._acknowledge_pending_mutations(superseded_mutations)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

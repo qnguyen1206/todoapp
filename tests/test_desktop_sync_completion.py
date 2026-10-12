@@ -1,4 +1,5 @@
 import ast
+import json
 import tempfile
 import threading
 import unittest
@@ -28,9 +29,13 @@ class _ImmediateRoot:
 
 
 class _TodoStore:
-    def __init__(self):
+    def __init__(self, tasks=None):
         self.saved = None
         self.refreshed = False
+        self.tasks = list(tasks or [])
+
+    def load_tasks(self):
+        return list(self.tasks)
 
     def save_tasks(self, tasks, skip_mysql=False):
         self.saved = (tasks, skip_mysql)
@@ -53,7 +58,7 @@ class DesktopSyncCompletionTests(unittest.TestCase):
             applied = manager._apply_remote_tasks([
                 {
                     "id": "todo:active", "title": "Keep me", "due_date": "09-14-2026",
-                    "due_time": "10:00", "priority": 2, "notes": "active",
+                    "due_time": "10:00", "end_time": "11:30", "priority": 2, "notes": "active",
                     "completed": False,
                 },
                 {
@@ -65,7 +70,7 @@ class DesktopSyncCompletionTests(unittest.TestCase):
 
             self.assertEqual(applied, 1)
             self.assertEqual(store.saved, ([
-                ("Keep me", "09-14-2026", "10:00", "2", "active")
+            ("Keep me", "09-14-2026", "10:00", "2", "active", "11:30")
             ], True))
             self.assertTrue(store.refreshed)
 
@@ -113,6 +118,38 @@ class DesktopSyncCompletionTests(unittest.TestCase):
                 manager._pending_mutations_snapshot()["completed"],
                 {"web-generated-uuid"},
             )
+
+    def test_time_range_survives_desktop_payload_and_remote_apply(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task = ("Pairing", "09-16-2026", "13:00", "2", "Sync review", "14:30")
+            source = _TodoStore([task])
+            destination = _TodoStore()
+            manager = CVMManager.__new__(CVMManager)
+            manager.parent_app = SimpleNamespace(root=_ImmediateRoot(), todo_list_manager=source)
+            manager._task_id_map_path = lambda: Path(temp_dir) / "task_ids.json"
+            manager._daily_file_path = lambda: str(Path(temp_dir) / "daily.txt")
+
+            payload = manager._local_todo_tasks_as_dicts()
+            self.assertEqual(payload[0]["due_time"], "13:00")
+            self.assertEqual(payload[0]["end_time"], "14:30")
+
+            manager.parent_app.todo_list_manager = destination
+            manager._apply_remote_tasks(payload)
+            self.assertEqual(destination.saved, ([task], True))
+
+    def test_pre_end_time_id_map_still_resolves_web_task(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task = ("Legacy mapping", "09-17-2026", "08:00", "3", "", "")
+            manager = CVMManager.__new__(CVMManager)
+            map_path = Path(temp_dir) / "task_ids.json"
+            manager._task_id_map_path = lambda: map_path
+            legacy_key = manager._legacy_todo_identity_key(task)
+            map_path.write_text(
+                json.dumps({legacy_key: ["web-legacy-id"]}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(manager._todo_task_ids(task), ["web-legacy-id"])
 
     def test_desktop_finish_and_sync_are_wired_to_completion_mutations(self):
         finish_source = function_source("todo_list_manager.py", "remove_task")

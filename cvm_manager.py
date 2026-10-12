@@ -659,15 +659,28 @@ class CVMManager:
         title = task[0] if len(task) > 0 else ""
         due_date = task[1] if len(task) > 1 else ""
         due_time = task[2] if len(task) > 2 else ""
+        end_time = task[5] if len(task) > 5 else ""
+        return json.dumps([str(title), str(due_date), str(due_time), str(end_time)], separators=(",", ":"))
+
+    def _legacy_todo_identity_key(self, task):
+        """Identity used by desktop releases before task end times existed."""
+        title = task[0] if len(task) > 0 else ""
+        due_date = task[1] if len(task) > 1 else ""
+        due_time = task[2] if len(task) > 2 else ""
         return json.dumps([str(title), str(due_date), str(due_time)], separators=(",", ":"))
 
     def _generated_todo_task_id(self, task):
         title = task[0] if len(task) > 0 else ""
         due_date = task[1] if len(task) > 1 else ""
         due_time = task[2] if len(task) > 2 else ""
-        # Keep the legacy ID formula so existing desktop records do not fork.
+        end_time = task[5] if len(task) > 5 else ""
+        # Preserve legacy IDs for legacy tasks, while distinguishing ranges
+        # that share the same title, date, and start time.
+        identity = f"{title}|{due_date}|{due_time}"
+        if end_time:
+            identity += f"|{end_time}"
         return "todo:" + hashlib.md5(
-            f"{title}|{due_date}|{due_time}".encode()
+            identity.encode()
         ).hexdigest()[:20]
 
     def _account_storage_suffix(self):
@@ -700,7 +713,10 @@ class CVMManager:
 
     def _todo_task_ids(self, task):
         """Return every server ID known for a local tuple (including old duplicates)."""
-        known = self._load_task_id_map().get(self._todo_identity_key(task), [])
+        task_id_map = self._load_task_id_map()
+        known = task_id_map.get(self._todo_identity_key(task), [])
+        if not known:
+            known = task_id_map.get(self._legacy_todo_identity_key(task), [])
         return known or [self._generated_todo_task_id(task)]
 
     def _todo_task_id(self, task):
@@ -785,7 +801,7 @@ class CVMManager:
         mgr = getattr(self.parent_app, 'todo_list_manager', None)
         if not mgr:
             return []
-        tasks = mgr.load_tasks()   # list of (title, due_date, due_time, priority, notes)
+        tasks = mgr.load_tasks()   # list of (title, due_date, start_time, priority, notes, end_time)
         result = []
         for t in tasks:
             title    = t[0] if len(t) > 0 else ""
@@ -793,6 +809,7 @@ class CVMManager:
             due_time = t[2] if len(t) > 2 else ""
             priority = t[3] if len(t) > 3 else "1"
             notes    = t[4] if len(t) > 4 else ""
+            end_time = t[5] if len(t) > 5 else ""
             # Include due_time to avoid collisions between same-day tasks.
             task_id = self._todo_task_id(t)
             result.append({
@@ -800,6 +817,7 @@ class CVMManager:
                 "title":    title,
                 "due_date": due_date,
                 "due_time": due_time,
+                "end_time": end_time,
                 "priority": priority,
                 "notes":    notes,
                 "completed": False,
@@ -881,6 +899,7 @@ class CVMManager:
             str(task.get("title", "")).strip(),
             str(task.get("due_date", "")).strip(),
             str(task.get("due_time", "")).strip(),
+            str(task.get("end_time", "")).strip(),
         ])
 
     def _decode_daily_notes(self, notes):
@@ -907,7 +926,8 @@ class CVMManager:
             if isinstance(notes, str) and notes.startswith(self._DAILY_NOTES_PREFIX):
                 continue
             task_tuple = (
-                task.get("title", ""), task.get("due_date", ""), task.get("due_time", "")
+                task.get("title", ""), task.get("due_date", ""), task.get("due_time", ""),
+                "", "", task.get("end_time", "")
             )
             task_id = str(task.get("id", "")).strip()
             if task_id:
@@ -944,6 +964,7 @@ class CVMManager:
                 t.get("due_time", ""),
                 str(t.get("priority", "1")),
                 t.get("notes", "No notes"),
+                t.get("end_time", ""),
             ))
 
         # Persist main tasks
@@ -1077,6 +1098,7 @@ class CVMManager:
                 return
 
         user_id = self._get_user_id()
+        superseded_mutations = self._pending_mutations_snapshot()
 
         def do_replace():
             authenticated, auth_message = self._prepare_backend_session()
@@ -1090,6 +1112,7 @@ class CVMManager:
                 return
             success, msg = self.backend_client.force_replace_tasks(user_id, tasks)
             if success:
+                self._acknowledge_pending_mutations(superseded_mutations)
                 self._approve_pending_devices_best_effort(user_id)
             def finish():
                 if success:
@@ -1181,6 +1204,7 @@ class CVMManager:
             return
 
         user_id = self._get_user_id()
+        superseded_mutations = self._pending_mutations_snapshot()
 
         def do_pull():
             authenticated, auth_message = self._prepare_backend_session()
@@ -1193,6 +1217,8 @@ class CVMManager:
                 )
                 return
             success, data = self.backend_client.retrieve_tasks(user_id)
+            if success:
+                self._acknowledge_pending_mutations(superseded_mutations)
             def finish():
                 if success:
                     count = self._apply_remote_tasks(data)

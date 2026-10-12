@@ -926,6 +926,7 @@ def init_db():
                     title       TEXT        NOT NULL,
                     due_date    TEXT,
                     due_time    TEXT,
+                    end_time    TEXT,
                     priority    INTEGER     DEFAULT 1,
                     notes       TEXT        DEFAULT '',
                     completed   BOOLEAN     DEFAULT FALSE,
@@ -933,6 +934,7 @@ def init_db():
                     UNIQUE (user_id, task_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id);
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS end_time TEXT;
 
                 -- A workspace row establishes trust-on-first-use for a user ID.
                 -- The server never stores a private key or plaintext workspace key.
@@ -2403,6 +2405,19 @@ def _validate_task_batch(tasks):
         if task_id in seen:
             return f"duplicate task id in request: {task_id}"
         seen.add(task_id)
+        due_time = str(task.get("due_time") or "").strip()
+        end_time = str(task.get("end_time") or "").strip()
+        try:
+            if due_time:
+                datetime.strptime(due_time, "%H:%M")
+            if end_time:
+                datetime.strptime(end_time, "%H:%M")
+        except ValueError:
+            return f"task at index {index} has an invalid start or end time"
+        if end_time and not due_time:
+            return f"task at index {index} needs a start time before its end time"
+        if end_time and end_time <= due_time:
+            return f"task at index {index} must end after it starts"
     return None
 
 
@@ -2432,18 +2447,26 @@ def store_tasks():
             for task in tasks:
                 task_id = str(task.get("id", ""))
                 completed = bool(task.get("completed", False))
+                # Older clients do not know about end_time. Missing must mean
+                # "leave it unchanged"; an explicit empty string still clears it.
+                end_time_assignment = (
+                    "end_time = EXCLUDED.end_time"
+                    if "end_time" in task
+                    else "end_time = tasks.end_time"
+                )
                 conflict_clause = (
                     "ON CONFLICT (user_id, task_id) DO NOTHING"
                     if preserve_remote else
-                    """ON CONFLICT (user_id, task_id) DO UPDATE SET
+                    f"""ON CONFLICT (user_id, task_id) DO UPDATE SET
                         title = EXCLUDED.title, due_date = EXCLUDED.due_date,
-                        due_time = EXCLUDED.due_time, priority = EXCLUDED.priority,
+                        due_time = EXCLUDED.due_time, {end_time_assignment},
+                        priority = EXCLUDED.priority,
                         notes = EXCLUDED.notes, completed = EXCLUDED.completed,
                         updated_at = NOW()"""
                 )
                 cur.execute(f"""
-                    INSERT INTO tasks (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    INSERT INTO tasks (user_id, task_id, title, due_date, due_time, end_time, priority, notes, completed, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     {conflict_clause}
                 """, (
                     user_id,
@@ -2451,6 +2474,7 @@ def store_tasks():
                     task.get("title", ""),
                     task.get("due_date"),
                     task.get("due_time"),
+                    task.get("end_time"),
                     int(task.get("priority", 1)),
                     task.get("notes", ""),
                     completed,
@@ -2486,7 +2510,7 @@ def retrieve_tasks():
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT t.task_id, t.title, t.due_date, t.due_time, t.priority, t.notes,
+                SELECT t.task_id, t.title, t.due_date, t.due_time, t.end_time, t.priority, t.notes,
                        t.completed, t.updated_at,
                        COALESCE(r.email_enabled, FALSE) AS reminder_email_enabled,
                        COALESCE(r.reminder_email, '') AS reminder_email,
@@ -2572,8 +2596,8 @@ def sync_tasks():
             # Import missing local tasks; the existing remote version wins collisions.
             for task in local_tasks:
                 cur.execute("""
-                    INSERT INTO tasks (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    INSERT INTO tasks (user_id, task_id, title, due_date, due_time, end_time, priority, notes, completed, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (user_id, task_id) DO NOTHING
                 """, (
                     user_id,
@@ -2581,6 +2605,7 @@ def sync_tasks():
                     task.get("title", ""),
                     task.get("due_date"),
                     task.get("due_time"),
+                    task.get("end_time"),
                     int(task.get("priority", 1)),
                     task.get("notes", ""),
                     bool(task.get("completed", False)),
@@ -2600,7 +2625,7 @@ def sync_tasks():
             rewards = _record_task_completion_rewards(cur, user_id, completed_reward_ids)
             # Return the full merged list
             cur.execute("""
-                SELECT task_id AS id, title, due_date, due_time, priority, notes, completed, updated_at
+                SELECT task_id AS id, title, due_date, due_time, end_time, priority, notes, completed, updated_at
                 FROM tasks WHERE user_id = %s ORDER BY due_date, priority
             """, (user_id,))
             rows = cur.fetchall()
@@ -2937,14 +2962,15 @@ def replace_tasks():
             for task in tasks:
                 cur.execute("""
                     INSERT INTO tasks
-                        (user_id, task_id, title, due_date, due_time, priority, notes, completed, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        (user_id, task_id, title, due_date, due_time, end_time, priority, notes, completed, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 """, (
                     user_id,
                     str(task.get("id", "")),
                     task.get("title", ""),
                     task.get("due_date"),
                     task.get("due_time"),
+                    task.get("end_time"),
                     int(task.get("priority", 1)),
                     task.get("notes", ""),
                     bool(task.get("completed", False)),

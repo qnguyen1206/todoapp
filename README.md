@@ -124,14 +124,21 @@ If you have Ollama:
 
 **CREATING A RELEASE:**
 
-The GitHub Actions workflow builds four self-contained packages on native runners:
-Windows x64, macOS Intel, macOS Apple Silicon, and Linux x64. Push a version tag to
-build the packages and attach them to a GitHub Release, for example:
+The GitHub Actions workflow tests the repository, builds four self-contained packages
+on native runners (Windows x64, macOS Intel, macOS Apple Silicon, and Linux x64),
+creates SHA-256 checksums, and attaches everything to a GitHub Release. The tag is
+also written into the packaged `version.txt`, so you do not need to edit that file
+before releasing.
+
+Create and push a semantic version tag:
 
 ```bash
-git tag v1.8.0
-git push origin v1.8.0
+git tag -a v1.9.0 -m "Release v1.9.0"
+git push origin v1.9.0
 ```
+
+Stable tags use `vMAJOR.MINOR.PATCH`. A suffix such as `v1.9.0-beta.1` creates a
+GitHub pre-release. You can monitor progress under the repository's **Actions** tab.
 
 ---
 

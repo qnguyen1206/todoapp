@@ -18,7 +18,8 @@ class BulkTaskEntryTests(unittest.TestCase):
         self.assertIn("function parseBulkTaskLine", javascript)
         self.assertIn("function renderBulkTaskPreview", javascript)
         self.assertIn("today|tomorrow", javascript)
-        self.assertIn("Task | date | time | priority | notes", template)
+        self.assertIn("Task | date | start-end | priority | notes", template)
+        self.assertIn("normalizeBulkTimeRange", javascript)
 
     def test_bulk_save_uses_one_atomic_backend_store(self):
         source = WEB_APP.read_text(encoding="utf-8")
@@ -83,7 +84,7 @@ class BulkTaskActionTests(unittest.TestCase):
         )
         function_source = ast.get_source_segment(source, function)
 
-        self.assertIn('{"due_date", "due_time", "priority", "notes"}', function_source)
+        self.assertIn('{"due_date", "due_time", "end_time", "priority", "notes"}', function_source)
         self.assertIn("Some selected tasks no longer exist", function_source)
         self.assertEqual(function_source.count('"/tasks/store"'), 1)
         self.assertIn("_encrypt_tasks(edited, user_id)", function_source)
@@ -92,7 +93,7 @@ class BulkTaskActionTests(unittest.TestCase):
         template = (ROOT / "services" / "web_ui" / "templates" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "services" / "web_ui" / "static" / "app.js").read_text(encoding="utf-8")
 
-        for field in ("date", "time", "priority", "notes"):
+        for field in ("date", "time", "end-time", "priority", "notes"):
             self.assertIn(f'id="bulk-edit-{field}-enabled"', template)
         self.assertIn("Check at least one field to change", javascript)
         self.assertIn("'/api/tasks/bulk/edit'", javascript)

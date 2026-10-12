@@ -110,7 +110,8 @@ BUILTIN_TOOLS = [
                 "properties": {
                     "title": {"type": "string"},
                     "due_date": {"type": "string", "description": "Due date in MM-DD-YYYY format"},
-                    "due_time": {"type": "string", "description": "Optional time such as 03:30 PM"},
+                    "due_time": {"type": "string", "description": "Optional start time such as 03:30 PM"},
+                    "end_time": {"type": "string", "description": "Optional end time after the task start time, such as 05:00 PM"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "notes": {"type": "string", "description": "Optional task notes supplied by the user"},
                     "reminder_email_enabled": {"type": "boolean"},
@@ -133,6 +134,7 @@ BUILTIN_TOOLS = [
                 "properties": {
                     "task_id": {"type": "string"}, "title": {"type": "string"},
                     "due_date": {"type": "string"}, "due_time": {"type": "string"},
+                    "end_time": {"type": "string"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "notes": {"type": "string", "description": "Replacement task notes"},
                     "reminder_email_enabled": {"type": "boolean"},
@@ -838,7 +840,8 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             summary = [{
                 "task_id": str(t.get("task_id") or t.get("id") or ""),
                 "title": t.get("title"), "due_date": t.get("due_date"),
-                "due_time": t.get("due_time"), "priority": t.get("priority"),
+                "due_time": t.get("due_time"), "end_time": t.get("end_time"),
+                "priority": t.get("priority"),
                 "notes": t.get("notes", ""), "completed": t.get("completed", False),
                 "reminder": {
                     "email_enabled": bool(t.get("reminder_email_enabled", False)),
@@ -863,11 +866,14 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             datetime.strptime(due_date, "%m-%d-%Y")
             priority = max(1, min(5, int(arguments.get("priority", 1))))
             reminder = reminder_changes_from_tool()
-            if reminder is not None and (reminder.get("email_enabled") or reminder.get("sms_enabled")) and not arguments.get("due_time"):
-                raise ValueError("A due_time is required when reminders are enabled")
             task_id = uuid.uuid4().hex[:12]
+            due_time, end_time = _normalize_task_time_range(
+                arguments.get("due_time", ""), arguments.get("end_time", "")
+            )
+            if reminder is not None and (reminder.get("email_enabled") or reminder.get("sms_enabled")) and not due_time:
+                raise ValueError("A start time is required when reminders are enabled")
             task = {"id": task_id, "title": title, "due_date": due_date,
-                    "due_time": str(arguments.get("due_time", "")), "priority": str(priority),
+                    "due_time": due_time, "end_time": end_time, "priority": str(priority),
                     "notes": str(arguments.get("notes", "No notes")), "completed": False}
             response = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id)})
             if response.status_code != 200:
@@ -911,9 +917,12 @@ def _execute_tool_call(tool_call, local_date=None, local_day=None, local_timezon
             if name == "complete_task":
                 updated["completed"] = True
             else:
-                for field in ("title", "due_date", "due_time", "notes"):
+                for field in ("title", "due_date", "due_time", "end_time", "notes"):
                     if field in arguments:
                         updated[field] = str(arguments[field])
+                updated["due_time"], updated["end_time"] = _normalize_task_time_range(
+                    updated.get("due_time", ""), updated.get("end_time", "")
+                )
                 if "priority" in arguments:
                     updated["priority"] = str(max(1, min(5, int(arguments["priority"]))))
                 if "due_date" in arguments:
@@ -1182,13 +1191,41 @@ def get_tasks():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 503
 
+def _normalize_task_clock(value):
+    """Return a task clock value as HH:MM, accepting the UI's 12/24-hour forms."""
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    for pattern in ("%H:%M", "%H:%M:%S", "%I:%M %p"):
+        try:
+            return datetime.strptime(raw, pattern).strftime("%H:%M")
+        except ValueError:
+            continue
+    raise ValueError("Enter a valid time")
+
+
+def _normalize_task_time_range(due_time, end_time):
+    start = _normalize_task_clock(due_time)
+    end = _normalize_task_clock(end_time)
+    if end and not start:
+        raise ValueError("Enter a start time before the end time")
+    if end and end <= start:
+        raise ValueError("End time must be after start time")
+    return start, end
+
+
 @app.route("/api/tasks", methods=["POST"])
 @login_required
 def add_task():
     data = request.get_json(silent=True) or {}
     title    = data.get("title", "").strip()
     due_date = data.get("due_date", "")
-    due_time = data.get("due_time", "")
+    try:
+        due_time, end_time = _normalize_task_time_range(
+            data.get("due_time", ""), data.get("end_time", "")
+        )
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
     priority = str(data.get("priority", "1"))
     notes    = data.get("notes", "No notes")
 
@@ -1196,9 +1233,12 @@ def add_task():
         return jsonify({"status": "error", "message": "title and due_date required"}), 400
 
     user_id = current_user_id()
-    task_id = hashlib.md5(f"{title}|{due_date}".encode()).hexdigest()[:12]
+    # A user may schedule the same named task more than once on the same day
+    # with different time ranges, so identity must not be derived from title/date.
+    task_id = uuid.uuid4().hex[:12]
     task = {"id": task_id, "title": title, "due_date": due_date,
-            "due_time": due_time, "priority": priority, "notes": notes, "completed": False}
+            "due_time": due_time, "end_time": end_time,
+            "priority": priority, "notes": notes, "completed": False}
     try:
         r = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
@@ -1228,14 +1268,14 @@ def add_tasks_bulk():
         title = str(item.get("title") or "").strip()
         due_date = str(item.get("due_date") or "").strip()
         due_time = str(item.get("due_time") or "").strip()
+        end_time = str(item.get("end_time") or "").strip()
         notes = str(item.get("notes") or "No notes").strip() or "No notes"
         try:
             priority = int(item.get("priority", 3))
             if priority < 1 or priority > 5:
                 raise ValueError("priority out of range")
             datetime.strptime(due_date, "%m-%d-%Y")
-            if due_time:
-                datetime.strptime(due_time, "%H:%M")
+            due_time, end_time = _normalize_task_time_range(due_time, end_time)
         except (TypeError, ValueError):
             return jsonify({"status": "error", "message":
                 f"Task {index} has an invalid date, time, or priority"}), 400
@@ -1243,7 +1283,8 @@ def add_tasks_bulk():
             return jsonify({"status": "error", "message": f"Task {index} needs a title"}), 400
         tasks.append({
             "id": uuid.uuid4().hex, "title": title, "due_date": due_date,
-            "due_time": due_time, "priority": str(priority), "notes": notes, "completed": False,
+            "due_time": due_time, "end_time": end_time,
+            "priority": str(priority), "notes": notes, "completed": False,
         })
 
     try:
@@ -1313,7 +1354,7 @@ def edit_tasks_bulk():
         return jsonify({"status": "error", "message": validation_error}), 400
     if not isinstance(changes, dict) or not changes:
         return jsonify({"status": "error", "message": "Choose at least one field to edit"}), 400
-    if set(changes) - {"due_date", "due_time", "priority", "notes"}:
+    if set(changes) - {"due_date", "due_time", "end_time", "priority", "notes"}:
         return jsonify({"status": "error", "message": "Unsupported bulk-edit field"}), 400
     try:
         normalized_changes = dict(changes)
@@ -1321,9 +1362,9 @@ def edit_tasks_bulk():
             datetime.strptime(str(normalized_changes["due_date"]), "%m-%d-%Y")
             normalized_changes["due_date"] = str(normalized_changes["due_date"])
         if "due_time" in normalized_changes:
-            normalized_changes["due_time"] = str(normalized_changes["due_time"] or "")
-            if normalized_changes["due_time"]:
-                datetime.strptime(normalized_changes["due_time"], "%H:%M")
+            normalized_changes["due_time"] = _normalize_task_clock(normalized_changes["due_time"])
+        if "end_time" in normalized_changes:
+            normalized_changes["end_time"] = _normalize_task_clock(normalized_changes["end_time"])
         if "priority" in normalized_changes:
             priority = int(normalized_changes["priority"])
             if priority < 1 or priority > 5:
@@ -1349,9 +1390,13 @@ def edit_tasks_bulk():
         for task_id in task_ids:
             task = dict(regular_by_id[task_id])
             task.update(normalized_changes)
+            task["due_time"], task["end_time"] = _normalize_task_time_range(
+                task.get("due_time", ""), task.get("end_time", "")
+            )
             edited.append({
                 "id": task_id, "title": task.get("title", ""), "due_date": task.get("due_date", ""),
-                "due_time": task.get("due_time", ""), "priority": str(task.get("priority", "3")),
+                "due_time": task.get("due_time", ""), "end_time": task.get("end_time", ""),
+                "priority": str(task.get("priority", "3")),
                 "notes": task.get("notes", "No notes"), "completed": bool(task.get("completed", False)),
             })
         store_response = _backend("POST", "/tasks/store", json={
@@ -1371,15 +1416,24 @@ def edit_tasks_bulk():
 def edit_task(task_id):
     data = request.get_json(silent=True) or {}
     user_id = current_user_id()
+    end_time_supplied = "end_time" in data
+    try:
+        due_time, end_time = _normalize_task_time_range(
+            data.get("due_time", ""), data.get("end_time", "") if end_time_supplied else ""
+        )
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
     task = {
         "id":       task_id,
         "title":    data.get("title", ""),
         "due_date": data.get("due_date", ""),
-        "due_time": data.get("due_time", ""),
+        "due_time": due_time,
         "priority": str(data.get("priority", "1")),
         "notes":    data.get("notes", "No notes"),
         "completed": data.get("completed", False),
     }
+    if end_time_supplied:
+        task["end_time"] = end_time
     try:
         r = _backend("POST", "/tasks/store", json={"tasks": _encrypt_tasks([task], user_id),
                                                     "timestamp": datetime.now(timezone.utc).isoformat()})
@@ -1891,7 +1945,7 @@ def ai_chat_tools():
             "mutation that already returned success, and never claim a change unless its tool returned success. "
             "Task notes belong in the notes field. Reminder tool arguments are flat fields prefixed with reminder_; "
             "phone reminders are sent by SMS and numbers must use international +country-code format. "
-            "Ask for any missing recipient address/number, due time, or reminder lead time instead of inventing it. "
+            "Ask for any missing recipient address/number, start time, or reminder lead time instead of inventing it. "
             f"The user's local date is {local_date}, weekday is {local_day}, and timezone is {local_timezone}."
         )},
     ]
@@ -2169,6 +2223,7 @@ def calendar_data(year, month):
                 by_date.setdefault(key, []).append({
                     "title": t.get("title"), "priority": t.get("priority"),
                     "due_time": t.get("due_time", ""),
+                    "end_time": t.get("end_time", ""),
                     "color": _task_color(d), "type": "todo"
                 })
         except Exception:
@@ -2223,7 +2278,8 @@ def weekly_data():
         if d in week_dates:
             week_dates[d].append({
                 "title": t.get("title"), "priority": t.get("priority"),
-                "due_time": t.get("due_time", ""), "color": _task_color(d),
+                "due_time": t.get("due_time", ""), "end_time": t.get("end_time", ""),
+                "color": _task_color(d),
                 "type": "todo"
             })
     for day_date in week_days:

@@ -52,15 +52,6 @@ except ImportError as e:
     CALENDAR_VIEW_AVAILABLE = False
     CalendarView = None
 
-# Import weekly schedule view
-try:
-    from weekly_schedule_view import WeeklyScheduleView
-    WEEKLY_SCHEDULE_AVAILABLE = True
-except ImportError as e:
-    print(f"Weekly Schedule View not available: {e}")
-    WEEKLY_SCHEDULE_AVAILABLE = False
-    WeeklyScheduleView = None
-
 # Import updater system
 try:
     from modular_updater import ModularUpdater
@@ -408,7 +399,7 @@ The app will continue to work normally for task management without AI features."
         self.daily_panel_frame = tk.LabelFrame(self.task_container, text="Daily To Do List",
                                                font=("Helvetica", 10, "bold"), bg="#f0f0f0")
         
-        # Create notebook for daily task views (List View / Schedule View)
+        # Keep the Daily Tasks list here; all schedule modes live in Calendar View.
         self.daily_notebook = ttk.Notebook(self.daily_panel_frame)
         self.daily_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -419,21 +410,6 @@ The app will continue to work normally for task management without AI features."
         # Initialize Daily Todo Manager
         self.daily_todo_manager = DailyToDoManager(self, self.daily_todo_frame)
         
-        # Tab 2: Weekly Schedule View
-        self.daily_schedule_frame = tk.Frame(self.daily_notebook, bg="#f0f0f0")
-        self.daily_notebook.add(self.daily_schedule_frame, text="📅 Schedule View")
-        
-        # Initialize Weekly Schedule View
-        if WEEKLY_SCHEDULE_AVAILABLE and WeeklyScheduleView:
-            self.weekly_schedule_view = WeeklyScheduleView(self, self.daily_schedule_frame, self.daily_todo_manager)
-        else:
-            self.weekly_schedule_view = None
-            ttk.Label(self.daily_schedule_frame, text="Schedule View not available",
-                     font=('Helvetica', 12)).pack(pady=50)
-        
-        # Bind tab change event to refresh schedule view when switching to it
-        self.daily_notebook.bind('<<NotebookTabChanged>>', self.on_daily_tab_changed)
-
         # ============ MAIN TO DO PANEL (initially visible) ============
         # Create a LabelFrame container for the Todo List (matching Daily Todo List style)
         self.todo_panel_frame = tk.LabelFrame(self.task_container, text="To Do List",
@@ -486,12 +462,6 @@ The app will continue to work normally for task management without AI features."
         if selected_tab == 1 and self.calendar_view:  # Calendar View tab
             self.calendar_view.refresh()
 
-    def on_daily_tab_changed(self, event):
-        """Handle tab change between Daily Task List and Schedule View"""
-        selected_tab = self.daily_notebook.index(self.daily_notebook.select())
-        if selected_tab == 1 and self.weekly_schedule_view:  # Schedule View tab
-            self.weekly_schedule_view.refresh()
-
     def toggle_task_view(self):
         """Toggle between Daily Tasks view and main Todo Tasks view"""
         if self.current_task_view.get() == "todo":
@@ -500,9 +470,6 @@ The app will continue to work normally for task management without AI features."
             self.daily_panel_frame.pack(fill=tk.BOTH, expand=True)
             self.current_task_view.set("daily")
             self.task_view_toggle_btn.config(text="📋 Switch to Todo Tasks")
-            # Refresh schedule view if it's the active tab
-            if self.daily_notebook.index(self.daily_notebook.select()) == 1 and self.weekly_schedule_view:
-                self.weekly_schedule_view.refresh()
         else:
             # Switch to main Todo Tasks view
             self.daily_panel_frame.pack_forget()
@@ -586,10 +553,10 @@ The app will continue to work normally for task management without AI features."
         except ValueError:
             return None
 
-    def add_task(self, task, date, due_time="", priority=5, notes=""):
+    def add_task(self, task, date, due_time="", priority=5, notes="", end_time=""):
         """Add a task using the todo list manager"""
         if hasattr(self, 'todo_list_manager'):
-            self.todo_list_manager.add_task(task, date, due_time, priority, notes)
+            self.todo_list_manager.add_task(task, date, due_time, priority, notes, end_time=end_time)
 
     def load_tasks(self):
         """Load tasks using the todo list manager"""
@@ -1349,7 +1316,7 @@ The app will continue to work normally for task management without AI features."
             "• Task creation and management",
             "• AI assistant (Ollama, ChatGPT, Claude, Gemini)",
             "• LAN/MySQL sharing capabilities",
-            "• Weekly schedule view",
+            "• Unified year, month, week, and day calendar",
             "• Level progression system",
             "• Automatic updates"
         ]

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>TODO App</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📋</text></svg>"/>
-  <link rel="stylesheet" href="/static/style.css?v=20261007-wallet-v3" />
+  <link rel="stylesheet" href="/static/style.css?v=20261012-unified-calendar-v1" />
 </head>
 <body>
   <!-- ── Header ─────────────────────────────────────────────────── -->
@@ -28,7 +28,6 @@
     <button class="tab" data-tab="daily">☀️ Daily</button>
     <button class="tab" data-tab="ai">🤖 AI Assistant</button>
     <button class="tab" data-tab="calendar">📅 Calendar</button>
-    <button class="tab" data-tab="weekly">📆 Weekly</button>
     <button class="tab" data-tab="wallet">👛 Wallet</button>
     <button class="tab" data-tab="settings">⚙️ Settings</button>
   </nav>
@@ -152,30 +151,40 @@
   <!-- TAB: Calendar                                                 -->
   <!-- ══════════════════════════════════════════════════════════════ -->
   <section id="tab-calendar" class="tab-content">
+    <div class="calendar-view-switch" role="group" aria-label="Calendar view">
+      <button type="button" class="btn calendar-view-btn" data-calendar-view="year" onclick="setCalendarView('year')">Year</button>
+      <button type="button" class="btn calendar-view-btn active" data-calendar-view="month" onclick="setCalendarView('month')">Month</button>
+      <button type="button" class="btn calendar-view-btn" data-calendar-view="week" onclick="setCalendarView('week')">Week</button>
+      <button type="button" class="btn calendar-view-btn" data-calendar-view="day" onclick="setCalendarView('day')">Day</button>
+    </div>
     <div class="cal-nav">
       <button class="btn" onclick="calPrev()">◀</button>
+      <button class="btn" type="button" onclick="calToday()">Today</button>
+      <label class="calendar-date-jump">Go to <input id="calendar-date-picker" class="input" type="date" onchange="jumpToCalendarDate(this.value)"/></label>
       <span id="cal-title" class="cal-title"></span>
       <button class="btn" onclick="calNext()">▶</button>
+      <button class="btn" type="button" onclick="renderCalendarView()">↻ Refresh</button>
     </div>
-    <div id="calendar-grid" class="calendar-grid"></div>
-    <div class="calendar-mobile">
-      <div id="calendar-mobile-grid" class="calendar-mobile-grid" aria-label="Monthly calendar"></div>
-      <section id="calendar-day-details" class="calendar-day-details" aria-live="polite">
-        <h3 id="calendar-day-title"></h3>
-        <div id="calendar-day-tasks"></div>
-      </section>
+    <div id="calendar-time-range" class="calendar-time-range" hidden>
+      <span>Visible hours</span>
+      <label>From <select id="calendar-start-hour" class="input" onchange="updateCalendarTimeRange()"></select></label>
+      <label>To <select id="calendar-end-hour" class="input" onchange="updateCalendarTimeRange()"></select></label>
     </div>
-  </section>
-
-  <!-- ══════════════════════════════════════════════════════════════ -->
-  <!-- TAB: Weekly Schedule                                          -->
-  <!-- ══════════════════════════════════════════════════════════════ -->
-  <section id="tab-weekly" class="tab-content">
-    <div class="toolbar">
-      <button class="btn" onclick="loadWeekly()">↻ Refresh</button>
+    <div id="calendar-year-view" class="calendar-view-panel" hidden></div>
+    <div id="calendar-month-view" class="calendar-view-panel">
+      <div id="calendar-grid" class="calendar-grid"></div>
+      <div class="calendar-mobile">
+        <div id="calendar-mobile-grid" class="calendar-mobile-grid" aria-label="Monthly calendar"></div>
+        <section id="calendar-day-details" class="calendar-day-details" aria-live="polite">
+          <h3 id="calendar-day-title"></h3>
+          <div id="calendar-day-tasks"></div>
+        </section>
+      </div>
     </div>
-    <aside id="weekly-unscheduled" class="weekly-unscheduled" hidden></aside>
-    <div id="weekly-grid" class="weekly-grid"></div>
+    <div id="calendar-schedule-view" class="calendar-view-panel" hidden>
+      <aside id="weekly-unscheduled" class="weekly-unscheduled" hidden></aside>
+      <div id="weekly-grid" class="weekly-grid"></div>
+    </div>
   </section>
 
   <!-- ══════════════════════════════════════════════════════════════ -->
@@ -350,8 +359,12 @@
           </div>
         </div>
         <div class="form-group">
-          <label id="f-time-label">Due Time (24-hour HH:MM)</label>
+          <label id="f-time-label">Start Time (optional, 24-hour HH:MM)</label>
           <input id="f-time" class="input" type="text" placeholder="09:00" autocomplete="off"/>
+        </div>
+        <div class="form-group">
+          <label id="f-end-time-label">End Time (optional, 24-hour HH:MM)</label>
+          <input id="f-end-time" class="input" type="text" placeholder="10:00" autocomplete="off"/>
         </div>
       </div>
       <div class="form-group">
@@ -376,9 +389,9 @@
             <input id="f-reminder-email" class="input" type="email" placeholder="recipient@example.com" disabled/>
           </div>
           <div class="form-group">
-            <label>Send before due time</label>
+            <label>Send before start time</label>
             <select id="f-reminder-minutes" class="input">
-              <option value="0">At due time</option>
+              <option value="0">At start time</option>
               <option value="5">5 minutes before</option>
               <option value="15" selected>15 minutes before</option>
               <option value="30">30 minutes before</option>
@@ -411,8 +424,12 @@
         <input id="bulk-edit-date" class="input" type="date" disabled/>
       </div>
       <div class="bulk-edit-field">
-        <label class="setting-row"><input id="bulk-edit-time-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change due time</label>
-        <input id="bulk-edit-time" class="input" type="text" placeholder="Leave empty to remove the due time" disabled/>
+        <label class="setting-row"><input id="bulk-edit-time-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change start time</label>
+        <input id="bulk-edit-time" class="input" type="text" placeholder="Leave empty to remove the start time" disabled/>
+      </div>
+      <div class="bulk-edit-field">
+        <label class="setting-row"><input id="bulk-edit-end-time-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change end time</label>
+        <input id="bulk-edit-end-time" class="input" type="text" placeholder="Leave empty to remove the end time" disabled/>
       </div>
       <div class="bulk-edit-field">
         <label class="setting-row"><input id="bulk-edit-priority-enabled" type="checkbox" onchange="configureBulkEditInputs()"/> Change priority</label>
@@ -456,8 +473,8 @@
       </div>
       <div class="form-group">
         <label>Tasks (one per line)</label>
-        <textarea id="bulk-task-input" class="input bulk-task-input" rows="9" placeholder="Buy groceries tomorrow at 6 PM p2&#10;Submit expense report Friday at 3:30 PM&#10;Call the dentist next Monday&#10;Final presentation | 09-18-2026 | 14:00 | p1 | Bring printed slides"></textarea>
-        <small class="help-text">Use phrases such as <strong>today</strong>, <strong>tomorrow</strong>, <strong>Friday</strong>, or <strong>next Monday</strong>. For exact control: <code>Task | date | time | priority | notes</code>.</small>
+        <textarea id="bulk-task-input" class="input bulk-task-input" rows="9" placeholder="Buy groceries tomorrow at 6 PM p2&#10;Team workshop Friday from 3:30 PM to 5 PM&#10;Call the dentist next Monday&#10;Final presentation | 09-18-2026 | 14:00-15:30 | p1 | Bring printed slides"></textarea>
+        <small class="help-text">Use phrases such as <strong>today</strong>, <strong>tomorrow</strong>, <strong>Friday</strong>, or <strong>next Monday</strong>. For exact control: <code>Task | date | start-end | priority | notes</code>.</small>
       </div>
       <div id="bulk-task-error" class="login-error" style="display:none"></div>
       <div id="bulk-task-preview" class="bulk-task-preview">
@@ -593,6 +610,6 @@
       </iframe>
     </div>
   </div>
-  <script src="/static/app.js?v=20261007-wallet-v3"></script>
+  <script src="/static/app.js?v=20261012-unified-calendar-v1"></script>
 </body>
 </html>

@@ -34,10 +34,10 @@ class ToDoListManager:
     def create_todo_widgets(self):
         """Create the To Do List interface"""
         # Task list inside its frame with action columns
-        self.tree = ttk.Treeview(self.todo_frame, columns=("Task", "Due Date", "Due Time", "Priority", "Finish", "Edit", "Delete"), show="headings")
+        self.tree = ttk.Treeview(self.todo_frame, columns=("Task", "Due Date", "Time Range", "Priority", "Finish", "Edit", "Delete"), show="headings")
         
         # Configure main columns
-        for col, width in [("Task", 280), ("Due Date", 100), ("Due Time", 80), ("Priority", 70)]:
+        for col, width in [("Task", 280), ("Due Date", 100), ("Time Range", 145), ("Priority", 70)]:
             self.tree.heading(col, text=col, command=lambda c=col: self.sort_column(c, False))
             self.tree.column(col, width=width, minwidth=60, stretch=(col=="Task"))
         
@@ -210,12 +210,12 @@ class ToDoListManager:
             def date_time_key(x):
                 child = x[1]
                 date_str = self.tree.set(child, "Due Date")
-                time_str = self.tree.set(child, "Due Time")
+                time_str = self.tree.set(child, "Time Range")
                 date_val = datetime.strptime(date_str, "%m-%d-%Y")
                 # Parse time, use 23:59 for empty time so tasks without time sort last
                 if time_str and time_str != "--:--":
                     try:
-                        time_parts = self.parse_display_time_to_24h(time_str)
+                        time_parts = self.parse_display_time_to_24h(time_str.split(" - ", 1)[0])
                         if time_parts:
                             date_val = date_val.replace(hour=time_parts[0], minute=time_parts[1])
                         else:
@@ -226,13 +226,13 @@ class ToDoListManager:
                     date_val = date_val.replace(hour=23, minute=59)
                 return date_val
             tasks.sort(key=date_time_key, reverse=reverse)
-        elif column == "Due Time":
+        elif column == "Time Range":
             def time_key(x):
                 time_str = x[0]
                 if not time_str or time_str == "--:--":
                     return (1, 23, 59)  # Empty times sort last
                 try:
-                    time_parts = self.parse_display_time_to_24h(time_str)
+                    time_parts = self.parse_display_time_to_24h(time_str.split(" - ", 1)[0])
                     if time_parts:
                         return (0, time_parts[0], time_parts[1])
                 except:
@@ -278,6 +278,48 @@ class ToDoListManager:
         except:
             return None
 
+    def _parse_optional_time(self, hour_var, minute_var, ampm_var, use_24_hour, label):
+        """Read an optional time control and return normalized 24-hour HH:MM."""
+        hour_str = hour_var.get().strip()
+        minute_str = minute_var.get().strip()
+        if not hour_str and not minute_str:
+            return ""
+        if not hour_str or not minute_str:
+            raise ValueError(f"{label} needs both an hour and minutes.")
+
+        try:
+            hour = int(hour_str)
+            minute = int(minute_str)
+            if use_24_hour:
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    raise ValueError
+            else:
+                if not (1 <= hour <= 12 and 0 <= minute <= 59):
+                    raise ValueError
+                if ampm_var.get() == "PM" and hour != 12:
+                    hour += 12
+                elif ampm_var.get() == "AM" and hour == 12:
+                    hour = 0
+        except (TypeError, ValueError):
+            clock = "0-23" if use_24_hour else "1-12 with AM/PM"
+            raise ValueError(f"Invalid {label.lower()}. Use {clock} for the hour and 0-59 for minutes.")
+        return f"{hour:02d}:{minute:02d}"
+
+    def _time_control_defaults(self, value, use_24_hour):
+        """Convert a stored HH:MM value into values for the desktop time controls."""
+        if not value or ':' not in value:
+            return "", "", "AM"
+        try:
+            hour_text, minute = value.split(':', 1)
+            hour = int(hour_text)
+        except (TypeError, ValueError):
+            return "", "", "AM"
+        if use_24_hour:
+            return f"{hour:02d}", minute, "AM"
+        ampm = "PM" if hour >= 12 else "AM"
+        display_hour = hour % 12 or 12
+        return str(display_hour), minute, ampm
+
     def parse_date(self, raw_date):
         """Parse date string to mm-dd-yyyy format"""
         digits = re.sub(r"\D", "", raw_date)
@@ -303,7 +345,7 @@ class ToDoListManager:
             
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Add New Task")
-        fit_window(dialog, 520, 430, min_width=380, min_height=340)
+        fit_window(dialog, 540, 490, min_width=400, min_height=390)
         
         # Register this dialog globally
         self.parent_app.register_dialog(dialog)
@@ -320,7 +362,7 @@ class ToDoListManager:
                              borderwidth=2)
         date_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         
-        ttk.Label(dialog, text="Due Time:").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Start Time:").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
         time_frame = ttk.Frame(dialog)
         time_frame.grid(row=2, column=1, padx=5, pady=5, sticky="w")
         
@@ -348,14 +390,31 @@ class ToDoListManager:
             ampm_combo.pack(side=tk.LEFT)
         
         ttk.Label(time_frame, text=" (leave empty for no specific time)", foreground="gray").pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(dialog, text="End Time:").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
+        end_time_frame = ttk.Frame(dialog)
+        end_time_frame.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        end_hour_var = tk.StringVar(master=dialog, value="")
+        end_minute_var = tk.StringVar(master=dialog, value="")
+        end_ampm_var = tk.StringVar(master=dialog, value="AM")
+        if use_24_hour:
+            ttk.Spinbox(end_time_frame, from_=0, to=23, width=3, textvariable=end_hour_var, format="%02.0f").pack(side=tk.LEFT)
+        else:
+            ttk.Spinbox(end_time_frame, from_=1, to=12, width=3, textvariable=end_hour_var).pack(side=tk.LEFT)
+        ttk.Label(end_time_frame, text=":").pack(side=tk.LEFT)
+        ttk.Spinbox(end_time_frame, from_=0, to=59, width=3, textvariable=end_minute_var, format="%02.0f").pack(side=tk.LEFT)
+        if not use_24_hour:
+            ttk.Label(end_time_frame, text=" ").pack(side=tk.LEFT)
+            ttk.Combobox(end_time_frame, textvariable=end_ampm_var, values=["AM", "PM"], width=4, state="readonly").pack(side=tk.LEFT)
+        ttk.Label(end_time_frame, text=" (optional)", foreground="gray").pack(side=tk.LEFT, padx=5)
         
-        ttk.Label(dialog, text="Priority (1-5):").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Priority (1-5):").grid(row=4, column=0, padx=5, pady=5, sticky="nw")
         priority_entry = ttk.Spinbox(dialog, from_=1, to=5)
-        priority_entry.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        priority_entry.grid(row=4, column=1, padx=5, pady=5, sticky="w")
         
-        ttk.Label(dialog, text="Notes/Details:").grid(row=4, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Notes/Details:").grid(row=5, column=0, padx=5, pady=5, sticky="nw")
         notes_text = tk.Text(dialog, width=40, height=6, wrap=tk.WORD)
-        notes_text.grid(row=4, column=1, padx=5, pady=5)
+        notes_text.grid(row=5, column=1, padx=5, pady=5)
         
         def validate_and_add():
             date = self.parse_date(date_entry.get())
@@ -363,35 +422,16 @@ class ToDoListManager:
                 messagebox.showerror("Error", "Invalid date format")
                 return
             
-            # Parse time (optional)
-            due_time = ""
-            hour_str = hour_var.get().strip()
-            minute_str = minute_var.get().strip()
-            if hour_str or minute_str:
-                try:
-                    hour = int(hour_str) if hour_str else 0
-                    minute = int(minute_str) if minute_str else 0
-                    
-                    if use_24_hour:
-                        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                            raise ValueError
-                    else:
-                        # Convert 12-hour to 24-hour
-                        if not (1 <= hour <= 12 and 0 <= minute <= 59):
-                            raise ValueError
-                        ampm = ampm_var.get()
-                        if ampm == "PM" and hour != 12:
-                            hour += 12
-                        elif ampm == "AM" and hour == 12:
-                            hour = 0
-                    
-                    due_time = f"{hour:02d}:{minute:02d}"
-                except ValueError:
-                    if use_24_hour:
-                        messagebox.showerror("Error", "Invalid time format. Use 0-23 for hour and 0-59 for minute.")
-                    else:
-                        messagebox.showerror("Error", "Invalid time format. Use 1-12 for hour and 0-59 for minute.")
-                    return
+            try:
+                due_time = self._parse_optional_time(hour_var, minute_var, ampm_var, use_24_hour, "Start time")
+                end_time = self._parse_optional_time(end_hour_var, end_minute_var, end_ampm_var, use_24_hour, "End time")
+                if end_time and not due_time:
+                    raise ValueError("Choose a start time before adding an end time.")
+                if end_time and end_time <= due_time:
+                    raise ValueError("End time must be after the start time.")
+            except ValueError as error:
+                messagebox.showerror("Error", str(error))
+                return
             
             try:
                 priority = int(priority_entry.get())
@@ -402,12 +442,12 @@ class ToDoListManager:
                 return
             
             notes = notes_text.get("1.0", tk.END).strip()
-            self.add_task(task_entry.get(), date, due_time, priority, notes)
+            self.add_task(task_entry.get(), date, due_time, priority, notes, end_time=end_time)
             dialog.destroy()
 
-        ttk.Button(dialog, text="Add", command=validate_and_add).grid(row=5, columnspan=2, pady=10)
+        ttk.Button(dialog, text="Add", command=validate_and_add).grid(row=6, columnspan=2, pady=10)
 
-    def add_task(self, task, date, due_time, priority, notes="", check_duplicate=True):
+    def add_task(self, task, date, due_time, priority, notes="", check_duplicate=True, end_time=""):
         """Add a new task to the list"""
         tasks = self.load_tasks()
         # Ensure notes has a proper default value
@@ -431,7 +471,7 @@ class ToDoListManager:
                     return False
                 # If result == "create_new", just continue to add the task
         
-        tasks.append((task, date, due_time, priority, notes))
+        tasks.append((task, date, due_time, priority, notes, end_time))
         tasks = sorted(tasks, key=lambda x: self._task_sort_key(x))
         self.save_tasks(tasks)
         self.refresh_task_list()
@@ -1338,7 +1378,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         
         dialog = tk.Toplevel(self.parent_app.root)
         dialog.title("Edit Task")
-        fit_window(dialog, 520, 460, min_width=380, min_height=340)
+        fit_window(dialog, 540, 510, min_width=400, min_height=400)
         
         # Register this dialog globally
         self.parent_app.register_dialog(dialog)
@@ -1357,7 +1397,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         date_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         date_entry.set_date(datetime.strptime(task_found[1], "%m-%d-%Y"))
         
-        ttk.Label(dialog, text="Due Time:").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Start Time:").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
         time_frame = ttk.Frame(dialog)
         time_frame.grid(row=2, column=1, padx=5, pady=5, sticky="w")
         
@@ -1366,35 +1406,8 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         if hasattr(self.parent_app, 'use_24_hour'):
             use_24_hour = self.parent_app.use_24_hour.get()
         
-        # Parse existing time (stored in 24-hour format)
         existing_time = task_found[2] if len(task_found) > 2 else ""
-        existing_hour = ""
-        existing_minute = ""
-        existing_ampm = "AM"
-        if existing_time and ':' in existing_time:
-            try:
-                h, m = existing_time.split(':')
-                hour_24 = int(h)
-                existing_minute = m
-                
-                if use_24_hour:
-                    existing_hour = h
-                else:
-                    # Convert 24-hour to 12-hour for display
-                    if hour_24 == 0:
-                        existing_hour = "12"
-                        existing_ampm = "AM"
-                    elif hour_24 < 12:
-                        existing_hour = str(hour_24)
-                        existing_ampm = "AM"
-                    elif hour_24 == 12:
-                        existing_hour = "12"
-                        existing_ampm = "PM"
-                    else:
-                        existing_hour = str(hour_24 - 12)
-                        existing_ampm = "PM"
-            except:
-                pass
+        existing_hour, existing_minute, existing_ampm = self._time_control_defaults(existing_time, use_24_hour)
         
         hour_var = tk.StringVar(master=dialog, value=existing_hour)
         minute_var = tk.StringVar(master=dialog, value=existing_minute)
@@ -1422,16 +1435,41 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         
         clear_time_btn = ttk.Button(time_frame, text="Clear", width=5, command=clear_time)
         clear_time_btn.pack(side=tk.LEFT, padx=10)
+
+        existing_end = task_found[5] if len(task_found) > 5 else ""
+        end_hour, end_minute, end_ampm = self._time_control_defaults(existing_end, use_24_hour)
+        ttk.Label(dialog, text="End Time:").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
+        end_time_frame = ttk.Frame(dialog)
+        end_time_frame.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        end_hour_var = tk.StringVar(master=dialog, value=end_hour)
+        end_minute_var = tk.StringVar(master=dialog, value=end_minute)
+        end_ampm_var = tk.StringVar(master=dialog, value=end_ampm)
+        if use_24_hour:
+            ttk.Spinbox(end_time_frame, from_=0, to=23, width=3, textvariable=end_hour_var, format="%02.0f").pack(side=tk.LEFT)
+        else:
+            ttk.Spinbox(end_time_frame, from_=1, to=12, width=3, textvariable=end_hour_var).pack(side=tk.LEFT)
+        ttk.Label(end_time_frame, text=":").pack(side=tk.LEFT)
+        ttk.Spinbox(end_time_frame, from_=0, to=59, width=3, textvariable=end_minute_var, format="%02.0f").pack(side=tk.LEFT)
+        if not use_24_hour:
+            ttk.Label(end_time_frame, text=" ").pack(side=tk.LEFT)
+            ttk.Combobox(end_time_frame, textvariable=end_ampm_var, values=["AM", "PM"], width=4, state="readonly").pack(side=tk.LEFT)
+
+        def clear_end_time():
+            end_hour_var.set("")
+            end_minute_var.set("")
+            end_ampm_var.set("AM")
+
+        ttk.Button(end_time_frame, text="Clear", width=5, command=clear_end_time).pack(side=tk.LEFT, padx=10)
         
-        ttk.Label(dialog, text="Priority (1-5):").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Priority (1-5):").grid(row=4, column=0, padx=5, pady=5, sticky="nw")
         priority_entry = ttk.Spinbox(dialog, from_=1, to=5)
-        priority_entry.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        priority_entry.grid(row=4, column=1, padx=5, pady=5, sticky="w")
         priority_entry.delete(0, tk.END)
         priority_entry.insert(0, task_found[3])
         
-        ttk.Label(dialog, text="Notes/Details:").grid(row=4, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Notes/Details:").grid(row=5, column=0, padx=5, pady=5, sticky="nw")
         notes_text = tk.Text(dialog, width=40, height=6, wrap=tk.WORD)
-        notes_text.grid(row=4, column=1, padx=5, pady=5)
+        notes_text.grid(row=5, column=1, padx=5, pady=5)
         # Insert existing notes if available
         if len(task_found) > 4:
             notes_text.insert("1.0", task_found[4])
@@ -1442,35 +1480,16 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 messagebox.showerror("Error", "Invalid date format")
                 return
             
-            # Parse time (optional)
-            due_time = ""
-            hour_str = hour_var.get().strip()
-            minute_str = minute_var.get().strip()
-            if hour_str or minute_str:
-                try:
-                    hour = int(hour_str) if hour_str else 0
-                    minute = int(minute_str) if minute_str else 0
-                    
-                    if use_24_hour:
-                        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                            raise ValueError
-                    else:
-                        # Convert 12-hour to 24-hour
-                        if not (1 <= hour <= 12 and 0 <= minute <= 59):
-                            raise ValueError
-                        ampm = ampm_var.get()
-                        if ampm == "PM" and hour != 12:
-                            hour += 12
-                        elif ampm == "AM" and hour == 12:
-                            hour = 0
-                    
-                    due_time = f"{hour:02d}:{minute:02d}"
-                except ValueError:
-                    if use_24_hour:
-                        messagebox.showerror("Error", "Invalid time format. Use 0-23 for hour and 0-59 for minute.")
-                    else:
-                        messagebox.showerror("Error", "Invalid time format. Use 1-12 for hour and 0-59 for minute.")
-                    return
+            try:
+                due_time = self._parse_optional_time(hour_var, minute_var, ampm_var, use_24_hour, "Start time")
+                end_time = self._parse_optional_time(end_hour_var, end_minute_var, end_ampm_var, use_24_hour, "End time")
+                if end_time and not due_time:
+                    raise ValueError("Choose a start time before adding an end time.")
+                if end_time and end_time <= due_time:
+                    raise ValueError("End time must be after the start time.")
+            except ValueError as error:
+                messagebox.showerror("Error", str(error))
+                return
             
             try:
                 priority = int(priority_entry.get())
@@ -1481,7 +1500,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 return
             
             notes = notes_text.get("1.0", tk.END).strip()
-            updated_task = (task_entry.get(), date, due_time, priority, notes)
+            updated_task = (task_entry.get(), date, due_time, priority, notes, end_time)
             cvm_manager = getattr(self.parent_app, 'cvm_manager', None)
             if cvm_manager and updated_task != task_found:
                 # IDs are content-derived, so remove the old remote record and
@@ -1492,7 +1511,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             self.refresh_task_list()
             dialog.destroy()
             
-        ttk.Button(dialog, text="Save", command=validate_and_edit).grid(row=5, columnspan=2, pady=10)
+        ttk.Button(dialog, text="Save", command=validate_and_edit).grid(row=6, columnspan=2, pady=10)
 
     def delete_task(self):
         """Delete selected task without completing it"""
@@ -1622,22 +1641,29 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             except:
                 return "--:--"
 
+        def format_task_time_range(task):
+            start = format_display_time(task[2] if len(task) > 2 else "")
+            end_value = task[5] if len(task) > 5 else ""
+            if end_value:
+                return f"{start} - {format_display_time(end_value)}"
+            return start
+
         # Insert into Treeview with colors and action buttons
         for task in overdue_tasks:
-            time_display = format_display_time(task[2] if len(task) > 2 else "")
+            time_display = format_task_time_range(task)
             priority_val = task[3] if len(task) > 3 else task[2]
             display_values = (task[0], task[1], time_display, priority_val, "✓", "✎", "✗")
             item = self.tree.insert("", tk.END, values=display_values, tags=("overdue",), text=task[0])
             # Store the full task data (including notes) in our dictionary
             self.task_data[item] = task
         for task in today_tasks:
-            time_display = format_display_time(task[2] if len(task) > 2 else "")
+            time_display = format_task_time_range(task)
             priority_val = task[3] if len(task) > 3 else task[2]
             display_values = (task[0], task[1], time_display, priority_val, "✓", "✎", "✗")
             item = self.tree.insert("", tk.END, values=display_values, tags=("today",), text=task[0])
             self.task_data[item] = task
         for task in upcoming_tasks:
-            time_display = format_display_time(task[2] if len(task) > 2 else "")
+            time_display = format_task_time_range(task)
             priority_val = task[3] if len(task) > 3 else task[2]
             display_values = (task[0], task[1], time_display, priority_val, "✓", "✎", "✗")
             item = self.tree.insert("", tk.END, values=display_values, text=task[0])
@@ -1668,16 +1694,29 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                         task_name = parts[0]
                         due_date = parts[1]
                         
-                        # Check if this is old format (no time) or new format (with time)
-                        # Old format: task | date | priority | notes
-                        # New format: task | date | time | priority | notes
-                        
-                        # Try to detect format by checking if parts[2] looks like a time or priority
                         potential_time = parts[2].strip()
-                        
-                        if ':' in potential_time or potential_time == "":
-                            # New format with time
+
+                        # Current format: task | date | start | end | priority | notes.
+                        # Older four/five-field files remain readable and are upgraded on save.
+                        is_range_format = False
+                        if len(parts) >= 6 and (':' in potential_time or potential_time == ""):
+                            potential_end = parts[3].strip()
+                            if ':' in potential_end or potential_end == "":
+                                try:
+                                    int(parts[4].strip())
+                                    is_range_format = True
+                                except ValueError:
+                                    pass
+
+                        if is_range_format:
                             due_time = potential_time
+                            end_time = parts[3].strip()
+                            priority = parts[4].strip()
+                            notes = " | ".join(parts[5:]).strip() or "No notes"
+                        elif ':' in potential_time or potential_time == "":
+                            # Previous format with one time.
+                            due_time = potential_time
+                            end_time = ""
                             priority = parts[3].strip() if len(parts) > 3 else "5"
                             
                             # Validate priority is a number
@@ -1693,6 +1732,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                         else:
                             # Old format without time - parts[2] is priority
                             due_time = ""
+                            end_time = ""
                             priority = potential_time
                             
                             # Validate priority is a number
@@ -1708,7 +1748,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
 
                         notes = self._decode_notes_from_storage(notes)
                         
-                        tasks.append((task_name, due_date, due_time, priority, notes))
+                        tasks.append((task_name, due_date, due_time, priority, notes, end_time))
                     except ValueError as e:
                         # Skip malformed lines and show more detailed error info
                         print(f"Warning: Skipping malformed line: {line}")
@@ -1721,25 +1761,26 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         """Save tasks to file and sync with MySQL if enabled"""
         with open(self.TODO_FILE, "w") as f:
             for task in tasks:
-                # Ensure we have exactly 5 elements (task, date, time, priority, notes)
+                # Normalize legacy tuples to (task, date, start, priority, notes, end).
                 if len(task) == 3:
                     # Old format: (task, date, priority) -> add empty time and "No notes"
-                    task = (task[0], task[1], "", task[2], "No notes")
+                    task = (task[0], task[1], "", task[2], "No notes", "")
                 elif len(task) == 4:
                     # Could be old format (task, date, priority, notes) or partial new format
                     # Check if third element looks like a time
                     if ':' in str(task[2]) or task[2] == "":
                         # New format missing notes
-                        task = task + ("No notes",)
+                        task = task + ("No notes", "")
                     else:
                         # Old format (task, date, priority, notes) -> insert empty time
-                        task = (task[0], task[1], "", task[2], task[3])
-                elif len(task) > 5:
-                    # If somehow we have more than 5 elements, keep only first 5
-                    task = task[:5]
+                        task = (task[0], task[1], "", task[2], task[3], "")
+                elif len(task) == 5:
+                    task = task + ("",)
+                elif len(task) > 6:
+                    task = task[:6]
                 
                 # Convert all elements to strings
-                task_name, date, due_time, priority, notes = task
+                task_name, date, due_time, priority, notes, end_time = task
                 
                 # Handle empty notes - always ensure we have "No notes" if empty
                 if not notes or notes.strip() == "":
@@ -1751,8 +1792,8 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 if not due_time:
                     due_time = ""
                 
-                # Create the line with proper formatting (including time)
-                task_line = f"{task_name} | {date} | {due_time} | {priority} | {stored_notes}"
+                # Persist both boundaries while keeping legacy files readable.
+                task_line = f"{task_name} | {date} | {due_time} | {end_time or ''} | {priority} | {stored_notes}"
                 f.write(task_line + "\n")
     
         # Sync to MySQL if enabled and not skipping
