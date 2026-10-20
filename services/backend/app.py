@@ -2414,9 +2414,7 @@ def _validate_task_batch(tasks):
                 datetime.strptime(end_time, "%H:%M")
         except ValueError:
             return f"task at index {index} has an invalid start or end time"
-        if end_time and not due_time:
-            return f"task at index {index} needs a start time before its end time"
-        if end_time and end_time <= due_time:
+        if due_time and end_time and end_time <= due_time:
             return f"task at index {index} must end after it starts"
     return None
 

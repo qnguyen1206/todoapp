@@ -122,7 +122,8 @@ class DesktopSyncCompletionTests(unittest.TestCase):
     def test_time_range_survives_desktop_payload_and_remote_apply(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             task = ("Pairing", "09-16-2026", "13:00", "2", "Sync review", "14:30")
-            source = _TodoStore([task])
+            deadline = ("Submit report", "09-16-2026", "", "1", "End-only deadline", "17:00")
+            source = _TodoStore([task, deadline])
             destination = _TodoStore()
             manager = CVMManager.__new__(CVMManager)
             manager.parent_app = SimpleNamespace(root=_ImmediateRoot(), todo_list_manager=source)
@@ -132,10 +133,12 @@ class DesktopSyncCompletionTests(unittest.TestCase):
             payload = manager._local_todo_tasks_as_dicts()
             self.assertEqual(payload[0]["due_time"], "13:00")
             self.assertEqual(payload[0]["end_time"], "14:30")
+            self.assertEqual(payload[1]["due_time"], "")
+            self.assertEqual(payload[1]["end_time"], "17:00")
 
             manager.parent_app.todo_list_manager = destination
             manager._apply_remote_tasks(payload)
-            self.assertEqual(destination.saved, ([task], True))
+            self.assertEqual(destination.saved, ([task, deadline], True))
 
     def test_pre_end_time_id_map_still_resolves_web_task(self):
         with tempfile.TemporaryDirectory() as temp_dir:

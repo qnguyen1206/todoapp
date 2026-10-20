@@ -111,7 +111,7 @@ BUILTIN_TOOLS = [
                     "title": {"type": "string"},
                     "due_date": {"type": "string", "description": "Due date in MM-DD-YYYY format"},
                     "due_time": {"type": "string", "description": "Optional start time such as 03:30 PM"},
-                    "end_time": {"type": "string", "description": "Optional end time after the task start time, such as 05:00 PM"},
+                    "end_time": {"type": "string", "description": "Optional end time or deadline, such as 05:00 PM"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "notes": {"type": "string", "description": "Optional task notes supplied by the user"},
                     "reminder_email_enabled": {"type": "boolean"},
@@ -1207,9 +1207,7 @@ def _normalize_task_clock(value):
 def _normalize_task_time_range(due_time, end_time):
     start = _normalize_task_clock(due_time)
     end = _normalize_task_clock(end_time)
-    if end and not start:
-        raise ValueError("Enter a start time before the end time")
-    if end and end <= start:
+    if start and end and end <= start:
         raise ValueError("End time must be after start time")
     return start, end
 

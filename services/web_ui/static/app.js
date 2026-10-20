@@ -215,7 +215,11 @@ function configureTaskTimeInput() {
 
 function fmtTaskTimeRange(task) {
   const start = fmtTime(task?.due_time);
-  return task?.end_time ? `${start} – ${fmtTime(task.end_time)}` : start;
+  const end = fmtTime(task?.end_time);
+  if (start && end) return `${start} – ${end}`;
+  if (start) return start;
+  if (end) return `Ends ${end}`;
+  return '';
 }
 
 function isValidDueDate(value) {
@@ -889,7 +893,7 @@ function renderBulkTaskPreview() {
   }
   const invalidCount = tasks.filter(task => !task.valid).length;
   preview.innerHTML = `<table class="bulk-preview-table"><thead><tr><th>Line</th><th>Task</th><th>Date</th><th>Time</th><th>Priority</th><th>Check</th></tr></thead><tbody>${tasks.map(task => `
-    <tr class="${task.valid ? '' : 'invalid'}"><td>${task.line}</td><td>${escHtml(task.title || 'â€”')}</td><td>${escHtml(task.due_date || 'â€”')}</td><td>${escHtml(task.due_time ? fmtTaskTimeRange(task) : 'No time')}</td><td>${escHtml(task.priority)}</td><td>${task.valid ? 'Ready' : escHtml(task.error)}</td></tr>`).join('')}</tbody></table>`;
+    <tr class="${task.valid ? '' : 'invalid'}"><td>${task.line}</td><td>${escHtml(task.title || 'â€”')}</td><td>${escHtml(task.due_date || 'â€”')}</td><td>${escHtml((task.due_time || task.end_time) ? fmtTaskTimeRange(task) : 'No time')}</td><td>${escHtml(task.priority)}</td><td>${task.valid ? 'Ready' : escHtml(task.error)}</td></tr>`).join('')}</tbody></table>`;
   error.textContent = invalidCount ? `${invalidCount} ${invalidCount === 1 ? 'line needs' : 'lines need'} attention. Nothing will be saved until every line is valid.` : '';
   error.style.display = invalidCount ? 'block' : 'none';
   button.disabled = invalidCount > 0;
@@ -1028,11 +1032,7 @@ async function saveTask() {
     alert(use24Hour ? 'Enter end time as HH:MM (for example, 10:30 or 18:30).' : 'Enter end time as HH:MM AM/PM (for example, 10:30 AM or 6:30 PM).');
     return;
   }
-  if (end_time && !due_time) {
-    alert('Enter a start time before adding an end time.');
-    return;
-  }
-  if (end_time && end_time <= due_time) {
+  if (due_time && end_time && end_time <= due_time) {
     alert('End time must be after start time.');
     return;
   }
@@ -1949,7 +1949,7 @@ async function renderCalendar(token = calendarRenderToken) {
     const isToday = today.getFullYear() === calYear && today.getMonth()+1 === calMonth && today.getDate() === day;
     const tasks = byDay[String(day)] ?? [];
     const dots  = tasks.map(t => {
-      const time = t.due_time ? `${fmtTaskTimeRange(t)} ` : '';
+      const time = (t.due_time || t.end_time) ? `${fmtTaskTimeRange(t)} ` : '';
       const marker = t.type === 'daily' ? '&#8635; ' : '';
       return `<div class="cal-dot ${t.color||'normal'}" title="${escHtml(t.title)}">${marker}${escHtml(time + t.title)}</div>`;
     }).join('');
@@ -1997,8 +1997,7 @@ function renderCalendarDayDetails() {
   }
 
   container.innerHTML = tasks.map(task => {
-    const start = task.due_time ? fmtTime(task.due_time) : 'No time';
-    const time = task.end_time ? `${start} – ${fmtTime(task.end_time)}` : start;
+    const time = fmtTaskTimeRange(task) || 'No time';
     const kind = task.type === 'daily' ? 'Daily' : 'To-do';
     return `<article class="calendar-day-task ${task.color || 'normal'}" title="${escHtml(task.title)}">
       <div class="calendar-day-task-main">
@@ -2139,15 +2138,18 @@ async function loadCalendarSchedule(scrollToCurrentTime = true, token = calendar
     unscheduled.hidden = false;
     unscheduled.innerHTML = `
       <div class="weekly-unscheduled-heading">
-        <strong>No due time</strong>
-        <span>${dateOnlyCount} date-only ${dateOnlyCount === 1 ? 'task' : 'tasks'}</span>
+        <strong>No start time</strong>
+        <span>${dateOnlyCount} unscheduled ${dateOnlyCount === 1 ? 'task' : 'tasks'}</span>
       </div>
       <div class="weekly-unscheduled-days">
         ${dateOnlyGroups.map(group => `
           <section class="weekly-unscheduled-day">
             <strong>${escHtml(group.day)}</strong>
             <div class="weekly-unscheduled-tasks">
-              ${group.tasks.map(task => `<span class="weekly-all-day-task ${task.color || 'normal'}" title="${escHtml(task.title)}">${escHtml(task.title)}</span>`).join('')}
+              ${group.tasks.map(task => {
+                const deadline = task.end_time ? ` (${fmtTaskTimeRange(task)})` : '';
+                return `<span class="weekly-all-day-task ${task.color || 'normal'}" title="${escHtml(task.title)}">${escHtml(task.title + deadline)}</span>`;
+              }).join('')}
             </div>
           </section>
         `).join('')}

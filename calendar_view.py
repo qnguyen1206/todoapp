@@ -70,6 +70,18 @@ class CalendarView:
                 return f"{hour:02d}:{minute:02d}"
         except:
             return time_str
+
+    def format_task_time_range(self, start_time, end_time):
+        """Format a start/end range or either optional time on its own."""
+        start = self.format_time(start_time)
+        end = self.format_time(end_time)
+        if start and end:
+            return f"{start} - {end}"
+        if start:
+            return start
+        if end:
+            return f"Ends {end}"
+        return ""
         
     def create_calendar_widgets(self):
         """Create the calendar view interface"""
@@ -696,9 +708,8 @@ class CalendarView:
                 due_time = task[2] if len(task) > 2 else ""
                 end_time = task[5] if len(task) > 5 else ""
                 priority = task[3] if len(task) > 3 else task[2]  # Handle old format
-                time_display = f" @ {self.format_time(due_time)}" if due_time else ""
-                if end_time:
-                    time_display += f" - {self.format_time(end_time)}"
+                time_range = self.format_task_time_range(due_time, end_time)
+                time_display = f" @ {time_range}" if time_range else ""
                 display = f"[P{priority}]{time_display} {task_name}"
                 self.task_listbox.insert(tk.END, display)
                 self.current_day_tasks.append(task)
@@ -819,9 +830,8 @@ class CalendarView:
                 name_label.pack(fill=tk.X)
                 
                 # Due time and Priority on same line
-                time_display = f"Time: {self.format_time(due_time)}" if due_time else ""
-                if end_time:
-                    time_display += f" - {self.format_time(end_time)}"
+                time_range = self.format_task_time_range(due_time, end_time)
+                time_display = f"Time: {time_range}" if time_range else ""
                 if time_display:
                     time_display += " | "
                 info_label = tk.Label(content_frame, text=f"{time_display}Priority: {priority}", 
@@ -892,10 +902,8 @@ class CalendarView:
             info_frame.pack(fill=tk.X, padx=10, pady=5)
             
             ttk.Label(info_frame, text=f"Due Date: {due_date}", font=('Helvetica', 10)).pack(anchor='w')
-            if due_time:
-                time_range = self.format_time(due_time)
-                if end_time:
-                    time_range += f" - {self.format_time(end_time)}"
+            time_range = self.format_task_time_range(due_time, end_time)
+            if time_range:
                 ttk.Label(info_frame, text=f"Time: {time_range}", font=('Helvetica', 10)).pack(anchor='w')
             ttk.Label(info_frame, text=f"Priority: {priority}", font=('Helvetica', 10)).pack(anchor='w')
             

@@ -13,7 +13,7 @@ class WeeklyUIContractTests(unittest.TestCase):
 
         self.assertIn('id="weekly-unscheduled"', template)
         self.assertIn("filter(task => !normalizeDueTime(task.due_time))", javascript)
-        self.assertIn("No due time", javascript)
+        self.assertIn("No start time", javascript)
         self.assertIn("max-height: 76px", css)
         self.assertIn("grid.style.gridTemplateRows = `54px repeat(${visibleSlotCount}, 24px)`", javascript)
 
@@ -41,13 +41,17 @@ class WeeklyUIContractTests(unittest.TestCase):
         self.assertIn('id="f-end-time"', template)
         self.assertIn("fmtTaskTimeRange(t)", javascript)
         self.assertIn("End time must be after start time", javascript)
+        self.assertNotIn("Enter a start time before adding an end time", javascript)
+        self.assertIn("if (due_time && end_time && end_time <= due_time)", javascript)
+        self.assertIn("if start and end and end <= start", web_app)
+        self.assertNotIn("needs a start time before its end time", backend)
         self.assertIn('"end_time": end_time', web_app)
         self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS end_time TEXT", backend)
         self.assertIn("t.due_time, t.end_time", backend)
         self.assertIn('if "end_time" in task', backend)
         self.assertIn('else "end_time = tasks.end_time"', backend)
         self.assertIn('end_time_supplied = "end_time" in data', web_app)
-        self.assertIn("app.js?v=20261012-unified-calendar-v1", template)
+        self.assertIn("app.js?v=20261019-independent-task-times-v1", template)
 
     def test_calendar_combines_year_month_week_and_day_views(self):
         template = (ROOT / "services" / "web_ui" / "templates" / "index.html").read_text(encoding="utf-8")

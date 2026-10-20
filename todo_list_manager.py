@@ -305,6 +305,16 @@ class ToDoListManager:
             raise ValueError(f"Invalid {label.lower()}. Use {clock} for the hour and 0-59 for minutes.")
         return f"{hour:02d}:{minute:02d}"
 
+    @staticmethod
+    def _validate_task_time_range(start_time, end_time):
+        """Validate two independent optional task times.
+
+        An end-only task is a deadline, while two supplied times describe a
+        range and must remain in chronological order.
+        """
+        if start_time and end_time and end_time <= start_time:
+            raise ValueError("End time must be after the start time.")
+
     def _time_control_defaults(self, value, use_24_hour):
         """Convert a stored HH:MM value into values for the desktop time controls."""
         if not value or ':' not in value:
@@ -362,7 +372,7 @@ class ToDoListManager:
                              borderwidth=2)
         date_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         
-        ttk.Label(dialog, text="Start Time:").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Start Time (optional):").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
         time_frame = ttk.Frame(dialog)
         time_frame.grid(row=2, column=1, padx=5, pady=5, sticky="w")
         
@@ -391,7 +401,7 @@ class ToDoListManager:
         
         ttk.Label(time_frame, text=" (leave empty for no specific time)", foreground="gray").pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(dialog, text="End Time:").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="End Time (optional):").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
         end_time_frame = ttk.Frame(dialog)
         end_time_frame.grid(row=3, column=1, padx=5, pady=5, sticky="w")
         end_hour_var = tk.StringVar(master=dialog, value="")
@@ -425,10 +435,7 @@ class ToDoListManager:
             try:
                 due_time = self._parse_optional_time(hour_var, minute_var, ampm_var, use_24_hour, "Start time")
                 end_time = self._parse_optional_time(end_hour_var, end_minute_var, end_ampm_var, use_24_hour, "End time")
-                if end_time and not due_time:
-                    raise ValueError("Choose a start time before adding an end time.")
-                if end_time and end_time <= due_time:
-                    raise ValueError("End time must be after the start time.")
+                self._validate_task_time_range(due_time, end_time)
             except ValueError as error:
                 messagebox.showerror("Error", str(error))
                 return
@@ -487,10 +494,18 @@ class ToDoListManager:
     
     def show_duplicate_dialog(self, new_task_name, existing_task):
         """Show dialog when a duplicate task is found. Returns 'overwrite', 'create_new', or 'skip'."""
-        existing_name, existing_date, existing_time, existing_priority, existing_notes = existing_task
+        existing_name, existing_date, existing_time, existing_priority, existing_notes = existing_task[:5]
+        existing_end = existing_task[5] if len(existing_task) > 5 else ""
         
         # Format existing task info for display
-        time_display = f" at {existing_time}" if existing_time else ""
+        if existing_time and existing_end:
+            time_display = f" from {existing_time} to {existing_end}"
+        elif existing_time:
+            time_display = f" at {existing_time}"
+        elif existing_end:
+            time_display = f" ending at {existing_end}"
+        else:
+            time_display = ""
         existing_info = f"'{existing_name}'\nDue: {existing_date}{time_display}\nPriority: {existing_priority}"
         
         message = f"A task with the same name already exists:\n\n{existing_info}\n\nWhat would you like to do?"
@@ -598,6 +613,8 @@ class ToDoListManager:
         """Generate sort key for a task (date, time, inverse priority)"""
         date_str = task[1]
         time_str = task[2] if len(task) > 2 else ""
+        if not time_str and len(task) > 5:
+            time_str = task[5]
         priority = task[3] if len(task) > 3 else task[2]  # Handle old format
         
         date_val = datetime.strptime(date_str, "%m-%d-%Y")
@@ -1397,7 +1414,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
         date_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         date_entry.set_date(datetime.strptime(task_found[1], "%m-%d-%Y"))
         
-        ttk.Label(dialog, text="Start Time:").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="Start Time (optional):").grid(row=2, column=0, padx=5, pady=5, sticky="nw")
         time_frame = ttk.Frame(dialog)
         time_frame.grid(row=2, column=1, padx=5, pady=5, sticky="w")
         
@@ -1438,7 +1455,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
 
         existing_end = task_found[5] if len(task_found) > 5 else ""
         end_hour, end_minute, end_ampm = self._time_control_defaults(existing_end, use_24_hour)
-        ttk.Label(dialog, text="End Time:").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
+        ttk.Label(dialog, text="End Time (optional):").grid(row=3, column=0, padx=5, pady=5, sticky="nw")
         end_time_frame = ttk.Frame(dialog)
         end_time_frame.grid(row=3, column=1, padx=5, pady=5, sticky="w")
         end_hour_var = tk.StringVar(master=dialog, value=end_hour)
@@ -1483,10 +1500,7 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             try:
                 due_time = self._parse_optional_time(hour_var, minute_var, ampm_var, use_24_hour, "Start time")
                 end_time = self._parse_optional_time(end_hour_var, end_minute_var, end_ampm_var, use_24_hour, "End time")
-                if end_time and not due_time:
-                    raise ValueError("Choose a start time before adding an end time.")
-                if end_time and end_time <= due_time:
-                    raise ValueError("End time must be after the start time.")
+                self._validate_task_time_range(due_time, end_time)
             except ValueError as error:
                 messagebox.showerror("Error", str(error))
                 return
@@ -1590,6 +1604,8 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
             task_name = task[0]
             due_date_str = task[1]
             due_time_str = task[2] if len(task) > 2 else ""
+            if not due_time_str and len(task) > 5:
+                due_time_str = task[5]
             priority = task[3] if len(task) > 3 else task[2]  # Handle old format
             due_date = datetime.strptime(due_date_str, "%m-%d-%Y").date()
             
@@ -1642,11 +1658,17 @@ Keywords: urgent/critical (=1), high/important (=2), medium/normal (=3), low/min
                 return "--:--"
 
         def format_task_time_range(task):
-            start = format_display_time(task[2] if len(task) > 2 else "")
+            start_value = task[2] if len(task) > 2 else ""
             end_value = task[5] if len(task) > 5 else ""
-            if end_value:
-                return f"{start} - {format_display_time(end_value)}"
-            return start
+            start = format_display_time(start_value) if start_value else ""
+            end = format_display_time(end_value) if end_value else ""
+            if start and end:
+                return f"{start} - {end}"
+            if start:
+                return start
+            if end:
+                return f"Ends {end}"
+            return "--:--"
 
         # Insert into Treeview with colors and action buttons
         for task in overdue_tasks:

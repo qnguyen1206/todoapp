@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+from calendar_view import CalendarView
 from todo_list_manager import ToDoListManager
 
 
@@ -43,6 +44,16 @@ class DesktopCalendarContractTests(unittest.TestCase):
             manager.save_tasks([task], skip_mysql=True)
 
             self.assertEqual(manager.load_tasks(), [task])
+
+    def test_regular_task_times_are_independently_optional(self):
+        ToDoListManager._validate_task_time_range("", "17:00")
+        ToDoListManager._validate_task_time_range("09:00", "")
+        with self.assertRaisesRegex(ValueError, "after the start time"):
+            ToDoListManager._validate_task_time_range("17:00", "09:00")
+
+        calendar = CalendarView.__new__(CalendarView)
+        calendar.parent_app = SimpleNamespace(use_24_hour=SimpleNamespace(get=lambda: True))
+        self.assertEqual(calendar.format_task_time_range("", "17:00"), "Ends 17:00")
 
 
 if __name__ == "__main__":
