@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import inspect
 from pathlib import Path
 from unittest import mock
 
@@ -80,6 +81,22 @@ class DesktopPackagingTests(unittest.TestCase):
         with mock.patch.object(sys, "platform", "win32"):
             selected = updater.select_platform_asset(assets)
             self.assertEqual(selected["name"], "TODO-App-Windows-x64.zip")
+
+        with mock.patch.object(sys, "platform", "linux"):
+            selected = updater.select_platform_asset(assets)
+            self.assertEqual(selected["name"], "TODO-App-Linux-x64.tar.gz")
+
+    def test_all_frozen_desktop_platforms_use_the_automatic_update_prompt(self):
+        source = inspect.getsource(ModularUpdater.check_for_updates)
+        self.assertIn("if platform_asset:", source)
+        self.assertNotIn("prompt_manual_platform_update", source)
+        self.assertIn("self.run_on_ui_thread", source)
+
+        worker = ModularUpdater.posix_update_script()
+        self.assertIn('/usr/bin/ditto -x -k "$PackagePath"', worker)
+        self.assertIn('tar -xzf "$PackagePath"', worker)
+        self.assertIn('open "$TargetPath"', worker)
+        self.assertIn('"$TargetPath" >/dev/null 2>&1 &', worker)
 
 
 if __name__ == "__main__":

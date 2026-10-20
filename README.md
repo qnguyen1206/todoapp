@@ -119,8 +119,10 @@ If you have Ollama:
 - Enable MySQL Sharing to start using LAN features
   - If there are errors pop up, it is because the app was checking for first time run and creating files that is needed for the app to run properly.
 
-- The app checks for updates. Windows can update in place; macOS and Linux open the
-  release page so the user can replace the app with the correct native package.
+- Packaged apps check the latest stable GitHub Release at startup. Windows, macOS,
+  and Linux select their matching native package, install it in place, and restart
+  automatically after the user approves the update. The installation folder must be
+  writable by the current user.
 
 **CREATING A RELEASE:**
 

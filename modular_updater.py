@@ -10,7 +10,7 @@ import hashlib
 import importlib
 import uuid
 import platform
-import webbrowser
+import threading
 from ui_utils import fit_window
 
 class ModularUpdater:
@@ -165,15 +165,11 @@ class ModularUpdater:
                     # first zip attached to the release.
                     if self.is_executable_mode:
                         platform_asset = self.select_platform_asset(latest_release["assets"])
-                        if platform_asset and sys.platform == "win32":
-                            self.prompt_full_update(
+                        if platform_asset:
+                            self.run_on_ui_thread(
+                                self.prompt_full_update,
                                 latest_version,
                                 platform_asset["browser_download_url"]
-                            )
-                        elif platform_asset:
-                            self.prompt_manual_platform_update(
-                                latest_version,
-                                latest_release.get("html_url", "https://github.com/Kairu1206/todoapp/releases/latest")
                             )
                         else:
                             print(f"No release package found for {sys.platform}/{platform.machine()}")
@@ -226,19 +222,6 @@ class ModularUpdater:
                     return asset
         return None
 
-    def prompt_manual_platform_update(self, new_version, release_url):
-        """Direct macOS/Linux users to their native package without mutating an app in use."""
-        system_name = "macOS" if sys.platform == "darwin" else "Linux"
-        should_open = messagebox.askyesno(
-            "Update Available",
-            f"TODO App {new_version} is available for {system_name}.\n\n"
-            "The release page will show the correct package for this computer. "
-            "Download it, close TODO App, and replace the old copy.\n\n"
-            "Open the release page now?"
-        )
-        if should_open:
-            webbrowser.open(release_url)
-    
     def check_modular_updates(self, manifest_url, download_assets, new_version):
         """Check which modules need updating based on manifest"""
         # Skip modular updates if running as executable (source code not available)
@@ -500,15 +483,18 @@ class ModularUpdater:
     
     def prompt_full_update(self, new_version, download_url):
         """Fallback to full update if modular update not available"""
-        root = tk.Tk()
-        root.withdraw()
+        root = tk._default_root
+        owns_root = root is None
+        if owns_root:
+            root = tk.Tk()
+            root.withdraw()
         
-        # In executable mode, provide a more user-friendly message
+        # Native packages can replace themselves after the current process exits.
         if self.is_executable_mode:
             message = (f"TODO App version {new_version} is available!\n\n"
                       f"Current version: {self.current_version}\n"
                       f"New version: {new_version}\n\n"
-                      f"The update will download and install automatically.\n"
+                      f"The update will download, install, and restart automatically.\n"
                       f"Your data and settings will be preserved.\n\n"
                       f"Update now?")
         else:
@@ -517,39 +503,180 @@ class ModularUpdater:
         if messagebox.askyesno("Update Available", message):
             self.download_and_install_full(download_url, new_version)
         
-        root.destroy()
+        if owns_root:
+            root.destroy()
+
+    def run_on_ui_thread(self, callback, *args):
+        """Dispatch update prompts to Tk's main thread after background checks."""
+        root = tk._default_root
+        if root is not None and threading.current_thread() is not threading.main_thread():
+            root.after(0, lambda: callback(*args))
+            return
+        callback(*args)
     
     def download_and_install_full(self, url, new_version):
         """Full update fallback (original method)"""
-        if sys.platform != "win32" and self.is_executable_mode:
-            messagebox.showinfo(
-                "Manual Update Required",
-                "Automatic in-place updates are currently supported on Windows only. "
-                "Please install the native package from the GitHub release page."
-            )
-            return
         try:
-            response = requests.get(url, stream=True)
+            response = requests.get(url, stream=True, timeout=120)
             if response.status_code == 200:
-                is_zip = url.lower().endswith('.zip')
-                work_dir = self.app_dir / ".update_tmp" / uuid.uuid4().hex
+                package_url = url.lower().split("?", 1)[0]
+                is_zip = package_url.endswith('.zip')
+                is_tar_gz = package_url.endswith('.tar.gz')
+                update_root = self.app_dir if sys.platform == "win32" else self.legacy_app_dir
+                work_dir = update_root / ".update_tmp" / uuid.uuid4().hex
                 work_dir.mkdir(parents=True, exist_ok=True)
-                temp_file = work_dir / ("package.zip" if is_zip else "package.exe")
+                if is_zip:
+                    package_name = "package.zip"
+                elif is_tar_gz:
+                    package_name = "package.tar.gz"
+                else:
+                    package_name = "package.exe"
+                temp_file = work_dir / package_name
                 
                 with open(temp_file, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
                 
                 if self.is_executable_mode:
-                    self.launch_windows_inplace_update_worker(temp_file, work_dir, new_version)
+                    if sys.platform == "win32":
+                        self.launch_windows_inplace_update_worker(temp_file, work_dir, new_version)
+                    elif sys.platform in {"darwin", "linux"}:
+                        self.launch_posix_inplace_update_worker(temp_file, work_dir, new_version)
+                    else:
+                        raise RuntimeError(f"Automatic updates are not supported on {sys.platform}")
                 else:
                     self.apply_full_update_source_mode(temp_file, is_zip, new_version)
                 
                 messagebox.showinfo("Update", "Update downloaded. The application will restart.")
-                sys.exit()
+                if self.is_executable_mode:
+                    self.exit_for_update()
+                else:
+                    self.restart_application()
+            else:
+                raise RuntimeError(f"GitHub returned HTTP {response.status_code} while downloading the update")
                 
         except Exception as e:
             messagebox.showerror("Update Failed", f"Failed to update: {str(e)}")
+
+    def exit_for_update(self):
+        """Terminate the frozen app so the external worker can replace it."""
+        os._exit(0)
+
+    def macos_bundle_path(self):
+        """Return the enclosing .app bundle for a frozen macOS executable."""
+        executable = Path(sys.executable).resolve()
+        for parent in executable.parents:
+            if parent.suffix.lower() == ".app":
+                return parent
+        return None
+
+    @staticmethod
+    def posix_update_script():
+        """Shell worker used after the macOS/Linux application exits."""
+        return r'''#!/bin/sh
+set -eu
+
+Mode="$1"
+PackagePath="$2"
+WorkDir="$3"
+TargetPath="$4"
+VersionFile="$5"
+NewVersion="$6"
+ParentPid="$7"
+ExtractDir="$WorkDir/extracted"
+BackupPath="$TargetPath.update-backup"
+
+while kill -0 "$ParentPid" 2>/dev/null; do
+    sleep 1
+done
+
+rm -rf "$ExtractDir" "$BackupPath"
+mkdir -p "$ExtractDir"
+
+if [ "$Mode" = "macos" ]; then
+    /usr/bin/ditto -x -k "$PackagePath" "$ExtractDir"
+    NewPayload=$(find "$ExtractDir" -maxdepth 2 -type d -name '*.app' -print -quit)
+else
+    tar -xzf "$PackagePath" -C "$ExtractDir"
+    NewPayload="$ExtractDir/todo"
+fi
+
+if [ ! -e "$NewPayload" ]; then
+    echo "Update package did not contain the expected application payload." >&2
+    exit 1
+fi
+
+if [ "$Mode" = "macos" ]; then
+    mv "$TargetPath" "$BackupPath"
+    if ! mv "$NewPayload" "$TargetPath"; then
+        mv "$BackupPath" "$TargetPath"
+        exit 1
+    fi
+else
+    cp "$NewPayload" "$TargetPath.new"
+    chmod +x "$TargetPath.new"
+    mv "$TargetPath" "$BackupPath"
+    if ! mv "$TargetPath.new" "$TargetPath"; then
+        mv "$BackupPath" "$TargetPath"
+        exit 1
+    fi
+fi
+
+printf '%s' "$NewVersion" > "$VersionFile"
+rm -rf "$BackupPath"
+
+if [ "$Mode" = "macos" ]; then
+    open "$TargetPath"
+else
+    "$TargetPath" >/dev/null 2>&1 &
+fi
+
+rm -rf "$WorkDir"
+'''
+
+    def launch_posix_inplace_update_worker(self, package_path, work_dir, new_version):
+        """Launch a detached updater for the frozen macOS app or Linux binary."""
+        if sys.platform == "darwin":
+            target_path = self.macos_bundle_path()
+            mode = "macos"
+            if target_path is None:
+                raise RuntimeError("Could not locate the installed TODO App bundle")
+        elif sys.platform == "linux":
+            target_path = Path(sys.executable).resolve()
+            mode = "linux"
+        else:
+            raise RuntimeError(f"POSIX update worker cannot run on {sys.platform}")
+
+        if not os.access(target_path.parent, os.W_OK):
+            raise PermissionError(
+                f"TODO App cannot update {target_path}. Move it to a user-writable folder and try again."
+            )
+
+        script_path = work_dir / "apply_update.sh"
+        log_path = work_dir / "update.log"
+        script_path.write_text(self.posix_update_script(), encoding="utf-8", newline="\n")
+        script_path.chmod(0o700)
+        Path(self.version_file).parent.mkdir(parents=True, exist_ok=True)
+
+        with open(log_path, "ab", buffering=0) as log_file:
+            subprocess.Popen(
+                [
+                    "/bin/sh",
+                    str(script_path),
+                    mode,
+                    str(package_path),
+                    str(work_dir),
+                    str(target_path),
+                    str(self.version_file),
+                    str(new_version),
+                    str(os.getpid()),
+                ],
+                cwd=str(work_dir),
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                start_new_session=True,
+            )
 
     def launch_windows_inplace_update_worker(self, package_path, work_dir, new_version):
         """Run update worker in a separate PowerShell process so the current exe can exit."""
